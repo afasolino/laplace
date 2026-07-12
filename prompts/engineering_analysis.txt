@@ -1,0 +1,1 @@
+Interpret only the deterministic JSON records. Report observed facts, earliest actionable error, interpretation, and bounded proposed diagnostics. Never execute suggested commands.

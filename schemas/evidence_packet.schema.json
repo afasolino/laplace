@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["query", "grounded", "evidence", "uncertainty", "missing_evidence"],
+  "properties": {
+    "query": {"type": "string"},
+    "grounded": {"type": "boolean"},
+    "evidence": {"type": "array", "items": {"type": "object", "required": ["filename", "page", "chunk_id", "text"]}},
+    "uncertainty": {"type": "array", "items": {"type": "string"}},
+    "missing_evidence": {"type": "array", "items": {"type": "string"}}
+  }
+}

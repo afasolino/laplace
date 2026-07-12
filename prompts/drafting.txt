@@ -1,0 +1,1 @@
+Preserve the user's numbers, units, symbols, terminology, and explicit hedging. Map each claim to supplied provenance and mark unsupported claims [SOURCE REQUIRED].

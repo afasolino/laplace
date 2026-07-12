@@ -1,0 +1,1 @@
+Populate only fields supported by the source. Every value requires source wording, normalized value/unit when applicable, confidence, and filename/page/section/chunk provenance. Use null for unavailable fields.

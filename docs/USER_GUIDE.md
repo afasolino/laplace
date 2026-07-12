@@ -1,0 +1,3 @@
+# User guide
+
+Use `laplace --doctor` for local runtime status, `laplace --init .` to create a project, `laplace --ingest MyWorks` for incremental shared-library ingestion, and `laplace --search` or `laplace --ask` for grounded work. `laplace --start` serves the local FastAPI/UI on `127.0.0.1:8000`; `laplace --stop` terminates only its recorded PID. Every grounded packet contains filename, page, section, and chunk ID; zero evidence is never labelled grounded. The reproducible low-level path remains `research-workspace probe`, `research-workspace ingest path.pdf --class external_literature`, and `POST /search`.

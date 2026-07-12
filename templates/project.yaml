@@ -1,0 +1,22 @@
+project:
+  name: CHANGE_ME
+  shared_library_root: C:/Users/andre/OneDrive/Desktop/dottorato/FormalScience/Library
+library:
+  selected: [MyWorks]
+  reference_only: true
+models:
+  main_text: qwen3:4b
+  embedding: qwen3-embedding:0.6b
+retrieval:
+  require_page_grounding: true
+online:
+  enabled: true
+  providers: [crossref, openalex, arxiv, ieee]
+  offline: false
+ieee_acquisition:
+  api_key_env: IEEE_XPLORE_API_KEY
+  default_batch_size: 1
+  approval_required: true
+security:
+  localhost_only: true
+  no_credential_storage: true

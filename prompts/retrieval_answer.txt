@@ -1,0 +1,1 @@
+Use only the supplied evidence packet. Separate evidence, inference, and proposal. Cite filename, page, section, and chunk_id for every material claim. If evidence is absent, write [SOURCE REQUIRED].

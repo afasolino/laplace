@@ -1,0 +1,104 @@
+project:
+  name: local-research-workspace
+  local_only: true
+  primary_os: windows
+  linux_compatibility: true
+
+hardware:
+  nvidia_gpu:
+    required: true
+    vram_gib: 8
+    preferred_role: main_text_generation
+    max_vram_utilization_fraction: 0.90
+  amd_npu:
+    available: true
+    nominal_tops: 50
+    required_for_baseline: false
+    preferred_roles:
+      - embeddings
+      - classification
+      - reranking
+      - low_power_background_tasks
+  cpu:
+    roles:
+      - pdf_parsing
+      - vector_database
+      - deterministic_analysis
+      - orchestration
+
+runtime:
+  preferred_llm_server: ollama
+  alternatives:
+    - llama_cpp_python
+    - lm_studio_openai_api
+  bind_host: 127.0.0.1
+  default_context_tokens: 8192
+  default_concurrency: 1
+  keep_model_loaded: true
+
+models:
+  main_text:
+    target_class: 4B instruct model
+    preferred_family: qwen3:4b
+    quantization_target: Q4_K_M or equivalent 4-bit quantization
+    fallback_families:
+      - Gemma-3-4B-IT
+      - Phi-4-mini-instruct
+    selection_policy: benchmark locally and record exact model identifier, licence, size, VRAM, TTFT, output token/s, and quality checks
+  embeddings:
+    preferred_family: qwen3-embedding:0.6b
+    fallback_policy: choose a multilingual local embedding model supported by the selected runtime
+  reranker:
+    enabled_by_default: false
+    preferred_family: Qwen3-Reranker-0.6B
+  vision:
+    enabled_by_default: false
+    target_class: 3B-4B vision-language model
+    loading_policy: load on demand; never assume simultaneous residency with the main text model
+
+storage:
+  source_documents: data/documents
+  parsed_documents: data/parsed
+  vector_store: data/qdrant
+  metadata_database: data/sqlite/workspace.db
+  cache: data/cache
+  outputs: outputs
+  logs: logs
+
+retrieval:
+  chunk_tokens: 650
+  overlap_tokens: 100
+  initial_candidates: 12
+  final_evidence_chunks: 6
+  minimum_metadata:
+    - document_id
+    - sha256
+    - filename
+    - title
+    - authors
+    - year
+    - document_class
+    - page_start
+    - page_end
+    - section
+    - chunk_id
+  document_classes:
+    - user_work
+    - external_literature
+    - technical_documentation
+    - project_document
+    - experiment_record
+
+security:
+  allow_network_after_setup: false
+  allow_document_code_execution: false
+  allow_model_generated_shell_execution: false
+  localhost_only: true
+  redact_paths_in_export: true
+
+quality:
+  require_page_grounding: true
+  mark_unsupported_claims: "[SOURCE REQUIRED]"
+  distinguish_evidence_inference_proposal: true
+  preserve_user_technical_meaning: true
+  default_writing_style: formal IEEE-style English

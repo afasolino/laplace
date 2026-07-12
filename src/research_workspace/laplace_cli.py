@@ -1,0 +1,677 @@
+"""User-facing ``laplace`` command for local FormalScience projects.
+
+The command is intentionally a small orchestration layer.  The existing
+``research-workspace`` command remains available for low-level/reproducible
+operations; this module adds project discovery, lifecycle state, and safe
+delegation from any working directory.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import shutil
+import subprocess
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from . import __version__
+from .acquisition import download_open_access, promote_download
+from .extraction import Provenance, extract_metrics, write_record
+from .ieee_browser import (
+    approve_download,
+    browser_init,
+    download_candidate,
+    ieee_status,
+    list_queue,
+    login,
+    open_candidate,
+    queue_candidate,
+)
+from .library import ingest_library
+from .online import fetch_public_webpage, search_general_web, search_scholarly
+from .projects import COLLECTIONS, ProjectError, ProjectPaths, validate_project_name
+from .real_benchmark import generate_measured, ollama_tags
+from .retrieval import evidence_packet, search as local_search, validate_citations
+from .probe import collect_probe
+
+
+APP_HOME = Path(os.getenv("LAPLACE_HOME", str(Path.home() / ".laplace"))).expanduser()
+REGISTRY_PATH = APP_HOME / "projects.json"
+CONFIG_PATH = APP_HOME / "config.yaml"
+MODEL = "qwen3:4b"
+EMBEDDING_MODEL = "qwen3-embedding:0.6b"
+ENDPOINT = "http://127.0.0.1:11434"
+APPLICATION_ROOT = Path(__file__).resolve().parents[2]
+
+
+class LaplaceError(RuntimeError):
+    """A recoverable user-facing Laplace error."""
+
+
+def _json(value: Any) -> None:
+    print(json.dumps(value, indent=2, ensure_ascii=False, default=str))
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _ensure_home() -> None:
+    try:
+        APP_HOME.mkdir(parents=True, exist_ok=True)
+        (APP_HOME / "logs").mkdir(parents=True, exist_ok=True)
+        if not CONFIG_PATH.exists():
+            CONFIG_PATH.write_text(
+                yaml.safe_dump(
+                    {
+                        "bind_host": "127.0.0.1",
+                        "port": 8000,
+                        "main_model": MODEL,
+                        "embedding_model": EMBEDDING_MODEL,
+                        "ollama_endpoint": ENDPOINT,
+                        "local_only": True,
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+        if not REGISTRY_PATH.exists():
+            REGISTRY_PATH.write_text("[]\n", encoding="utf-8")
+    except PermissionError as exc:
+        raise LaplaceError(
+            f"Cannot write the global Laplace directory {APP_HOME}; set LAPLACE_HOME to a writable local directory or grant user-profile access"
+        ) from exc
+
+
+def _registry() -> list[dict[str, Any]]:
+    _ensure_home()
+    try:
+        value = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LaplaceError(f"Invalid Laplace registry: {exc}") from exc
+    if not isinstance(value, list):
+        raise LaplaceError("Laplace registry must contain a JSON list")
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _write_registry(items: list[dict[str, Any]]) -> None:
+    _ensure_home()
+    REGISTRY_PATH.write_text(json.dumps(items, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _register(project: Path, *, name: str | None = None) -> dict[str, Any]:
+    project = project.resolve()
+    project_name = name or project.name
+    validate_project_name(project_name)
+    items = _registry()
+    for item in items:
+        same_name = item.get("name") == project_name
+        same_path = Path(str(item.get("path", ""))).resolve() == project
+        if same_name and not same_path:
+            raise LaplaceError(
+                f"Project name '{project_name}' is already registered at {item.get('path')}"
+            )
+        if same_path and not same_name:
+            raise LaplaceError(f"Project path is already registered as '{item.get('name')}'")
+    record = next((item for item in items if item.get("name") == project_name), None)
+    if record is None:
+        record = {
+            "name": project_name,
+            "path": str(project),
+            "created": _now(),
+            "last_seen": _now(),
+            "validation": "VALID",
+            "project_id": f"{project_name}:{project}",
+        }
+        items.append(record)
+    else:
+        record["last_seen"] = _now()
+        record["validation"] = "VALID"
+    _write_registry(items)
+    return record
+
+
+def _unregister(name: str) -> dict[str, Any]:
+    items = _registry()
+    kept = [item for item in items if item.get("name") != name]
+    _write_registry(kept)
+    return {"status": "UNREGISTERED" if len(kept) != len(items) else "NOT_FOUND", "name": name}
+
+
+def _project_from_dir(path: Path) -> tuple[ProjectPaths, dict[str, Any]]:
+    root = path.expanduser().resolve()
+    config_path = root / ".laplace" / "project.yaml"
+    if not config_path.is_file():
+        raise LaplaceError(f"Laplace project configuration not found: {config_path}")
+    try:
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise LaplaceError(f"Cannot read Laplace project: {exc}") from exc
+    if not isinstance(config, dict) or config.get("project", {}).get("name") != root.name:
+        raise LaplaceError(".laplace/project.yaml name does not match the project directory")
+    paths = ProjectPaths(root.name, root, config_path, root / "Data", root / "Outputs")
+    return paths, config
+
+
+def detect_project(explicit: Path | None = None) -> tuple[ProjectPaths, dict[str, Any]]:
+    if explicit is not None:
+        return _project_from_dir(explicit)
+    current = Path.cwd().resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / ".laplace" / "project.yaml").is_file():
+            paths, config = _project_from_dir(candidate)
+            _register(candidate)
+            return paths, config
+    raise LaplaceError(
+        "No Laplace project was found in the current directory or its parents. "
+        "Run `laplace --init NAME` here, or pass `--project PATH`."
+    )
+
+
+def _tree(root: Path) -> dict[str, Path]:
+    data = root / "Data"
+    downloads = data / "Downloads"
+    return {
+        "laplace": root / ".laplace",
+        "config": root / "Config",
+        "parsed": data / "Parsed",
+        "metadata": data / "Metadata",
+        "vector_store": data / "VectorStore",
+        "cache": data / "Cache",
+        "logs": data / "Logs",
+        "quarantine": data / "Quarantine",
+        "downloads": downloads,
+        "open_access": downloads / "OpenAccess",
+        "ieee_pending": downloads / "IEEE" / "Pending",
+        "ieee_downloaded": downloads / "IEEE" / "Downloaded",
+        "ieee_failed": downloads / "IEEE" / "Failed",
+        "drafts": root / "Outputs" / "Drafts",
+        "evidence": root / "Outputs" / "EvidencePackets",
+        "extractions": root / "Outputs" / "Extractions",
+        "comparisons": root / "Outputs" / "Comparisons",
+        "reports": root / "Outputs" / "Reports",
+    }
+
+
+def _project_yaml(name: str, root: Path) -> dict[str, Any]:
+    library = Path(os.getenv("FORMALSCIENCE_ROOT", str(Path.home() / "FormalScience"))) / "Library"
+    return {
+        "project": {"name": name, "project_id": f"{name}:{root}", "created_at": _now(), "local_only": True},
+        "library": {"root": str(library), "collections": list(COLLECTIONS), "selected": ["MyWorks"]},
+        "paths": {"data": str(root / "Data"), "outputs": str(root / "Outputs")},
+        "models": {"main_text": MODEL, "embedding": EMBEDDING_MODEL, "endpoint": ENDPOINT, "context_tokens": 8192},
+        "retrieval": {"mode": "hybrid", "final_evidence_chunks": 6, "require_page_grounding": True},
+        "writing": {"style_profile": "formal IEEE-style English"},
+        "providers": {"online_search": True, "ieee_api": False, "browser": False},
+        "security": {"localhost_only": True, "no_credential_storage": True, "source_pdfs_immutable": True},
+    }
+
+
+def init_laplace(name: str, *, cwd: Path | None = None, force: bool = False) -> dict[str, Any]:
+    base = (cwd or Path.cwd()).resolve()
+    target = base if name == "." else (base / name).resolve()
+    if name != ".":
+        validate_project_name(name)
+    project_name = target.name
+    validate_project_name(project_name)
+    if target.exists() and any(target.iterdir()) and not force:
+        raise LaplaceError(f"Refusing to initialize a non-empty directory: {target}; use --force only when intentional")
+    if "library" in {part.lower() for part in target.parts}:
+        raise LaplaceError("Projects cannot be initialized inside a Library directory")
+    repo_markers = {"pyproject.toml", ".git", "AGENTS.md", "CODEX_PROMPT.md"}
+    ancestors = (target, *target.parents)
+    inside_application_repo = any(any((ancestor / marker).exists() for marker in repo_markers) for ancestor in ancestors)
+    if not force and inside_application_repo:
+        raise LaplaceError("Refusing to initialize inside an application repository without --force")
+    for directory in _tree(target).values():
+        directory.mkdir(parents=True, exist_ok=True)
+    config_path = target / ".laplace" / "project.yaml"
+    if config_path.exists() and not force:
+        raise LaplaceError(f"Laplace project already exists: {target}")
+    config_path.write_text(yaml.safe_dump(_project_yaml(project_name, target), sort_keys=False), encoding="utf-8")
+    state = {"project": project_name, "project_id": f"{project_name}:{target}", "created_at": _now(), "server": {"running": False}}
+    (target / ".laplace" / "state.json").write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    config_dir = target / "Config"
+    (config_dir / "instructions.md").write_text("# Project instructions\n\nKeep claims grounded in local evidence.\n", encoding="utf-8")
+    (config_dir / "writing_style.yaml").write_text("style: formal IEEE-style English\n", encoding="utf-8")
+    (config_dir / "retrieval.yaml").write_text("mode: hybrid\nfinal_evidence_chunks: 6\n", encoding="utf-8")
+    (config_dir / "providers.yaml").write_text("online_search: true\nieee_api: false\n", encoding="utf-8")
+    record = _register(target)
+    return {"status": "CREATED", "project": str(target), "registry": record}
+
+
+def _state(paths: ProjectPaths) -> dict[str, Any]:
+    path = paths.root / ".laplace" / "state.json"
+    if not path.exists():
+        return {"project": paths.name, "server": {"running": False}}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"project": paths.name, "server": {"running": False}, "state_error": "invalid JSON"}
+    return value if isinstance(value, dict) else {"project": paths.name, "server": {"running": False}}
+
+
+def _write_state(paths: ProjectPaths, state: dict[str, Any]) -> None:
+    (paths.root / ".laplace" / "state.json").write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+
+def _database(paths: ProjectPaths) -> Path:
+    return paths.data / "Metadata" / "workspace.db"
+
+
+def _status(paths: ProjectPaths, config: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {"project": paths.name, "root": str(paths.root), "validation": {}, "server": _state(paths).get("server", {})}
+    missing = [name for name, path in _tree(paths.root).items() if not path.is_dir() and name != "laplace"]
+    result["validation"] = {"valid": not missing, "missing_directories": missing}
+    db = _database(paths)
+    if db.exists():
+        import sqlite3
+
+        with sqlite3.connect(db) as conn:
+            result["documents"] = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+            result["chunks"] = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+    else:
+        result["documents"] = 0
+        result["chunks"] = 0
+    result["downloads"] = len(list((paths.data / "Downloads").rglob("*.pdf")))
+    result["queued_candidates"] = len(list_queue(paths.name, root=paths.root).get("items", []))
+    result["drafts"] = len(list((paths.outputs / "Drafts").glob("*")))
+    result["configured_models"] = config.get("models", {})
+    return result
+
+
+def _doctor() -> dict[str, Any]:
+    probe = collect_probe()
+    runtime: dict[str, Any] = {"endpoint": ENDPOINT, "loopback_only": True, "models": [], "status": "UNAVAILABLE"}
+    try:
+        tags = ollama_tags(ENDPOINT)
+        runtime["models"] = [str(item.get("name")) for item in tags.get("models", []) if isinstance(item, dict)]
+        runtime["status"] = "AVAILABLE"
+    except Exception as exc:
+        runtime["error"] = str(exc)
+    executable = shutil.which("ollama") or (Path(os.getenv("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe")
+    try:
+        executable_exists = bool(executable and Path(executable).exists())
+    except PermissionError:
+        executable_exists = False
+        runtime["executable_status"] = "permission_blocked"
+    runtime["executable"] = str(executable) if executable_exists or executable else None
+    runtime["main_model_installed"] = MODEL in runtime["models"]
+    runtime["embedding_model_installed"] = EMBEDDING_MODEL in runtime["models"]
+    return {"application": {"version": __version__, "local_only": True}, "runtime": runtime, "probe": probe, "localhost": True, "npu_optional": True}
+
+
+def _library_root(config: dict[str, Any]) -> Path:
+    configured = config.get("library", {}).get("root")
+    return Path(str(configured or (Path(os.getenv("FORMALSCIENCE_ROOT", str(Path.home() / "FormalScience"))) / "Library"))).expanduser().resolve()
+
+
+def _ingest(paths: ProjectPaths, config: dict[str, Any], collection: str, dry_run: bool) -> dict[str, Any]:
+    relative = Path(collection)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise LaplaceError("Collection path must be relative and cannot contain '..'")
+    if not relative.parts or relative.parts[0] not in COLLECTIONS:
+        raise LaplaceError(f"Collection must begin with one of: {', '.join(COLLECTIONS)}")
+    source = (_library_root(config) / relative).resolve()
+    library_root = _library_root(config)
+    if library_root not in source.parents and source != library_root:
+        raise LaplaceError("Collection path escapes the configured Library root")
+    files = sorted(source.rglob("*.pdf")) if source.is_dir() else []
+    if dry_run:
+        return {"status": "DRY_RUN", "collection": collection, "source_directory": str(source), "pdf_count": len(files), "files": [str(item) for item in files]}
+    return ingest_library(paths.name, collection=relative.parts[0], root=paths.root, source_dir=source, project_paths_override=paths)
+
+
+def _search(paths: ProjectPaths, query: str, limit: int = 6) -> dict[str, Any]:
+    evidence = local_search(_database(paths), query, limit=limit)
+    packet = evidence_packet(query, evidence)
+    target = paths.outputs / "Reports" / f"search_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(packet, indent=2, ensure_ascii=False), encoding="utf-8")
+    packet["report_path"] = str(target)
+    return packet
+
+
+def _ask(paths: ProjectPaths, query: str) -> dict[str, Any]:
+    packet = _search(paths, query)
+    evidence = packet.get("evidence", [])
+    if not evidence:
+        return {"status": "NOT_GROUNDED", "packet": packet}
+    prompt = "Return ONLY JSON with answer and citations. Use only evidence. Exact citations are filename, page, chunk_id. Query: " + query + " Evidence: " + json.dumps(evidence, ensure_ascii=False)
+    generation = generate_measured(ENDPOINT, MODEL, prompt, context_tokens=8192, think=False, num_predict=280, json_mode=True)
+    output = str(generation.get("output", ""))
+    try:
+        structured = json.loads(output)
+    except json.JSONDecodeError:
+        structured = {"answer": output, "citations": []}
+    citations = structured.get("citations", []) if isinstance(structured, dict) else []
+    valid = isinstance(citations, list) and validate_citations(packet, citations)
+    model_citation_valid = valid
+    fallback_used = False
+    if not valid:
+        exact = evidence[0]
+        structured = {
+            "answer": str(exact.get("text", "")),
+            "citations": [
+                {
+                    "filename": exact.get("filename"),
+                    "page": exact.get("page"),
+                    "chunk_id": exact.get("chunk_id"),
+                }
+            ],
+        }
+        valid = validate_citations(packet, structured["citations"])
+        fallback_used = valid
+    target = paths.outputs / "Drafts" / f"answer_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps({"query": query, "answer": structured, "citation_valid": valid, "model_citation_valid": model_citation_valid, "fallback_used": fallback_used, "generation": generation}, indent=2, ensure_ascii=False), encoding="utf-8")
+    status = "GROUNDED_EXTRACTIVE_FALLBACK" if fallback_used else "GROUNDED" if valid else "REVIEW_REQUIRED"
+    return {"status": status, "answer_path": str(target), "citation_valid": valid, "model_citation_valid": model_citation_valid, "fallback_used": fallback_used, "answer": structured, "evidence": packet}
+
+
+def _write(paths: ProjectPaths, mode: str, instruction: str, input_path: Path | None) -> dict[str, Any]:
+    if input_path:
+        instruction = instruction + "\nInput:\n" + input_path.read_text(encoding="utf-8", errors="replace")
+    result = _ask(paths, instruction)
+    target = paths.outputs / "Drafts" / f"{mode}_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.md"
+    answer = result.get("answer", {}).get("answer", "") if isinstance(result.get("answer"), dict) else ""
+    target.write_text(f"# {mode}\n\n{answer}\n\nStatus: {result.get('status')}\n", encoding="utf-8")
+    result["draft_path"] = str(target)
+    return result
+
+
+def _backup(paths: ProjectPaths) -> dict[str, Any]:
+    target = paths.root / "Backup" / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    target.mkdir(parents=True, exist_ok=False)
+    copied: list[str] = []
+    for relative in (Path(".laplace/project.yaml"), Path(".laplace/state.json"), Path("Config"), Path("Data/Metadata"), Path("Data/Parsed"), Path("Outputs")):
+        source = paths.root / relative
+        if not source.exists():
+            continue
+        destination = target / relative
+        if source.is_dir():
+            shutil.copytree(source, destination)
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        copied.append(str(relative))
+    return {"status": "BACKED_UP", "path": str(target), "copied": copied}
+
+
+def _start(paths: ProjectPaths, background: bool) -> dict[str, Any]:
+    state = _state(paths)
+    existing_pid = state.get("server", {}).get("pid")
+    if existing_pid:
+        try:
+            os.kill(int(existing_pid), 0)
+            return {"status": "ALREADY_RUNNING", "pid": existing_pid, "bind": "127.0.0.1"}
+        except (OSError, ValueError):
+            pass
+    log_path = paths.data / "Logs" / "laplace-server.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    command = [sys.executable, "-m", "uvicorn", "research_workspace.laplace_server:create_project_app", "--factory", "--host", "127.0.0.1", "--port", "8000"]
+    if not background:
+        return {"status": "FOREGROUND", "command": command, "bind": "127.0.0.1", "note": "Use --background for a detached local server."}
+    stream = log_path.open("a", encoding="utf-8")
+    environment = os.environ.copy()
+    environment["FORMALSCIENCE_ACTIVE_PROJECT"] = str(paths.root)
+    process = subprocess.Popen(command, cwd=APPLICATION_ROOT, stdout=stream, stderr=subprocess.STDOUT, env=environment, creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    state["server"] = {"running": True, "pid": process.pid, "bind": "127.0.0.1", "port": 8000, "started_at": _now()}
+    _write_state(paths, state)
+    return {"status": "STARTED", "pid": process.pid, "bind": "127.0.0.1", "port": 8000, "log": str(log_path)}
+
+
+def _stop(paths: ProjectPaths) -> dict[str, Any]:
+    state = _state(paths)
+    server = state.get("server", {})
+    pid = server.get("pid")
+    if not pid:
+        return {"status": "NOT_RUNNING"}
+    try:
+        subprocess.run(["taskkill", "/PID", str(int(pid)), "/T", "/F"], capture_output=True, check=False)
+    except (OSError, ValueError):
+        pass
+    state["server"] = {"running": False, "stopped_at": _now(), "previous_pid": pid}
+    _write_state(paths, state)
+    return {"status": "STOPPED", "pid": pid}
+
+
+def _extract(paths: ProjectPaths, kind: str, source: Path) -> dict[str, Any]:
+    text = source.read_text(encoding="utf-8", errors="replace")
+    record = extract_metrics(text, Provenance(filename=source.name, page=None, section=None, chunk_id=f"{source.name}:c0"))
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    json_path = paths.outputs / "Extractions" / f"{kind}_{stamp}.json"
+    csv_path = paths.outputs / "Extractions" / f"{kind}_{stamp}.csv"
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    write_record(record, json_path, csv_path)
+    return {"status": "EXTRACTED", "type": kind, "json": str(json_path), "csv": str(csv_path), "metrics": len(record.metrics)}
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="laplace", description="Local-only FormalScience research workspace")
+    parser.add_argument("--project", type=Path, help="Explicit Laplace project directory")
+    parser.add_argument("--force", action="store_true", help="Explicitly confirm a safe, non-destructive override")
+    parser.add_argument("--yes", action="store_true", help="Confirm cache cleanup")
+    parser.add_argument("--background", action="store_true", help="Run --start as a detached localhost process")
+    parser.add_argument("--foreground", action="store_true", help="Keep --start attached to the current terminal")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--init", metavar="NAME")
+    parser.add_argument("--list", action="store_true")
+    parser.add_argument("--unregister", metavar="NAME")
+    parser.add_argument("--doctor", action="store_true")
+    parser.add_argument("--version", action="store_true")
+    parser.add_argument("--validate", action="store_true")
+    parser.add_argument("--status", action="store_true")
+    parser.add_argument("--config", action="store_true")
+    parser.add_argument("--start", action="store_true")
+    parser.add_argument("--stop", action="store_true")
+    parser.add_argument("--backup", action="store_true")
+    parser.add_argument("--clean-cache", action="store_true")
+    parser.add_argument("--edit", choices=("instructions", "style", "retrieval", "providers"))
+    parser.add_argument("--ingest", metavar="COLLECTION")
+    parser.add_argument("--search", metavar="QUERY")
+    parser.add_argument("--ask", metavar="QUERY")
+    parser.add_argument("--write", nargs=2, metavar=("MODE", "INSTRUCTION"))
+    parser.add_argument("--instructions", type=Path)
+    parser.add_argument("--input", type=Path)
+    parser.add_argument("--research", metavar="QUERY")
+    parser.add_argument("--web", nargs="+", metavar="WEB")
+    parser.add_argument("--queue", nargs="*", metavar="QUEUE")
+    parser.add_argument("--download", type=int, metavar="CANDIDATE_ID")
+    parser.add_argument("--ieee", nargs="*", metavar="IEEE")
+    parser.add_argument("--promote", nargs=2, metavar=("DOCUMENT", "DESTINATION"))
+    parser.add_argument("--extract", nargs=2, metavar=("TYPE", "SOURCE"))
+    parser.add_argument("--compare", nargs="+", metavar="SOURCE")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        if args.version:
+            print(f"laplace {__version__}")
+            return 0
+        if args.init is not None:
+            _json(init_laplace(args.init, force=args.force))
+            return 0
+        if args.list:
+            _json({"projects": _registry()})
+            return 0
+        if args.unregister:
+            _json(_unregister(args.unregister))
+            return 0
+        if args.doctor:
+            _json(_doctor())
+            return 0
+        paths, config = detect_project(args.project)
+        if args.validate:
+            missing = [str(path) for name, path in _tree(paths.root).items() if name != "laplace" and not path.is_dir()]
+            _json({"valid": not missing, "project": str(paths.root), "missing_directories": missing})
+            return 0 if not missing else 2
+        if args.status:
+            _json(_status(paths, config))
+            return 0
+        if args.config:
+            _json(config)
+            return 0
+        if args.start:
+            _json(_start(paths, args.background or not args.foreground))
+            return 0
+        if args.stop:
+            _json(_stop(paths))
+            return 0
+        if args.backup:
+            _json(_backup(paths))
+            return 0
+        if args.clean_cache:
+            if not args.yes:
+                raise LaplaceError("Cache cleanup removes rebuildable files; repeat with --clean-cache --yes")
+            cache = paths.data / "Cache"
+            shutil.rmtree(cache, ignore_errors=True)
+            cache.mkdir(parents=True, exist_ok=True)
+            _json({"status": "CACHE_CLEANED", "path": str(cache)})
+            return 0
+        if args.edit:
+            files = {"instructions": "instructions.md", "style": "writing_style.yaml", "retrieval": "retrieval.yaml", "providers": "providers.yaml"}
+            target = paths.root / "Config" / files[args.edit]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                target.write_text("", encoding="utf-8")
+            _json({"status": "READY_TO_EDIT", "path": str(target), "note": "Open this local file in your editor; Laplace never stores credentials."})
+            return 0
+        if args.ingest:
+            _json(_ingest(paths, config, args.ingest, args.dry_run))
+            return 0
+        if args.search:
+            _json(_search(paths, args.search))
+            return 0
+        if args.ask:
+            _json(_ask(paths, args.ask))
+            return 0
+        if args.write:
+            mode, instruction = args.write
+            if args.instructions:
+                instruction = args.instructions.read_text(encoding="utf-8", errors="replace")
+            _json(_write(paths, mode, instruction, args.input))
+            return 0
+        if args.research:
+            result = search_scholarly(args.research, limit=10)
+            target = paths.outputs / "Reports" / f"research_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+            result["report_path"] = str(target)
+            _json(result)
+            return 0 if result.get("status") in {"AVAILABLE", "PARTIAL"} else 2
+        if args.web:
+            action, *values = args.web
+            if action == "fetch" and len(values) == 1:
+                _json(fetch_public_webpage(values[0]))
+                return 0
+            if action == "search" and values:
+                web_result = search_general_web(" ".join(values), limit=10)
+                _json({"provider": web_result.provider, "status": web_result.status, "results": [item.__dict__ for item in web_result.results], "error": web_result.error})
+                return 0 if web_result.status == "AVAILABLE" else 2
+            raise LaplaceError("Usage: --web fetch URL or --web search QUERY")
+        if args.queue is not None:
+            action = args.queue[0] if args.queue else "list"
+            if action == "list":
+                _json(list_queue(paths.name, root=paths.root))
+            elif action == "add" and len(args.queue) == 2:
+                candidate_path = Path(args.queue[1]).resolve()
+                _json(queue_candidate(paths.name, json.loads(candidate_path.read_text(encoding="utf-8-sig")), root=paths.root))
+            elif action == "clear" and args.force:
+                queue_path = paths.data / "Downloads" / "IEEE" / "Pending" / "candidate_queue.json"
+                queue_path.write_text("[]\n", encoding="utf-8")
+                _json({"status": "CLEARED", "path": str(queue_path)})
+            elif action == "remove" and len(args.queue) == 2 and args.force:
+                queue_path = paths.data / "Downloads" / "IEEE" / "Pending" / "candidate_queue.json"
+                queue = json.loads(queue_path.read_text(encoding="utf-8")) if queue_path.exists() else []
+                candidate_id = int(args.queue[1])
+                if candidate_id < 0 or candidate_id >= len(queue):
+                    raise LaplaceError("candidate id not in queue")
+                queue.pop(candidate_id)
+                queue_path.write_text(json.dumps(queue, indent=2) + "\n", encoding="utf-8")
+                _json({"status": "REMOVED", "candidate_id": candidate_id})
+            else:
+                raise LaplaceError("Queue mutations require --force and use add PATH, remove ID, or clear")
+            return 0
+        if args.download is not None:
+            queued = list_queue(paths.name, root=paths.root).get("items", [])
+            if not isinstance(queued, list) or args.download < 0 or args.download >= len(queued):
+                raise LaplaceError("candidate id not in queue")
+            candidate = queued[args.download]
+            if isinstance(candidate, dict) and candidate.get("open_access") is True:
+                _json(download_open_access(paths.name, candidate, root=paths.root))
+            else:
+                _json(download_candidate(paths.name, args.download, root=paths.root))
+            return 0
+        if args.ieee is not None:
+            action = args.ieee[0] if args.ieee else "status"
+            if action == "status":
+                _json(ieee_status(paths.name, root=paths.root))
+            elif action == "login":
+                _json(login())
+            elif action == "browser-init":
+                _json(browser_init())
+            elif action == "open" and len(args.ieee) == 2:
+                _json(open_candidate(paths.name, int(args.ieee[1]), root=paths.root))
+            elif action == "approve" and len(args.ieee) == 2 and args.force:
+                _json(approve_download(paths.name, int(args.ieee[1]), root=paths.root))
+            elif action == "download" and len(args.ieee) == 2:
+                _json(download_candidate(paths.name, int(args.ieee[1]), root=paths.root))
+            else:
+                raise LaplaceError("IEEE usage: --ieee status|login|browser-init|open ID|approve ID|download ID")
+            return 0
+        if args.promote:
+            document, destination = args.promote
+            if "." not in Path(document).name:
+                import sqlite3
+
+                with sqlite3.connect(_database(paths)) as conn:
+                    row = conn.execute("SELECT filename FROM documents WHERE id=?", (document,)).fetchone()
+                if row:
+                    document = str(row[0])
+            parts = destination.split("/", 1)
+            if parts[0] not in {"MyTopics", "OtherTopics", "Documentations"}:
+                raise LaplaceError("Promotion destination must be MyTopics, OtherTopics, or Documentations")
+            _json(promote_download(paths.name, document, parts[0], topic=parts[1] if len(parts) == 2 else None, confirm=args.force, root=paths.root))
+            return 0
+        if args.extract:
+            _json(_extract(paths, args.extract[0], Path(args.extract[1]).resolve()))
+            return 0
+        if args.compare:
+            records: list[dict[str, Any]] = []
+            for item in args.compare:
+                source = Path(item).resolve()
+                if not source.is_file():
+                    raise LaplaceError(f"Comparison source not found: {source}")
+                if source.suffix.lower() == ".csv":
+                    with source.open(newline="", encoding="utf-8-sig") as stream:
+                        records.append({"source": str(source), "rows": list(csv.DictReader(stream))})
+                elif source.suffix.lower() == ".json":
+                    value = json.loads(source.read_text(encoding="utf-8-sig"))
+                    records.append({"source": str(source), "value": value})
+                else:
+                    raise LaplaceError("Comparison inputs must be CSV or JSON")
+            target = paths.outputs / "Comparisons" / f"comparison_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps({"sources": records, "deterministic": True}, indent=2, ensure_ascii=False), encoding="utf-8")
+            _json({"status": "COMPARISON_WRITTEN", "path": str(target), "sources": len(records)})
+            return 0
+        _parser().print_help()
+        return 0
+    except (LaplaceError, ProjectError, OSError, ValueError, PermissionError, IndexError, json.JSONDecodeError) as exc:
+        _json({"status": "ERROR", "error": str(exc)})
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
