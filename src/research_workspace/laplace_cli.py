@@ -15,6 +15,10 @@ import os
 import shutil
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
+import webbrowser
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -23,6 +27,7 @@ import yaml
 
 from . import __version__
 from .acquisition import download_open_access, promote_download
+from .chat import ChatEngine, ChatProject, ConversationStore
 from .extraction import Provenance, extract_metrics, write_record
 from .ieee_browser import (
     approve_download,
@@ -37,8 +42,8 @@ from .ieee_browser import (
 from .library import ingest_library
 from .online import fetch_public_webpage, search_general_web, search_scholarly
 from .projects import COLLECTIONS, ProjectError, ProjectPaths, validate_project_name
-from .real_benchmark import generate_measured, ollama_tags
-from .retrieval import evidence_packet, search as local_search, validate_citations
+from .real_benchmark import ollama_tags
+from .retrieval import evidence_packet, search as local_search
 from .probe import collect_probe
 
 
@@ -329,6 +334,25 @@ def _ingest(paths: ProjectPaths, config: dict[str, Any], collection: str, dry_ru
     return ingest_library(paths.name, collection=relative.parts[0], root=paths.root, source_dir=source, project_paths_override=paths)
 
 
+def _chat_context(paths: ProjectPaths) -> ChatProject:
+    config: dict[str, Any] = {}
+    if paths.config.is_file():
+        value = yaml.safe_load(paths.config.read_text(encoding="utf-8"))
+        if isinstance(value, dict):
+            config = value
+    project = config.get("project", {})
+    models = config.get("models", {})
+    return ChatProject(
+        root=paths.root,
+        database=paths.data / "Metadata" / "laplace.db",
+        project_id=str(project.get("project_id") or f"{paths.name}:{paths.root}"),
+        name=paths.name,
+        model=str(models.get("main_text") or MODEL),
+        endpoint=str(models.get("endpoint") or ENDPOINT),
+        context_tokens=min(8192, int(models.get("context_tokens", 8192))),
+    )
+
+
 def _search(paths: ProjectPaths, query: str, limit: int = 6) -> dict[str, Any]:
     evidence = local_search(_database(paths), query, limit=limit)
     packet = evidence_packet(query, evidence)
@@ -340,40 +364,47 @@ def _search(paths: ProjectPaths, query: str, limit: int = 6) -> dict[str, Any]:
 
 
 def _ask(paths: ProjectPaths, query: str) -> dict[str, Any]:
-    packet = _search(paths, query)
-    evidence = packet.get("evidence", [])
-    if not evidence:
-        return {"status": "NOT_GROUNDED", "packet": packet}
-    prompt = "Return ONLY JSON with answer and citations. Use only evidence. Exact citations are filename, page, chunk_id. Query: " + query + " Evidence: " + json.dumps(evidence, ensure_ascii=False)
-    generation = generate_measured(ENDPOINT, MODEL, prompt, context_tokens=8192, think=False, num_predict=280, json_mode=True)
-    output = str(generation.get("output", ""))
-    try:
-        structured = json.loads(output)
-    except json.JSONDecodeError:
-        structured = {"answer": output, "citations": []}
-    citations = structured.get("citations", []) if isinstance(structured, dict) else []
-    valid = isinstance(citations, list) and validate_citations(packet, citations)
-    model_citation_valid = valid
-    fallback_used = False
-    if not valid:
-        exact = evidence[0]
-        structured = {
-            "answer": str(exact.get("text", "")),
-            "citations": [
-                {
-                    "filename": exact.get("filename"),
-                    "page": exact.get("page"),
-                    "chunk_id": exact.get("chunk_id"),
-                }
-            ],
-        }
-        valid = validate_citations(packet, structured["citations"])
-        fallback_used = valid
-    target = paths.outputs / "Drafts" / f"answer_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
+    project = _chat_context(paths)
+    store = ConversationStore(project)
+    conversation = store.create(title=query[:80] or "New chat", collections=["MyWorks"], mode="ASK")
+    response = ChatEngine(project, store).answer(conversation.conversation_id, query)
+    target = paths.outputs / "Conversations" / conversation.conversation_id / "response.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps({"query": query, "answer": structured, "citation_valid": valid, "model_citation_valid": model_citation_valid, "fallback_used": fallback_used, "generation": generation}, indent=2, ensure_ascii=False), encoding="utf-8")
-    status = "GROUNDED_EXTRACTIVE_FALLBACK" if fallback_used else "GROUNDED" if valid else "REVIEW_REQUIRED"
-    return {"status": status, "answer_path": str(target), "citation_valid": valid, "model_citation_valid": model_citation_valid, "fallback_used": fallback_used, "answer": structured, "evidence": packet}
+    target.write_text(response.model_dump_json(indent=2), encoding="utf-8")
+    return {"response": response.model_dump(), "status": response.status, "answer_path": str(target), "conversation_id": conversation.conversation_id}
+
+
+def _print_chat(result: dict[str, Any], *, as_json: bool = False, verbose: bool = False) -> None:
+    if as_json:
+        _json(result)
+        return
+    response = result.get("response", result)
+    print(str(response.get("content", "")).strip())
+    citations = response.get("citations", [])
+    if citations:
+        print("\nSources:")
+        for item in citations:
+            print(f"[{item.get('citation_id')}] {item.get('title') or item.get('filename')}, p. {item.get('page') or '—'}")
+    print(f"\nGrounding: {response.get('status', 'UNKNOWN')}")
+    print(f"Model: {response.get('model', MODEL)}")
+    print(f"Saved: {result.get('answer_path', 'project conversation store')}")
+    if verbose:
+        _json(result)
+
+
+def _print_search(result: dict[str, Any], *, as_json: bool = False, verbose: bool = False) -> None:
+    if as_json or verbose:
+        _json(result)
+        return
+    evidence = result.get("evidence", [])
+    if not evidence:
+        print("No indexed evidence found.")
+        return
+    print(f"Retrieved {len(evidence)} passages for: {result.get('query', '')}\n")
+    for index, item in enumerate(evidence, 1):
+        print(f"[{index}] {item.get('title') or item.get('filename')} — p. {item.get('page') or '—'}")
+        print(f"    {str(item.get('text', '')).strip()[:420]}")
+    print(f"\nGrounding: VALID\nSaved: {result.get('report_path', 'project report')}")
 
 
 def _write(paths: ProjectPaths, mode: str, instruction: str, input_path: Path | None) -> dict[str, Any]:
@@ -381,7 +412,8 @@ def _write(paths: ProjectPaths, mode: str, instruction: str, input_path: Path | 
         instruction = instruction + "\nInput:\n" + input_path.read_text(encoding="utf-8", errors="replace")
     result = _ask(paths, instruction)
     target = paths.outputs / "Drafts" / f"{mode}_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.md"
-    answer = result.get("answer", {}).get("answer", "") if isinstance(result.get("answer"), dict) else ""
+    response = result.get("response", result)
+    answer = str(response.get("content", "")) if isinstance(response, dict) else ""
     target.write_text(f"# {mode}\n\n{answer}\n\nStatus: {result.get('status')}\n", encoding="utf-8")
     result["draft_path"] = str(target)
     return result
@@ -405,27 +437,54 @@ def _backup(paths: ProjectPaths) -> dict[str, Any]:
     return {"status": "BACKED_UP", "path": str(target), "copied": copied}
 
 
-def _start(paths: ProjectPaths, background: bool) -> dict[str, Any]:
+def _start(paths: ProjectPaths, background: bool, *, no_browser: bool = False, model: str = MODEL, embedding_model: str = EMBEDDING_MODEL) -> dict[str, Any]:
+    tags = ollama_tags(ENDPOINT)
+    installed = {str(item.get("name")) for item in tags.get("models", []) if isinstance(item, dict)}
+    missing = [item for item in (model, embedding_model) if item not in installed]
+    if missing:
+        raise LaplaceError(f"Required local Ollama models are missing: {', '.join(missing)}")
     state = _state(paths)
     existing_pid = state.get("server", {}).get("pid")
     if existing_pid:
         try:
             os.kill(int(existing_pid), 0)
-            return {"status": "ALREADY_RUNNING", "pid": existing_pid, "bind": "127.0.0.1"}
+            info = {"status": "ALREADY_RUNNING", "pid": existing_pid, "bind": "127.0.0.1", "chat": "http://127.0.0.1:8000/chat", "dashboard": "http://127.0.0.1:8000/dashboard"}
+            if not no_browser:
+                webbrowser.open(str(info["chat"]))
+            return info
         except (OSError, ValueError):
             pass
     log_path = paths.data / "Logs" / "laplace-server.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     command = [sys.executable, "-m", "uvicorn", "research_workspace.laplace_server:create_project_app", "--factory", "--host", "127.0.0.1", "--port", "8000"]
-    if not background:
-        return {"status": "FOREGROUND", "command": command, "bind": "127.0.0.1", "note": "Use --background for a detached local server."}
-    stream = log_path.open("a", encoding="utf-8")
     environment = os.environ.copy()
     environment["FORMALSCIENCE_ACTIVE_PROJECT"] = str(paths.root)
-    process = subprocess.Popen(command, cwd=APPLICATION_ROOT, stdout=stream, stderr=subprocess.STDOUT, env=environment, creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    environment["RW_MODEL"] = model
+    environment["RW_EMBEDDING_MODEL"] = embedding_model
+    if background:
+        stream = log_path.open("a", encoding="utf-8")
+        process = subprocess.Popen(command, cwd=APPLICATION_ROOT, stdout=stream, stderr=subprocess.STDOUT, env=environment, creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    else:
+        process = subprocess.Popen(command, cwd=APPLICATION_ROOT, env=environment)
     state["server"] = {"running": True, "pid": process.pid, "bind": "127.0.0.1", "port": 8000, "started_at": _now()}
     _write_state(paths, state)
-    return {"status": "STARTED", "pid": process.pid, "bind": "127.0.0.1", "port": 8000, "log": str(log_path)}
+    chat_url = "http://127.0.0.1:8000/chat"
+    for _ in range(30):
+        try:
+            with urllib.request.urlopen(chat_url, timeout=0.5):
+                break
+        except (urllib.error.URLError, OSError):
+            time.sleep(0.2)
+    info = {"status": "STARTED", "pid": process.pid, "bind": "127.0.0.1", "port": 8000, "log": str(log_path), "chat": chat_url, "dashboard": "http://127.0.0.1:8000/dashboard", "model": model, "embedding_model": embedding_model}
+    if not no_browser:
+        webbrowser.open(chat_url)
+    if not background:
+        try:
+            process.wait()
+        finally:
+            state["server"] = {"running": False, "stopped_at": _now(), "previous_pid": process.pid}
+            _write_state(paths, state)
+    return info
 
 
 def _stop(paths: ProjectPaths) -> dict[str, Any]:
@@ -463,6 +522,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--foreground", action="store_true", help="Keep --start attached to the current terminal")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--json", action="store_true", help="Emit complete machine-readable output")
+    parser.add_argument("--no-browser", action="store_true", help="Do not open the local chat page")
     parser.add_argument("--init", metavar="NAME")
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--unregister", metavar="NAME")
@@ -472,6 +533,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--config", action="store_true")
     parser.add_argument("--start", action="store_true")
+    parser.add_argument("--chat", action="store_true", help="Open the current project chat page")
     parser.add_argument("--stop", action="store_true")
     parser.add_argument("--backup", action="store_true")
     parser.add_argument("--clean-cache", action="store_true")
@@ -523,7 +585,22 @@ def main(argv: list[str] | None = None) -> int:
             _json(config)
             return 0
         if args.start:
-            _json(_start(paths, args.background or not args.foreground))
+            info = _start(paths, args.background or not args.foreground, no_browser=args.no_browser)
+            if args.json:
+                _json(info)
+            else:
+                print(f"Laplace project: {paths.name}")
+                print(f"Model: {info.get('model', MODEL)}")
+                print(f"Embeddings: {info.get('embedding_model', EMBEDDING_MODEL)}")
+                print(f"Dashboard: {info.get('dashboard', 'http://127.0.0.1:8000/dashboard')}")
+                print(f"Chat: {info.get('chat', 'http://127.0.0.1:8000/chat')}")
+            return 0
+        if args.chat:
+            info = _start(paths, True, no_browser=False)
+            if args.json:
+                _json(info)
+            else:
+                print(info.get("chat", "http://127.0.0.1:8000/chat"))
             return 0
         if args.stop:
             _json(_stop(paths))
@@ -551,16 +628,16 @@ def main(argv: list[str] | None = None) -> int:
             _json(_ingest(paths, config, args.ingest, args.dry_run))
             return 0
         if args.search:
-            _json(_search(paths, args.search))
+            _print_search(_search(paths, args.search), as_json=args.json, verbose=args.verbose)
             return 0
         if args.ask:
-            _json(_ask(paths, args.ask))
+            _print_chat(_ask(paths, args.ask), as_json=args.json, verbose=args.verbose)
             return 0
         if args.write:
             mode, instruction = args.write
             if args.instructions:
                 instruction = args.instructions.read_text(encoding="utf-8", errors="replace")
-            _json(_write(paths, mode, instruction, args.input))
+            _print_chat(_write(paths, mode, instruction, args.input), as_json=args.json, verbose=args.verbose)
             return 0
         if args.research:
             result = search_scholarly(args.research, limit=10)

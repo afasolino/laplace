@@ -34,6 +34,24 @@ laplace --status
 
 From any child directory, Laplace searches the current directory and parents for `.laplace/project.yaml`. Outside a project it prints the exact next command to run. The global registry refuses name/path collisions; `laplace --list` and `laplace --unregister NAME` manage only registry entries.
 
+## Primary chat workflow
+
+For the shared FormalScience layout:
+
+```powershell
+cd "C:\Users\andre\OneDrive\Desktop\dottorato\FormalScience\Workspace"
+laplace --init MyProject
+cd MyProject
+laplace --ingest MyWorks
+laplace --start
+```
+
+The browser opens the project-aware chat at `http://127.0.0.1:8000/chat`. The sidebar holds conversations and collection filters; the center pane supports Ask, Search, Write, Research, and explicitly ungrounded General modes; selecting `[1]`, `[2]`, or another citation opens the right evidence panel with filename, title, page, chunk, source class, availability, score, and quoted passage. `＋` stages PDF/TXT/Markdown/CSV/JSON attachments in the project cache; it never writes to the shared Library.
+
+Conversation history is persisted in `Data/Metadata/laplace.db`, bounded before prompting, and survives server restarts. Rename/archive controls, export, regenerate, Stop, project settings, Library status, Research candidates, Downloads, and the concise `/dashboard` remain available from the sidebar. Settings writes create timestamped backups and never return secrets.
+
+The model response is normalized before display. Nested/fenced JSON is converted to readable Markdown; citation IDs must resolve to exact retrieved evidence. Invalid model citations are kept in the audit record and replaced with `GROUNDED_EXTRACTIVE_FALLBACK`. Full evidence is available through `/api/chat/messages/{message_id}/evidence`, not dumped into normal chat messages.
+
 ## Everyday commands
 
 ```powershell
@@ -42,6 +60,8 @@ laplace --ingest MyWorks --dry-run
 laplace --ingest MyWorks
 laplace --search "compute-in-memory low-bit quantization"
 laplace --ask "Which local evidence supports the latency claim?"
+laplace --ask "Which local evidence supports the latency claim?" --json
+laplace --search "compute-in-memory low-bit quantization" --json
 laplace --write related-work "Draft one concise evidence-grounded paragraph"
 laplace --research "speculative decoding hardware"
 laplace --web fetch https://arxiv.org/abs/2203.16487
@@ -69,7 +89,7 @@ laplace --download 0
 laplace --promote document.pdf MyTopics/speculative-decoding --force
 ```
 
-`--start` launches the existing FastAPI/UI on `127.0.0.1:8000` in the background and records its PID in project state. `--start --foreground` keeps it attached. IEEE login is optional, visible, manual, and never receives credentials from Laplace; subscribed downloads require per-item approval. The AMD Ryzen AI NPU and vision path remain optional and cannot block the GPU/CPU baseline.
+`--start` validates the current project and exact Ollama models, launches the project-aware FastAPI/UI on `127.0.0.1:8000` in the background, records its PID, and opens `/chat`. It prints the project, model, embeddings, dashboard URL, and chat URL. `--start --foreground` keeps it attached; `--start --no-browser` suppresses browser opening. IEEE login is optional, visible, manual, and never receives credentials from Laplace; subscribed downloads require per-item approval. The AMD Ryzen AI NPU and vision path remain optional and cannot block the GPU/CPU baseline.
 
 The shared library is selected through `FORMALSCIENCE_ROOT` (default `C:\Users\andre\OneDrive\Desktop\dottorato\FormalScience`). Source PDFs remain unchanged; derived text, metadata, downloads, vectors, drafts, and reports stay in the project.
 

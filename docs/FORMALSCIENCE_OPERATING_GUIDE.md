@@ -19,6 +19,8 @@ laplace --start
 
 `laplace` searches parents for `.laplace/project.yaml`, keeps the global registry in `%USERPROFILE%\\.laplace`, and refuses unsafe paths, registry collisions, ungrounded citations, and unapproved IEEE downloads. Use `laplace --project PATH ...` for an explicit project. `laplace --stop`, `--backup`, `--clean-cache --yes`, and `--status` manage lifecycle state without touching source PDFs or model/browser data.
 
+The browser opens `/chat`, not the diagnostic dashboard. The chat stores conversations in project-local `Data/Metadata/laplace.db`, bounds history before generation, streams status/token events from Ollama, and exposes evidence/audit details through separate API routes. Ask, Search, Write, Research, and General modes are visible in the mode selector; General is clearly ungrounded. The dashboard remains available at `/dashboard` for concise status.
+
 The original low-level command remains available for reproducible scripts:
 
 ```powershell
