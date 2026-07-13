@@ -10,11 +10,13 @@ import difflib
 
 # Git invocation is restricted to fixed worktree/apply operations.
 import subprocess  # nosec B404
+import sys
 import time
 import uuid
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from .engineering import (
     AgentTask,
@@ -42,6 +44,22 @@ class Worktree:
     root: Path
     base_commit: str
     task_id: str
+
+
+@dataclass(frozen=True)
+class TeamWorkflowOptions:
+    """Explicit, auditable controls for a local five-role implementation run.
+
+    The default is deliberately the stricter workflow.  Ablation callers can
+    disable one contribution at a time, but cannot silently enable a CPU or
+    an unbounded repair path.
+    """
+
+    base_commit: str = "HEAD"
+    retrieval_mode: Literal["full", "project_local", "curated_only", "none"] = "full"
+    role_mode: Literal["five_role", "direct"] = "five_role"
+    adversarial_verification: bool = True
+    reviewer_invariants: bool = True
 
 
 def _run_git(
@@ -246,12 +264,18 @@ class LocalTeamRunner:
     """Execute the persisted five-agent graph with at most two repair cycles."""
 
     def __init__(
-        self, repository_root: Path, project_root: Path, candidate: ServingCandidate
+        self,
+        repository_root: Path,
+        project_root: Path,
+        candidate: ServingCandidate,
+        *,
+        options: TeamWorkflowOptions | None = None,
     ) -> None:
         self.repository_root = repository_root.resolve()
         self.project_root = project_root.resolve()
         self.store = AgentTaskStore(self.project_root)
         self.candidate = candidate
+        self.options = options or TeamWorkflowOptions()
         self.log_root = self.project_root / "Outputs" / "AgentTeam" / "team_logs"
 
     def _transition(self, task: AgentTask, target: TaskState, note: str) -> AgentTask:
@@ -269,16 +293,356 @@ class LocalTeamRunner:
             "completion_tokens": result.completion_tokens,
         }
 
+    @staticmethod
+    def _acceptance_matrix(task: AgentTask) -> list[JsonObject]:
+        """Make every approval criterion explicit and machine-checkable."""
+        requirements = task.specification.get("functional_requirements", [])
+        requirement_text = (
+            [item for item in requirements if isinstance(item, str)]
+            if isinstance(requirements, list)
+            else []
+        )
+        if task.domain == "python":
+            checks = [
+                "required_public_fixture_test",
+                "adversarial_negative_path_test",
+                "ruff_format",
+                "ruff",
+                "strict_mypy",
+                "project_pytest",
+                "coverage_pytest",
+                "bandit",
+            ]
+        else:
+            checks = [
+                "public_self_checking_simulation",
+                "adversarial_protocol_simulation",
+                "verilator_lint",
+                "iverilog_compile",
+                "vvp_simulation",
+                "yosys_synthesis",
+            ]
+        return [{"requirement": item, "required_evidence": checks} for item in requirement_text]
+
+    @staticmethod
+    def _current_source_context(worktree: Worktree, allowed_paths: list[str]) -> JsonObject:
+        sources: list[JsonObject] = []
+        for relative in allowed_paths:
+            path = _inside(worktree.root, worktree.root / _safe_relative(relative, label="source"))
+            if path.is_file():
+                sources.append(
+                    {
+                        "path": relative,
+                        "content": path.read_text(encoding="utf-8", errors="replace")[:16000],
+                    }
+                )
+        return {"current_worktree_sources": sources}
+
+    @staticmethod
+    def _filter_evidence(evidence: JsonObject, mode: str) -> JsonObject:
+        """Support retrieval ablations without changing source or provenance data."""
+        filtered = dict(evidence)
+        if mode == "none":
+            filtered["target_project"] = []
+            filtered["governed_references"] = []
+        elif mode == "project_local":
+            filtered["governed_references"] = []
+        elif mode == "curated_only":
+            filtered["target_project"] = []
+        elif mode != "full":
+            raise EngineeringError(f"Unknown retrieval mode: {mode}")
+        filtered["retrieval_mode"] = mode
+        return filtered
+
+    @staticmethod
+    def _public_python_tests(worktree: Worktree, allowed_paths: list[str]) -> list[str]:
+        tests: list[str] = []
+        for path in allowed_paths:
+            candidate = Path(path).parent / "test_public.py"
+            absolute = _inside(worktree.root, worktree.root / candidate)
+            if absolute.is_file():
+                tests.append(candidate.as_posix())
+        return sorted(set(tests))
+
+    def _run_python_adversarial_checks(
+        self, runner: LocalToolRunner, task: AgentTask, worktree: Worktree
+    ) -> JsonObject:
+        """Run public-spec-derived negative tests without materializing hidden tests.
+
+        These checks are independently written from the stated contract.  They
+        live in the verifier process, not the implementation worktree, so they
+        cannot change the submitted patch or expose evaluator-held tests.
+        """
+        source_root = str(
+            _inside(worktree.root, worktree.root / Path(_allowed_paths(task)[0]).parent)
+        )
+        task_id = task.task_id
+        scripts: dict[str, str] = {
+            "py_safe_async_job": """import asyncio, sys
+sys.path.insert(0, {root!r})
+from job_runner import JobTimeout, run_job
+cancelled = asyncio.Event()
+async def work():
+    try:
+        await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        cancelled.set()
+        raise
+try:
+    asyncio.run(run_job(work, 0.001))
+except JobTimeout:
+    pass
+else:
+    raise AssertionError('timeout must raise JobTimeout')
+assert cancelled.is_set(), 'cancelled coroutine must finish cleanup'
+""",
+            "py_fastapi_strict_endpoint": """import sys
+sys.path.insert(0, {root!r})
+from endpoint import SquareRequest
+from pydantic import ValidationError
+for value in ('3', 3.0):
+    try:
+        SquareRequest(value=value)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError('coercion was accepted')
+try:
+    SquareRequest(value=3, extra_field=True)
+except ValidationError:
+    pass
+else:
+    raise AssertionError('extra field was accepted')
+""",
+            "py_sqlite_transaction": """import sqlite3, sys
+sys.path.insert(0, {root!r})
+from store import record_transition
+with sqlite3.connect(':memory:') as connection:
+    assert record_transition(connection, 'key', 'first') is True
+    assert record_transition(connection, 'key', 'first') is False
+    try:
+        record_transition(connection, 'key', 'other')
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('conflicting provenance was accepted')
+    assert connection.execute('select value from transitions where key = ?', ('key',)).fetchone() == ('first',)
+""",
+            "py_safe_path_cli": """import sys, tempfile
+from pathlib import Path
+sys.path.insert(0, {root!r})
+from path_cli import write_json
+with tempfile.TemporaryDirectory() as tmp:
+    base = Path(tmp)
+    for name in ('../outside.json', str((base / 'absolute.json').resolve())):
+        try:
+            write_json(base, name, {{'ok': True}})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('unsafe output name was accepted')
+""",
+            "py_unseen_pydantic_policy": """import sys
+sys.path.insert(0, {root!r})
+from pydantic import ValidationError
+from request import PolicyRequest
+for candidate in ({{'retries': '2'}}, {{'retries': 2, 'unknown': True}}):
+    try:
+        PolicyRequest(**candidate)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError('strict validation was weakened')
+""",
+            "py_unseen_atomic_writer": """import sys, tempfile
+from pathlib import Path
+sys.path.insert(0, {root!r})
+from writer import write_json_output
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    for name in ('../escape.json', str((root / 'absolute.json').resolve())):
+        try:
+            write_json_output(root, name, {{'ok': True}})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('unsafe output path was accepted')
+""",
+            "py_unseen_async_deadline": """import asyncio, sys
+sys.path.insert(0, {root!r})
+from deadline import DeadlineExceeded, run_with_deadline
+cancelled = asyncio.Event()
+async def work():
+    try:
+        await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        cancelled.set()
+        raise
+try:
+    asyncio.run(run_with_deadline(work, 0.001))
+except DeadlineExceeded:
+    pass
+else:
+    raise AssertionError('deadline must raise DeadlineExceeded')
+assert cancelled.is_set(), 'deadline cancellation did not complete'
+""",
+            "py_unseen_sqlite_state": """import sqlite3, sys
+sys.path.insert(0, {root!r})
+from state import record_state
+with sqlite3.connect(':memory:') as connection:
+    assert record_state(connection, 'job', 'created') is True
+    assert record_state(connection, 'job', 'created') is False
+    try:
+        record_state(connection, 'job', 'done')
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('conflicting state was accepted')
+    assert connection.execute('select value from state_entries where name = ?', ('job',)).fetchone() == ('created',)
+""",
+        }
+        script = scripts.get(task_id)
+        if script is None:
+            return {
+                "tool": "adversarial_python",
+                "status": "FAILED",
+                "reason": "No contract-derived adversarial check is registered for this task",
+            }
+        result = runner.run(
+            "pytest",
+            [sys.executable, "-c", script.format(root=source_root)],
+            timeout_seconds=60,
+        ).to_json()
+        result["tool"] = "adversarial_python"
+        result["invariants"] = self._acceptance_matrix(task)
+        return result
+
+    def _run_systemverilog_adversarial_checks(
+        self, runner: LocalToolRunner, task: AgentTask, worktree: Worktree
+    ) -> JsonObject:
+        """Compile a verifier-owned protocol testbench from public invariants."""
+        source = _inside(
+            worktree.root,
+            worktree.root / _safe_relative(_allowed_paths(task)[0], label="RTL source"),
+        )
+        testbench_root = self.log_root / "adversarial"
+        testbench_root.mkdir(parents=True, exist_ok=True)
+        testbench = testbench_root / f"{task.task_id}_{uuid.uuid4().hex}.sv"
+        if task.task_id == "sv_ready_valid_buffer":
+            body = """module tb_adversarial;
+logic clk = 0, rst_n = 0, in_valid, in_ready, out_valid, out_ready;
+logic [7:0] in_data, out_data;
+rv_buffer #(.WIDTH(8)) dut (.*);
+always #5 clk = ~clk;
+initial begin
+  in_valid=0; in_data=0; out_ready=0; repeat (2) @(posedge clk); rst_n=1;
+  @(negedge clk); in_valid=1; in_data=8'hA1;
+  @(negedge clk); if (!out_valid || out_data !== 8'hA1) $fatal(1, "stored payload missing");
+  in_data=8'hB2; out_ready=1;
+  @(negedge clk); if (!out_valid || out_data !== 8'hB2) $fatal(1, "simultaneous dequeue/enqueue lost payload");
+  in_valid=0; @(negedge clk); if (out_valid) $fatal(1, "buffer did not drain");
+  $display("PASS adversarial ready/valid"); $finish;
+end
+endmodule
+"""
+        elif task.task_id == "sv_axi_lite_irq_regs":
+            body = """module tb_adversarial;
+logic clk=0, rst_n=0; logic [3:0] s_awaddr,s_araddr; logic s_awvalid,s_awready,s_wvalid,s_wready,s_bvalid,s_bready;
+logic [31:0] s_wdata,s_rdata; logic [3:0] s_wstrb; logic [1:0] s_bresp,s_rresp; logic s_arvalid,s_arready,s_rvalid,s_rready,irq_input,irq;
+axi_lite_irq_regs dut (.*); always #5 clk=~clk;
+task automatic write_split(input logic [3:0] addr,input logic [31:0] data,input logic [3:0] strb);
+begin
+ @(negedge clk); s_awaddr=addr;s_awvalid=1; while(!s_awready) @(negedge clk); s_awvalid=0;
+ s_wdata=data;s_wstrb=strb;s_wvalid=1; while(!s_wready) @(negedge clk); @(negedge clk);s_wvalid=0;
+ while(!s_bvalid) @(negedge clk); if(s_bresp!==2'b00)$fatal(1,"write error");
+end endtask
+initial begin
+ s_awaddr=0;s_awvalid=0;s_wdata=0;s_wstrb=0;s_wvalid=0;s_bready=1;s_araddr=0;s_arvalid=0;s_rready=1;irq_input=0;
+ repeat(2) @(posedge clk); rst_n=1;
+ write_split(0,32'h00000100,4'b0010); @(negedge clk);irq_input=1;@(negedge clk);irq_input=0; if(irq)$fatal(1,"WSTRB ignored");
+ write_split(0,32'h1,4'b0001); @(negedge clk);irq_input=1;@(negedge clk);irq_input=0;if(!irq)$fatal(1,"IRQ enable/status broken");
+ write_split(4,32'h1,4'b0001); @(negedge clk);if(irq)$fatal(1,"W1C did not clear");
+ $display("PASS adversarial AXI");$finish;
+end endmodule
+"""
+        elif task.task_id == "sv_unseen_rv_slot":
+            body = """module tb_adversarial;
+logic clk=0,rst_n=0,in_valid,in_ready,out_valid,out_ready; logic [7:0] in_data,out_data;
+rv_slot #(.WIDTH(8)) dut (.*); always #5 clk=~clk;
+initial begin
+ in_valid=0;in_data=0;out_ready=0;repeat(2)@(posedge clk);rst_n=1;
+ @(negedge clk);in_valid=1;in_data=8'hA1;
+ @(negedge clk);in_data=8'hB2;out_ready=1;
+ if(!in_ready||!out_valid||out_data!==8'hA1)$fatal(1,"replace failed");
+ @(negedge clk);in_valid=0;if(!out_valid||out_data!==8'hB2)$fatal(1,"new payload lost");
+ @(negedge clk);if(out_valid)$fatal(1,"drain failed");$finish;
+end endmodule
+"""
+        elif task.task_id == "sv_unseen_w1c_event":
+            body = """module tb_adversarial;
+logic clk=0,rst_n=0,event_i,write_i;logic[31:0]write_data_i;logic[3:0]write_strb_i;logic pending_o,irq_o;
+w1c_event dut (.*);always #5 clk=~clk;
+initial begin
+ event_i=0;write_i=0;write_data_i=0;write_strb_i=0;repeat(2)@(posedge clk);rst_n=1;
+ @(negedge clk);event_i=1;@(negedge clk);event_i=0;if(!pending_o||irq_o)$fatal(1,"disabled event IRQ");
+ @(negedge clk);write_i=1;write_data_i=32'h1;write_strb_i=4'b0010;@(negedge clk);write_i=0;if(irq_o)$fatal(1,"WSTRB broken");
+ @(negedge clk);write_i=1;write_data_i=32'h1;write_strb_i=4'b0001;@(negedge clk);write_i=0;if(!irq_o)$fatal(1,"enable broken");
+ @(negedge clk);write_i=1;write_data_i=32'h2;write_strb_i=4'b0001;@(negedge clk);write_i=0;if(pending_o||irq_o)$fatal(1,"W1C broken");$finish;
+end endmodule
+"""
+        else:
+            return {
+                "tool": "adversarial_systemverilog",
+                "status": "FAILED",
+                "reason": "No contract-derived adversarial check is registered for this task",
+            }
+        testbench.write_text(body, encoding="utf-8")
+        testbench.chmod(0o444)
+        output = self.log_root / f"adversarial_{task.task_id}_{uuid.uuid4().hex}.vvp"
+        compile_result = runner.run(
+            "iverilog",
+            [
+                "iverilog",
+                "-g2012",
+                "-s",
+                "tb_adversarial",
+                "-o",
+                str(output),
+                str(source),
+                str(testbench),
+            ],
+            timeout_seconds=60,
+        ).to_json()
+        run_result: JsonObject = {"tool": "vvp", "status": "NOT_RUN"}
+        if compile_result["status"] == "PASS":
+            run_result = runner.run("vvp", ["vvp", str(output)], timeout_seconds=60).to_json()
+        return {
+            "tool": "adversarial_systemverilog",
+            "status": "PASS"
+            if compile_result["status"] == "PASS" and run_result["status"] == "PASS"
+            else "FAILED",
+            "compile": compile_result,
+            "simulation": run_result,
+            "invariants": self._acceptance_matrix(task),
+        }
+
     def _prepare(self, task: AgentTask, query: str, backend: LocalGenerationBackend) -> AgentTask:
         if task.state == "request":
             task = self._transition(task, "requirements", "Task schema accepted")
         if task.state == "requirements":
-            supervisor_plan = self._role_generation(
-                backend,
-                "You are the Laplace supervisor. Produce a narrow implementation plan, risk list, "
-                "and acceptance checklist. Do not propose shell commands or edits.\n"
-                f"Task: {task.specification}",
-            )
+            supervisor_plan: JsonObject = {
+                "status": "SKIPPED_FOR_DIRECT_ABLATION",
+                "reason": "One-agent ablation omits supervisor generation.",
+            }
+            if self.options.role_mode == "five_role":
+                supervisor_plan = self._role_generation(
+                    backend,
+                    "You are the Laplace supervisor. Produce an interface-first implementation plan, "
+                    "risk list, explicit acceptance matrix, and negative-path test strategy. Cover "
+                    "invariants, errors, async lifecycle/transactions for Python, or microarchitecture, "
+                    "reset and protocol stability for SystemVerilog. Do not propose shell commands or edits.\n"
+                    f"Task: {task.specification}",
+                )
             self.store.write_artifact(
                 task.task_id,
                 role="supervisor",
@@ -286,6 +650,7 @@ class LocalTeamRunner:
                 payload={
                     "task_id": task.task_id,
                     "specification": task.specification,
+                    "acceptance_matrix": self._acceptance_matrix(task),
                     "supervisor_model_contribution": supervisor_plan,
                 },
             )
@@ -299,19 +664,49 @@ class LocalTeamRunner:
                     "task_id": task.task_id,
                     "allowed_paths": _allowed_paths(task),
                     "correction_budget": 2,
+                    "test_before_production_change": True,
+                    "acceptance_matrix": self._acceptance_matrix(task),
                 },
             )
+            if self.options.role_mode == "five_role":
+                test_strategy = self._role_generation(
+                    backend,
+                    "You are the Laplace implementer before editing production code. Produce an "
+                    "executable-test strategy covering every acceptance criterion, negative path and "
+                    "boundary. For SystemVerilog include reset, stalls/backpressure, simultaneous events "
+                    "and assertions; for Python include interfaces, types, lifecycle and transactions. "
+                    "Do not edit code or reveal/seek held-out tests.\n"
+                    f"Task: {task.specification}",
+                )
+                self.store.write_artifact(
+                    task.task_id,
+                    role="implementer",
+                    name="test_strategy",
+                    payload={
+                        "status": "GENERATED_BEFORE_PRODUCTION_PATCH",
+                        "acceptance_matrix": self._acceptance_matrix(task),
+                        "implementer_model_contribution": test_strategy,
+                    },
+                )
             task = self._transition(task, "retrieval", "Researcher may retrieve read-only evidence")
         if task.state == "retrieval":
             evidence = retrieve_engineering_evidence(
                 self.repository_root, self.project_root, task, query=query
             )
-            researcher_summary = self._role_generation(
-                backend,
-                "You are the Laplace researcher. Summarize the following precedence-ordered "
-                "evidence and identify project conventions relevant to the task. Do not edit code.\n"
-                f"Evidence: {evidence}",
-            )
+            evidence = self._filter_evidence(evidence, self.options.retrieval_mode)
+            researcher_summary: JsonObject = {
+                "status": "SKIPPED_FOR_DIRECT_ABLATION",
+                "reason": "One-agent ablation omits researcher generation.",
+            }
+            if self.options.role_mode == "five_role":
+                researcher_summary = self._role_generation(
+                    backend,
+                    "You are the Laplace researcher. Summarize the following precedence-ordered "
+                    "evidence. Project-local conventions outrank references. Identify only information "
+                    "relevant to interface invariants, error cases, lifecycle/transactions, or RTL "
+                    "microarchitecture and protocol behavior. Do not edit code.\n"
+                    f"Evidence: {evidence}",
+                )
             evidence["researcher_model_contribution"] = researcher_summary
             self.store.write_artifact(
                 task.task_id, role="researcher", name="evidence_packet", payload=evidence
@@ -319,15 +714,91 @@ class LocalTeamRunner:
             task = self._transition(task, "implementation", "Evidence packet persisted")
         return task
 
-    def _prompt(self, task: AgentTask, evidence: JsonObject) -> str:
+    def _prompt(
+        self,
+        task: AgentTask,
+        evidence: JsonObject,
+        *,
+        defect_report: JsonObject | None = None,
+        current_sources: JsonObject | None = None,
+    ) -> str:
+        domain_requirements = (
+            "For Python: preserve public interfaces, validate errors explicitly, account for async "
+            "lifecycle and transactions, and maintain strict types."
+            if task.domain == "python"
+            else "For SystemVerilog: state the intended microarchitecture in code structure, keep "
+            "ready/valid or AXI payloads stable under stall, define reset behavior, and keep RTL synthesizable."
+        )
+        repair = ""
+        if defect_report is not None:
+            repair = (
+                "\nThis is a bounded repair. Address only the structured defect report below; retain "
+                "all already-passing behavior. The current worktree source is authoritative, not a stale "
+                "earlier excerpt.\n"
+                f"Defect report: {defect_report}\nCurrent sources: {current_sources}\n"
+            )
         return (
             "You are the Laplace implementer. Return ONLY one unified git diff. "
             "Do not include shell commands, prose, Markdown fences, binary files, deletions, or paths outside the task scope. "
             f"Task specification: {task.specification}\n"
             f"Allowed paths: {_allowed_paths(task)}\n"
+            f"Acceptance matrix: {self._acceptance_matrix(task)}\n"
             f"Evidence in precedence order: {evidence}\n"
-            "Implement the smallest complete change with tests in the allowed paths. If your decoder cannot emit a unified diff, emit exactly one fenced full replacement for the single non-test source file and nothing else."
+            f"{domain_requirements}\n"
+            "The test strategy is already persisted before this production change. Make the smallest complete "
+            "change that will satisfy every listed invariant and public test. If the task allows a testbench, "
+            "update it into a self-checking regression before or with the RTL. If your decoder cannot emit a "
+            "unified diff, emit exactly one fenced full replacement for the single non-test source file and nothing else."
+            f"{repair}"
         )
+
+    def _defect_report(
+        self,
+        task: AgentTask,
+        verification: JsonObject | None,
+        error: str,
+        worktree: Worktree,
+    ) -> JsonObject:
+        """Turn raw tool output into a bounded, reproducible repair request."""
+        failing: list[JsonObject] = []
+        if isinstance(verification, dict):
+            results = verification.get("results")
+            if isinstance(results, list):
+                for item in results:
+                    if isinstance(item, dict) and item.get("status") != "PASS":
+                        failing.append(
+                            {
+                                "tool": item.get("tool"),
+                                "observed_result": str(
+                                    item.get("stderr") or item.get("stdout") or item
+                                ),
+                            }
+                        )
+            adversarial = verification.get("adversarial")
+            if isinstance(adversarial, dict) and adversarial.get("status") != "PASS":
+                failing.append(
+                    {
+                        "tool": adversarial.get("tool", "adversarial"),
+                        "observed_result": str(
+                            adversarial.get("stderr")
+                            or adversarial.get("stdout")
+                            or adversarial.get("reason")
+                            or adversarial
+                        ),
+                    }
+                )
+        return {
+            "status": "CHANGES_REQUESTED",
+            "violated_requirement": task.specification.get("functional_requirements", []),
+            "minimal_failing_example": failing[:4]
+            or [{"tool": "patch_or_workflow", "observed_result": error}],
+            "observed_result": error or "One or more required verifier commands did not pass.",
+            "expected_result": "Every acceptance-matrix command and adversarial invariant passes without regression.",
+            "relevant_source_files": _allowed_paths(task),
+            "allowed_files_to_modify": _allowed_paths(task),
+            "mandatory_regression_commands": self._acceptance_matrix(task),
+            "worktree": str(worktree.root),
+        }
 
     def run(self, task_id: str, *, query: str) -> JsonObject:
         task = self.store.load(task_id)
@@ -369,13 +840,30 @@ class LocalTeamRunner:
         evidence_raw: object = json.loads(evidence_file.read_text(encoding="utf-8"))
         if not isinstance(evidence_raw, dict):
             raise EngineeringError("Task evidence packet is malformed")
-        worktree = WorktreeManager(self.repository_root, self.project_root).create(task.task_id)
+        worktree = WorktreeManager(self.repository_root, self.project_root).create(
+            task.task_id, self.options.base_commit
+        )
         runner = LocalToolRunner(worktree.root, self.log_root)
         allowed = _allowed_paths(task)
         last_error = ""
+        latest_verification: JsonObject | None = None
+        latest_defect: JsonObject | None = None
         for attempt in range(0, 3):
             try:
-                generated = backend.generate(self._prompt(task, evidence_raw), context_tokens=8192)
+                current_sources = (
+                    self._current_source_context(worktree, allowed)
+                    if latest_defect is not None
+                    else None
+                )
+                generated = backend.generate(
+                    self._prompt(
+                        task,
+                        evidence_raw,
+                        defect_report=latest_defect,
+                        current_sources=current_sources,
+                    ),
+                    context_tokens=8192,
+                )
                 self.store.write_artifact(
                     task.task_id,
                     role="implementer",
@@ -410,7 +898,24 @@ class LocalTeamRunner:
                     task, "verification", "Validated patch applied in isolated worktree"
                 )
                 if task.domain == "python":
-                    verification = runner.run_python_quality_gates(allowed)
+                    formatter = runner.run(
+                        "ruff_format",
+                        [sys.executable, "-m", "ruff", "format", *allowed],
+                        timeout_seconds=120,
+                    ).to_json()
+                    required_tests = self._public_python_tests(worktree, allowed)
+                    verification = runner.run_python_quality_gates(
+                        allowed, required_test_paths=required_tests
+                    )
+                    verification["formatter_preparation"] = formatter
+                    verification["passed"] = bool(verification.get("passed")) and (
+                        formatter["status"] == "PASS"
+                    )
+                    adversarial = (
+                        self._run_python_adversarial_checks(runner, task, worktree)
+                        if self.options.adversarial_verification
+                        else {"tool": "adversarial_python", "status": "SKIPPED_BY_ABLATION"}
+                    )
                 else:
                     testbench = next(
                         (path for path in allowed if Path(path).stem.startswith("tb_")), None
@@ -421,24 +926,50 @@ class LocalTeamRunner:
                         top_module=Path(source_files[0]).stem,
                         testbench=testbench,
                     )
+                    adversarial = (
+                        self._run_systemverilog_adversarial_checks(runner, task, worktree)
+                        if self.options.adversarial_verification
+                        else {
+                            "tool": "adversarial_systemverilog",
+                            "status": "SKIPPED_BY_ABLATION",
+                        }
+                    )
+                verification["adversarial"] = adversarial
+                verification["acceptance_matrix"] = self._acceptance_matrix(task)
+                verification["passed"] = bool(verification.get("passed")) and (
+                    adversarial.get("status") == "PASS"
+                    or adversarial.get("status") == "SKIPPED_BY_ABLATION"
+                )
+                latest_verification = verification
                 self.store.write_artifact(
                     task.task_id, role="verifier", name="verification_report", payload=verification
                 )
                 task = self._transition(
                     task, "review", "Verifier emitted immutable command evidence"
                 )
-                reviewer_contribution = self._role_generation(
-                    backend,
-                    "You are the Laplace reviewer. Review the task requirements and the verifier "
-                    "report below. State whether the deterministic verifier evidence is sufficient; "
-                    "do not edit or merge code.\n"
-                    f"Task: {task.specification}\nVerifier report: {verification}",
-                )
+                reviewer_contribution: JsonObject = {
+                    "status": "SKIPPED_FOR_DIRECT_ABLATION",
+                    "reason": "One-agent ablation omits reviewer generation.",
+                }
+                if self.options.role_mode == "five_role":
+                    reviewer_contribution = self._role_generation(
+                        backend,
+                        "You are the Laplace reviewer. Do not approve merely because code compiles. "
+                        "For each acceptance criterion, require an explicit passing verifier record. "
+                        "The invariant matrix below is held-out-style guidance, not evaluator tests; do not "
+                        "look for hidden tests. State missing evidence as changes requested. Do not edit or merge.\n"
+                        f"Task: {task.specification}\n"
+                        f"Acceptance matrix: {self._acceptance_matrix(task)}\n"
+                        f"Verifier report: {verification}",
+                    )
                 task = self.store.load(task.task_id)
+                evidence_complete = verification.get("passed") is True
+                if self.options.reviewer_invariants:
+                    evidence_complete = evidence_complete and isinstance(
+                        verification.get("acceptance_matrix"), list
+                    )
                 review: JsonObject = {
-                    "status": "APPROVED"
-                    if verification.get("passed") is True
-                    else "CHANGES_REQUESTED",
+                    "status": "APPROVED" if evidence_complete else "CHANGES_REQUESTED",
                     "task_id": task.task_id,
                     "verification_report": task.artifacts.get("verification_report"),
                     "repair_cycles_used": task.correction_loops,
@@ -476,15 +1007,24 @@ class LocalTeamRunner:
                 last_error = "Verifier reported failed quality gates"
             except (EngineeringError, ModelRequired) as exc:
                 last_error = str(exc)
+            latest_defect = self._defect_report(task, latest_verification, last_error, worktree)
+            self.store.write_artifact(
+                task.task_id,
+                role="verifier",
+                name="defect_report",
+                payload=latest_defect,
+            )
             if attempt == 2:
                 break
             task = self._transition(
-                task, "bounded_correction", f"Focused repair requested: {last_error}"
+                task,
+                "bounded_correction",
+                "Structured repair requested; see immutable verifier defect report",
             )
             task = self._transition(
                 task,
                 "implementation",
-                "Implementer receives only the focused verifier/reviewer failure",
+                "Implementer receives structured defect evidence and current worktree context",
             )
         task = self._transition(
             task, "blocked", f"Verification failed after two correction loops: {last_error}"

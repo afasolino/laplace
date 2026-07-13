@@ -261,7 +261,7 @@ def domain_schema_path(repository_root: Path, domain: Domain) -> Path:
 
 
 def normalize_task_spec(repository_root: Path, domain: Domain, raw: JsonObject) -> JsonObject:
-    """Validate the committed schema and add only deterministic workflow metadata."""
+    """Validate a task and add deterministic, evidence-required acceptance metadata."""
     validate_task_spec(raw, domain_schema_path(repository_root, domain))
     task_id = raw.get("task_id")
     if not isinstance(task_id, str) or not _TASK_ID.fullmatch(task_id):
@@ -276,6 +276,52 @@ def normalize_task_spec(repository_root: Path, domain: Domain, raw: JsonObject) 
         "governed_open_source_references",
         "model_prior_knowledge",
     ]
+    requirements = raw.get("functional_requirements")
+    required = (
+        [item for item in requirements if isinstance(item, str)]
+        if isinstance(requirements, list)
+        else []
+    )
+    if domain == "python":
+        gates = [
+            "explicit_public_fixture_test",
+            "adversarial_negative_path_test",
+            "ruff_format_check",
+            "ruff_lint",
+            "strict_mypy",
+            "pytest",
+            "coverage_pytest",
+            "bandit",
+        ]
+        focus = [
+            "public interfaces and compatibility",
+            "input and error behavior",
+            "async lifecycle and transaction boundaries where applicable",
+            "type constraints and negative-path behavior",
+        ]
+    else:
+        gates = [
+            "self_checking_public_simulation",
+            "adversarial_protocol_simulation",
+            "verilator_lint",
+            "iverilog_compile",
+            "vvp_simulation",
+            "yosys_synthesis",
+        ]
+        focus = [
+            "explicit microarchitecture before RTL",
+            "clock/reset and CDC assumptions",
+            "ready/valid or bus stability under backpressure",
+            "simultaneous events and boundary conditions",
+        ]
+    normalized["quality_contract"] = {
+        "requirements": required,
+        "required_gates": gates,
+        "normalization_focus": focus,
+        "review_requires_explicit_evidence_for_every_gate": True,
+        "repair_budget": 2,
+        "held_out_tests_available_to_implementation": False,
+    }
     normalized["normalized_at"] = _now()
     return normalized
 
@@ -825,15 +871,44 @@ class LocalToolRunner:
         return result
 
     def run_python_quality_gates(
-        self, paths: list[str] | None = None, *, timeout_seconds: int = 300
+        self,
+        paths: list[str] | None = None,
+        *,
+        required_test_paths: list[str] | None = None,
+        timeout_seconds: int = 300,
     ) -> JsonObject:
+        """Run project quality gates plus task-local public tests.
+
+        ``pytest`` normally follows the repository's ``testpaths`` setting.
+        A task fixture outside that directory would therefore be invisible to a
+        project-wide run.  Required fixture tests are supplied as safe relative
+        paths and are always run explicitly before the full suite.
+        """
         targets = self._target_paths(paths or [])
         python_targets = [target for target in targets if Path(target).suffix == ".py"]
         bandit_targets = python_targets or ["src"]
+        required_tests = self._target_paths(required_test_paths or [])
+        if not all(Path(test).suffix == ".py" for test in required_tests):
+            raise ToolExecutionError("Required Python tests must be .py files")
+        public_test_commands: list[tuple[str, list[str]]] = []
+        for test in required_tests:
+            public_test_commands.append(
+                (
+                    "pytest",
+                    [
+                        sys.executable,
+                        "-m",
+                        "pytest",
+                        "-q",
+                        test,
+                    ],
+                )
+            )
         commands: list[tuple[str, list[str]]] = [
             ("ruff_format", [sys.executable, "-m", "ruff", "format", "--check", *targets]),
             ("ruff", [sys.executable, "-m", "ruff", "check", *targets]),
             ("mypy", [sys.executable, "-m", "mypy", "src"]),
+            *public_test_commands,
             ("pytest", [sys.executable, "-m", "pytest"]),
             ("coverage", [sys.executable, "-m", "coverage", "run", "-m", "pytest"]),
         ]
@@ -849,6 +924,7 @@ class LocalToolRunner:
         report: JsonObject = {
             "operation": "run_python_quality_gates",
             "repository_root": str(self.repository_root),
+            "required_test_paths": required_tests,
             "passed": passed,
             "results": results,
             "created_at": _now(),
@@ -1054,8 +1130,8 @@ class AgentTaskStore:
         allowed: dict[Role, set[str]] = {
             "supervisor": {"requirements", "plan", "final_report", "escalation"},
             "researcher": {"evidence_packet"},
-            "implementer": {"implementation_report", "patch_manifest"},
-            "verifier": {"verification_report"},
+            "implementer": {"implementation_report", "patch_manifest", "test_strategy"},
+            "verifier": {"verification_report", "defect_report"},
             "reviewer": {"review_report"},
         }
         if name not in allowed[role]:

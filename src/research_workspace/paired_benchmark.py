@@ -341,6 +341,13 @@ def _task_spec(task: BenchmarkTask) -> JsonObject:
             "out_of_scope": ["network", "changes outside allowed paths"],
             "assumptions": ["Held-out tests are unavailable during implementation."],
         }
+    protocol = (
+        "ready_valid"
+        if task.task_id in {"sv_ready_valid_buffer", "sv_unseen_rv_slot"}
+        else "register_w1c"
+        if task.task_id == "sv_unseen_w1c_event"
+        else "axi4_lite"
+    )
     return {
         "task_id": task.task_id,
         "objective": task.objective,
@@ -355,9 +362,7 @@ def _task_spec(task: BenchmarkTask) -> JsonObject:
         "interfaces": [
             {
                 "name": "fixture_interface",
-                "protocol": "ready_valid"
-                if task.task_id == "sv_ready_valid_buffer"
-                else "axi4_lite",
+                "protocol": protocol,
                 "direction": "bidirectional",
                 "signals": ["See the public RTL module port list."],
                 "ordering": "in-order",
@@ -464,6 +469,61 @@ def test_traversal_and_absolute_outputs_are_rejected(tmp_path: Path) -> None:
         write_json(tmp_path, str((tmp_path / "absolute.json").resolve()), {"x": 1})
     assert not (tmp_path.parent / "escape.json").exists()
 """,
+    "py_unseen_pydantic_policy": """import pytest
+from pydantic import ValidationError
+from request import PolicyRequest
+
+
+def test_strict_policy_rejects_coercion_and_extras() -> None:
+    with pytest.raises(ValidationError):
+        PolicyRequest(retries="2")
+    with pytest.raises(ValidationError):
+        PolicyRequest(retries=2, unexpected=True)
+""",
+    "py_unseen_atomic_writer": """from pathlib import Path
+import pytest
+from writer import write_json_output
+
+
+def test_output_path_cannot_escape_root(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        write_json_output(tmp_path, "../escape.json", {"x": 1})
+    with pytest.raises(ValueError):
+        write_json_output(tmp_path, str((tmp_path / "absolute.json").resolve()), {"x": 1})
+""",
+    "py_unseen_async_deadline": """import asyncio
+import pytest
+from deadline import DeadlineExceeded, run_with_deadline
+
+
+def test_deadline_cancels_and_raises() -> None:
+    cancelled = asyncio.Event()
+
+    async def stalled() -> int:
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return 0
+
+    with pytest.raises(DeadlineExceeded):
+        asyncio.run(run_with_deadline(stalled, 0.001))
+    assert cancelled.is_set()
+""",
+    "py_unseen_sqlite_state": """import sqlite3
+import pytest
+from state import record_state
+
+
+def test_state_is_idempotent_and_conflict_does_not_overwrite() -> None:
+    with sqlite3.connect(":memory:") as connection:
+        assert record_state(connection, "job", "created") is True
+        assert record_state(connection, "job", "created") is False
+        with pytest.raises(ValueError):
+            record_state(connection, "job", "done")
+        assert connection.execute("SELECT value FROM state_entries WHERE name='job'").fetchone() == ("created",)
+""",
 }
 
 _SV_HELD_OUT: dict[str, str] = {
@@ -523,6 +583,29 @@ endmodule
         $display("PASS: held-out AXI-Lite"); $finish;
     end
 endmodule
+""",
+    "sv_unseen_rv_slot": """module tb_heldout;
+logic clk=0,rst_n=0,in_valid,in_ready,out_valid,out_ready; logic [7:0] in_data,out_data;
+rv_slot #(.WIDTH(8)) dut (.*); always #5 clk=~clk;
+initial begin
+ in_valid=0;in_data=0;out_ready=0;repeat(2)@(posedge clk);rst_n=1;
+ @(negedge clk);in_valid=1;in_data=8'h11;
+ @(negedge clk);in_data=8'h22;out_ready=1;
+ if(!in_ready || !out_valid || out_data!==8'h11)$fatal(1,"simultaneous replace broken");
+ @(negedge clk);in_valid=0;if(!out_valid||out_data!==8'h22)$fatal(1,"new value lost");
+ @(negedge clk);if(out_valid)$fatal(1,"not drained");$finish;
+end endmodule
+""",
+    "sv_unseen_w1c_event": """module tb_heldout;
+logic clk=0,rst_n=0,event_i,write_i;logic[31:0]write_data_i;logic[3:0]write_strb_i;logic pending_o,irq_o;
+w1c_event dut (.*);always #5 clk=~clk;
+initial begin
+ event_i=0;write_i=0;write_data_i=0;write_strb_i=0;repeat(2)@(posedge clk);rst_n=1;
+ @(negedge clk);event_i=1;@(negedge clk);event_i=0;if(!pending_o||irq_o)$fatal(1,"reset enable wrong");
+ @(negedge clk);write_i=1;write_data_i=32'h1;write_strb_i=4'b0010;@(negedge clk);write_i=0;if(irq_o)$fatal(1,"WSTRB ignored");
+ @(negedge clk);write_i=1;write_data_i=32'h1;write_strb_i=4'b0001;@(negedge clk);write_i=0;if(!irq_o)$fatal(1,"enable broken");
+ @(negedge clk);write_i=1;write_data_i=32'h2;write_strb_i=4'b0001;@(negedge clk);write_i=0;if(pending_o||irq_o)$fatal(1,"W1C/IRQ broken");$finish;
+end endmodule
 """,
 }
 

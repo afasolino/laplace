@@ -14,6 +14,7 @@ from research_workspace.paired_benchmark import (
     _task_spec,
     _write_reports,
 )
+from research_workspace.quality_improvement import _UNSEEN_TASKS
 
 
 def test_all_six_public_benchmark_specs_normalize() -> None:
@@ -23,6 +24,15 @@ def test_all_six_public_benchmark_specs_normalize() -> None:
     for task in _BENCHMARK_TASKS:
         normalized = normalize_task_spec(root, task.domain, _task_spec(task))
         assert normalized["task_id"] == task.task_id
+
+
+def test_all_six_unseen_quality_specs_normalize() -> None:
+    root = Path(__file__).resolve().parents[1]
+    assert [task.domain for task in _UNSEEN_TASKS].count("python") == 4
+    assert [task.domain for task in _UNSEEN_TASKS].count("systemverilog") == 2
+    for task in _UNSEEN_TASKS:
+        normalized = normalize_task_spec(root, task.domain, _task_spec(task))
+        assert normalized["quality_contract"]["repair_budget"] == 2
 
 
 def test_codex_lane_receives_the_same_two_repair_cycle_budget() -> None:
