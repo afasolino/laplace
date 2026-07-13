@@ -1,0 +1,72 @@
+{
+  "task_id": "python_quality_gates_fixture",
+  "objective": "Exercise the governed Python implementation workflow against a narrow typed service change.",
+  "repository_root": ".",
+  "allowed_paths": [
+    "src/research_workspace/engineering.py",
+    "tests/test_engineering.py"
+  ],
+  "public_interfaces": [
+    {
+      "name": "LocalToolRunner.run_python_quality_gates",
+      "contract": "Returns an immutable, typed report for only allowlisted commands.",
+      "compatibility": "Existing Laplace commands remain unchanged."
+    }
+  ],
+  "functional_requirements": [
+    "Validate paths before execution.",
+    "Capture bounded stdout and stderr in immutable logs.",
+    "Terminate a timed-out process tree.",
+    "Report every gate without parsing informal summaries."
+  ],
+  "input_validation": [
+    "Paths must remain beneath the target repository.",
+    "Timeouts must be bounded.",
+    "Only allowlisted tools and arguments are accepted."
+  ],
+  "error_behavior": [
+    "Unsafe inputs fail with an explicit EngineeringError.",
+    "A failed command is reported with its exact return code and log path."
+  ],
+  "concurrency_and_lifecycle": [
+    "Subprocesses use a new process session and are terminated on timeout."
+  ],
+  "security_and_paths": [
+    "No command is obtained from a document or model output.",
+    "Logs are stored separately from source files."
+  ],
+  "quality_requirements": {
+    "python": ">=3.11",
+    "typing": "strict mypy with no unjustified escapes",
+    "formatting": "ruff format --check",
+    "lint": "ruff check",
+    "tests": "pytest and coverage evidence",
+    "coverage_target": "critical tool and provenance paths",
+    "documentation": "typed JSON report contract"
+  },
+  "references": [
+    {
+      "path_or_id": "src/research_workspace/core.py",
+      "purpose": "Reuse deterministic local logging and artifact conventions.",
+      "licence_policy": "project code"
+    }
+  ],
+  "verification_commands": [
+    "python -m ruff format --check src tests",
+    "python -m ruff check src tests",
+    "python -m mypy src",
+    "python -m pytest tests/test_engineering.py"
+  ],
+  "deliverables": [
+    "typed implementation",
+    "unit tests",
+    "immutable command logs"
+  ],
+  "out_of_scope": [
+    "network access",
+    "unrestricted shell access"
+  ],
+  "assumptions": [
+    "The project control environment contains the declared quality tools."
+  ]
+}

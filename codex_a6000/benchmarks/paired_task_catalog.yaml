@@ -1,0 +1,90 @@
+schema_version: 1
+purpose: >-
+  Define reproducible task families for the final paired comparison between a
+  hosted Codex-direct lane and the local Laplace five-agent lane. Codex must
+  instantiate deterministic fixture repositories and held-out tests locally.
+minimum_valid_tasks: 6
+required_mix:
+  python: 4
+  systemverilog: 2
+execution:
+  identical_base_commit: true
+  isolated_git_worktrees: true
+  same_task_spec: true
+  same_public_tests: true
+  same_tool_allowlist: true
+  same_wall_time_limit: true
+  concurrent_start_required: true
+  record_overlap_timestamps: true
+  hidden_tests_excluded_from_implementation_worktrees: true
+  prohibit_cross_lane_reading: true
+
+task_families:
+  python:
+    - id: py_safe_async_job
+      description: Implement or repair an asynchronous job runner with cancellation, timeout, subprocess cleanup, typed results, and deterministic tests.
+      risks: [cancellation, timeout, resource_leak, broad_exception, blocking_io]
+    - id: py_fastapi_strict_endpoint
+      description: Add a backward-compatible FastAPI endpoint with strict Pydantic v2 schemas, explicit error mapping, dependency injection, and integration tests.
+      risks: [schema_coercion, lifecycle, status_codes, backward_compatibility]
+    - id: py_sqlite_transaction
+      description: Implement an idempotent SQLite state transition with migration safety, transaction rollback, concurrency behavior, and provenance preservation.
+      risks: [transactionality, locking, migration, partial_write]
+    - id: py_safe_path_cli
+      description: Add a typed CLI operation with safe-path enforcement, atomic output, structured JSON, exact exit codes, and tests for hostile paths.
+      risks: [path_traversal, atomicity, cli_contract, error_reporting]
+    - id: py_rag_citation_invariant
+      description: Repair a seeded citation/provenance invariant bug without weakening fallback or audit behavior; include regression and property tests.
+      risks: [provenance, immutable_state, malformed_model_output, regression]
+  systemverilog:
+    - id: sv_ready_valid_buffer
+      description: Implement a parameterized ready/valid skid buffer with backpressure, reset semantics, self-checking randomized simulation, and assertions.
+      risks: [data_loss, duplication, combinational_loop, reset]
+    - id: sv_axi_lite_irq_regs
+      description: Implement an AXI4-Lite register block with WSTRB, unmapped responses, W1C status, IRQ deassertion, and a self-checking testbench.
+      risks: [independent_channels, partial_write, response, irq]
+    - id: sv_async_fifo_review
+      description: Repair a seeded asynchronous FIFO bug and prove relevant safety properties with available simulation/formal tools.
+      risks: [cdc, gray_code, full_empty, reset_domains]
+
+scoring:
+  python:
+    held_out_functional_tests: 35
+    edge_failure_and_invariant_tests: 15
+    strict_typing: 10
+    ruff_format_and_lint: 10
+    security_concurrency_resource_safety: 10
+    maintainability_and_api_compatibility: 10
+    performance_and_resource_behavior: 5
+    scope_discipline: 5
+  systemverilog:
+    held_out_functional_simulation: 35
+    protocol_assertions_and_corner_cases: 20
+    lint_compile_elaboration: 10
+    synthesis_portability: 10
+    reset_width_signedness_cdc: 10
+    self_checking_test_quality: 10
+    scope_discipline: 5
+
+reporting:
+  required_metrics:
+    - valid_run
+    - objective_score_0_100
+    - build_or_elaboration_pass
+    - public_test_pass
+    - held_out_test_pass
+    - type_or_lint_defects
+    - correction_loops
+    - wall_time_s
+    - model_output_tokens
+    - human_interventions
+    - files_changed
+    - diff_lines
+  aggregate:
+    - win_tie_loss_by_task
+    - mean_and_median_score
+    - pass_rate
+    - median_wall_time
+    - score_per_minute
+    - defect_categories
+    - invalid_run_reasons

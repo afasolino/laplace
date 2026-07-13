@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://laplace.local/schemas/python_task_spec.schema.json",
+  "title": "Laplace Python implementation task",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_id",
+    "objective",
+    "repository_root",
+    "allowed_paths",
+    "public_interfaces",
+    "functional_requirements",
+    "error_behavior",
+    "quality_requirements",
+    "verification_commands",
+    "deliverables",
+    "out_of_scope"
+  ],
+  "properties": {
+    "task_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+    "objective": {"type": "string", "minLength": 10},
+    "repository_root": {"type": "string", "minLength": 1},
+    "allowed_paths": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "public_interfaces": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "contract"],
+        "properties": {
+          "name": {"type": "string"},
+          "contract": {"type": "string"},
+          "compatibility": {"type": "string"}
+        }
+      }
+    },
+    "functional_requirements": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 3}
+    },
+    "input_validation": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "error_behavior": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string"}
+    },
+    "concurrency_and_lifecycle": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "security_and_paths": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "performance_constraints": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "quality_requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["python", "typing", "formatting", "lint", "tests"],
+      "properties": {
+        "python": {"type": "string", "const": ">=3.11"},
+        "typing": {"type": "string"},
+        "formatting": {"type": "string"},
+        "lint": {"type": "string"},
+        "tests": {"type": "string"},
+        "coverage_target": {"type": "string"},
+        "documentation": {"type": "string"}
+      }
+    },
+    "references": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path_or_id", "purpose"],
+        "properties": {
+          "path_or_id": {"type": "string"},
+          "purpose": {"type": "string"},
+          "licence_policy": {"type": "string"}
+        }
+      }
+    },
+    "verification_commands": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "deliverables": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string"}
+    },
+    "out_of_scope": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  }
+}

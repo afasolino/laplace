@@ -1,0 +1,114 @@
+{
+  "task_id": "systemverilog_skid_buffer_fixture",
+  "objective": "Implement and verify a portable parameterized ready/valid skid buffer.",
+  "target": {
+    "class": "portable_rtl",
+    "language": "SystemVerilog-2017 subset",
+    "toolchain": [
+      "verilator",
+      "iverilog",
+      "yosys"
+    ],
+    "technology_or_device": null,
+    "frequency_mhz": null
+  },
+  "parameters": [
+    {
+      "name": "WIDTH",
+      "type": "int unsigned",
+      "default": 8,
+      "constraints": "greater than zero"
+    }
+  ],
+  "interfaces": [
+    {
+      "name": "input_stream",
+      "protocol": "ready_valid",
+      "direction": "input",
+      "signals": [
+        "in_valid",
+        "in_ready",
+        "in_data"
+      ],
+      "ordering": "in-order",
+      "backpressure": "in_ready must deassert while full and out_ready is low"
+    },
+    {
+      "name": "output_stream",
+      "protocol": "ready_valid",
+      "direction": "output",
+      "signals": [
+        "out_valid",
+        "out_ready",
+        "out_data"
+      ],
+      "ordering": "in-order",
+      "backpressure": "out_valid and out_data remain stable until handshake"
+    }
+  ],
+  "clock_reset": {
+    "clock_domains": [
+      "clk"
+    ],
+    "reset_semantics": "active-low asynchronous assertion clears buffered valid state",
+    "cdc_rdc_assumptions": "single clock domain; no CDC or RDC crossing"
+  },
+  "functional_requirements": [
+    "Retain accepted input until an output handshake.",
+    "Allow simultaneous dequeue and enqueue without loss or duplication.",
+    "Reset must empty the buffer."
+  ],
+  "error_and_corner_behavior": [
+    "WIDTH zero is rejected.",
+    "Output data is stable under backpressure."
+  ],
+  "coding_constraints": [
+    "Use synthesizable SystemVerilog.",
+    "Use explicit widths and reset semantics."
+  ],
+  "files_allowed_to_change": [
+    "benchmarks/a6000_agent_team/rtl/rv_skid_buffer.sv",
+    "benchmarks/a6000_agent_team/rtl/tb_rv_skid_buffer.sv"
+  ],
+  "references": [
+    {
+      "kind": "project",
+      "identifier": "codex_a6000/reference_sources/systemverilog_sources.yaml",
+      "purpose": "Governed ready/valid reference policy."
+    }
+  ],
+  "verification": {
+    "self_checking": true,
+    "tests": [
+      "reset",
+      "backpressure stability",
+      "simultaneous dequeue/enqueue"
+    ],
+    "assertions": [
+      "stable out_valid and out_data while stalled"
+    ],
+    "commands": [
+      "verilator --lint-only --Wall --sv",
+      "iverilog -g2012",
+      "vvp",
+      "yosys synth"
+    ],
+    "acceptance_criteria": [
+      "self-checking simulation prints PASS",
+      "lint and synthesis return zero"
+    ]
+  },
+  "deliverables": [
+    "RTL",
+    "self-checking testbench",
+    "tool logs"
+  ],
+  "out_of_scope": [
+    "AXI-Lite",
+    "multi-clock CDC"
+  ],
+  "assumptions": [
+    "A one-entry registered elastic buffer is acceptable."
+  ],
+  "blocking_questions": []
+}

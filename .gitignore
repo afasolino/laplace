@@ -1,9 +1,13 @@
 .venv/
+.venv-vllm/
+.venv-vllm-cu124/
+.models/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage*
 *.egg-info/
 .env
 data/documents/*

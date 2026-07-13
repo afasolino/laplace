@@ -1,0 +1,193 @@
+schema_version: 1
+policy:
+  default_use: reference_only_no_copy_until_verified
+  require_exact_commit: true
+  require_license_file_hash: true
+  require_selected_file_hashes: true
+  require_attribution: true
+  network_requires_approval: true
+  license_acceptance_requires_approval: true
+  do_not_ingest_entire_monorepositories: true
+  preserve_source_files: true
+  references_read_only: true
+
+sources:
+  - id: python_cpython_docs_selected
+    repository: https://github.com/python/cpython.git
+    default_branch_hint: main
+    destination_topic: 10_language_stdlib/cpython_docs_selected
+    priority: essential
+    selection_policy: select Python 3.11 language, standard-library, typing, asyncio, pathlib, sqlite3, logging, subprocess, security, and testing documentation; avoid bulk source ingestion
+    topics:
+      - python_3_11
+      - standard_library
+      - typing
+      - asyncio
+      - pathlib
+      - sqlite3
+      - logging
+      - subprocess
+      - security
+    license_hint: Python-2.0 and additional documentation terms; verify at pinned commit
+    allowed_use_after_verification: guidance_with_attribution
+
+  - id: python_peps_selected
+    repository: https://github.com/python/peps.git
+    default_branch_hint: main
+    destination_topic: 00_policies/peps_selected
+    priority: essential
+    selection_policy: select PEP 8, 257, 440, 484, 517, 518, 544, 561, 621, 660, 702, and other PEPs directly relevant to the actual task
+    topics:
+      - style
+      - docstrings
+      - versioning
+      - typing
+      - protocols
+      - packaging
+      - editable_installs
+      - deprecations
+    license_hint: verify repository and selected PEP terms at pinned commit
+    allowed_use_after_verification: guidance_with_attribution
+
+  - id: python_packaging_guide_selected
+    repository: https://github.com/pypa/packaging.python.org.git
+    default_branch_hint: main
+    destination_topic: 60_tooling_packaging/python_packaging_guide
+    priority: high
+    selection_policy: select virtual-environment, pyproject, dependency, editable-install, build, and packaging guidance
+    topics:
+      - pyproject
+      - dependencies
+      - venv
+      - editable_install
+      - builds
+      - packaging
+    license_hint: verify repository licence at pinned commit
+    allowed_use_after_verification: guidance_with_attribution
+
+  - id: fastapi_selected
+    repository: https://github.com/fastapi/fastapi.git
+    default_branch_hint: master
+    destination_topic: 30_web_api/fastapi_selected
+    priority: essential_for_laplace
+    selection_policy: select documented dependency-injection, lifespan, testing, background-task, validation, security, and error-handling patterns with matching tests
+    topics:
+      - fastapi
+      - dependency_injection
+      - lifespan
+      - testing
+      - background_tasks
+      - security
+      - error_handling
+    license_hint: MIT; verify at pinned commit
+    allowed_use_after_verification: reference_and_permissive_reuse_with_attribution
+
+  - id: pydantic_selected
+    repository: https://github.com/pydantic/pydantic.git
+    default_branch_hint: main
+    destination_topic: 50_typing_validation/pydantic_selected
+    priority: essential_for_laplace
+    selection_policy: select Pydantic v2 models, validators, strict mode, serialization, JSON schema, settings, and error-handling documentation/examples
+    topics:
+      - pydantic_v2
+      - validation
+      - strict_models
+      - serialization
+      - json_schema
+      - settings
+    license_hint: MIT; verify at pinned commit
+    allowed_use_after_verification: reference_and_permissive_reuse_with_attribution
+
+  - id: pytest_selected
+    repository: https://github.com/pytest-dev/pytest.git
+    default_branch_hint: main
+    destination_topic: 40_testing/pytest_selected
+    priority: essential
+    selection_policy: select fixtures, parametrization, monkeypatching, temporary files, integration practices, warnings, logging, and plugin guidance
+    topics:
+      - pytest
+      - fixtures
+      - parametrization
+      - monkeypatch
+      - tmp_path
+      - integration_tests
+      - warnings
+    license_hint: MIT; verify at pinned commit
+    allowed_use_after_verification: reference_and_permissive_reuse_with_attribution
+
+  - id: hypothesis_selected
+    repository: https://github.com/HypothesisWorks/hypothesis.git
+    default_branch_hint: master
+    destination_topic: 40_testing/hypothesis_selected
+    priority: high
+    selection_policy: select property-based and stateful testing documentation and compact examples; reference-only by default
+    topics:
+      - property_based_testing
+      - stateful_testing
+      - edge_cases
+      - parsers
+      - invariants
+    license_hint: MPL-2.0; verify at pinned commit and keep reference-only unless obligations are reviewed
+    allowed_use_after_verification: reference_only_by_default
+
+  - id: ruff_docs_selected
+    repository: https://github.com/astral-sh/ruff.git
+    default_branch_hint: main
+    destination_topic: 60_tooling_packaging/ruff_selected
+    priority: essential_tooling
+    selection_policy: select formatter, linter, configuration, rule, noqa, and migration documentation rather than the implementation
+    topics:
+      - ruff
+      - formatting
+      - linting
+      - pyproject
+      - rule_configuration
+    license_hint: MIT; verify at pinned commit
+    allowed_use_after_verification: tooling_documentation_reference
+
+  - id: mypy_docs_selected
+    repository: https://github.com/python/mypy.git
+    default_branch_hint: master
+    destination_topic: 50_typing_validation/mypy_selected
+    priority: essential_tooling
+    selection_policy: select strict typing, protocols, generics, narrowing, stubs, error-code, and configuration guidance
+    topics:
+      - mypy
+      - strict_typing
+      - protocols
+      - generics
+      - narrowing
+      - stubs
+    license_hint: MIT; verify at pinned commit
+    allowed_use_after_verification: tooling_documentation_reference
+
+  - id: modelcontextprotocol_python_sdk_selected
+    repository: https://github.com/modelcontextprotocol/python-sdk.git
+    default_branch_hint: main
+    destination_topic: 70_agents_mcp/mcp_python_sdk_selected
+    priority: essential_for_mcp
+    selection_policy: select official typed server/client, stdio, Streamable HTTP, tool schema, lifecycle, and testing examples
+    topics:
+      - mcp
+      - typed_tools
+      - stdio
+      - streamable_http
+      - lifecycle
+      - testing
+    license_hint: MIT; verify at pinned commit
+    allowed_use_after_verification: reference_and_permissive_reuse_with_attribution
+
+  - id: langgraph_selected
+    repository: https://github.com/langchain-ai/langgraph.git
+    default_branch_hint: main
+    destination_topic: 70_agents_mcp/langgraph_selected
+    priority: optional
+    selection_policy: select explicit state-graph, persistence, interruption, retry, and testing concepts; do not introduce the dependency unless measured benefits justify it
+    topics:
+      - state_graph
+      - persistence
+      - retries
+      - interruption
+      - agent_orchestration
+    license_hint: MIT; verify at pinned commit
+    allowed_use_after_verification: conceptual_reference_by_default

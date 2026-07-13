@@ -1,0 +1,139 @@
+schema_version: 1
+policy:
+  default_use: reference_only_no_copy_until_verified
+  require_exact_commit: true
+  require_license_file_hash: true
+  require_selected_file_hashes: true
+  require_attribution: true
+  network_requires_approval: true
+  license_acceptance_requires_approval: true
+  do_not_ingest_entire_monorepositories: true
+  preserve_source_files: true
+  references_read_only: true
+
+sources:
+  - id: lowrisc_style_guides
+    repository: https://github.com/lowRISC/style-guides.git
+    default_branch_hint: master
+    destination_topic: 00_policies/lowrisc_style
+    priority: essential
+    expected_material:
+      - VerilogCodingStyle.md
+      - DVCodingStyle.md
+      - LICENSE
+    topics:
+      - systemverilog_style
+      - design_verification_style
+      - naming
+      - reset
+      - combinational_sequential_structure
+      - assertions
+    license_hint: CC-BY-4.0
+    allowed_use_after_verification: guidance_with_attribution
+
+  - id: opentitan_selected
+    repository: https://github.com/lowRISC/opentitan.git
+    default_branch_hint: master
+    destination_topic: 10_rtl_patterns/opentitan_selected
+    priority: essential
+    selection_policy: select representative documented RTL, primitives, register/interrupt/FIFO/reset examples, and matching documentation; exclude generated bulk and unrelated software
+    topics:
+      - production_rtl
+      - register_blocks
+      - interrupts
+      - fifo
+      - reset
+      - assertions
+      - dv
+    license_hint: Apache-2.0 unless otherwise noted in-tree
+    allowed_use_after_verification: reference_and_permissive_reuse_with_attribution
+
+  - id: ibex_selected
+    repository: https://github.com/lowRISC/ibex.git
+    default_branch_hint: master
+    destination_topic: 10_rtl_patterns/ibex_selected
+    priority: high
+    selection_policy: select compact parameterized RTL, packages, pipeline/control examples, and verification-aware material
+    topics:
+      - parameterized_rtl
+      - packages
+      - pipeline
+      - control
+      - assertions
+    license_hint: verify repository and selected files at pinned commit
+    allowed_use_after_verification: reference_or_permissive_reuse_only_if_confirmed
+
+  - id: pulp_common_cells_selected
+    repository: https://github.com/pulp-platform/common_cells.git
+    default_branch_hint: master
+    destination_topic: 10_rtl_patterns/pulp_common_cells_selected
+    priority: high
+    selection_policy: select FIFO, ready-valid, synchronizer, CDC, counter, and clock/reset components with documentation and tests
+    topics:
+      - fifo
+      - ready_valid
+      - cdc
+      - synchronizer
+      - counters
+      - clock_reset
+    license_hint: verify Solderpad or per-file terms at pinned commit
+    allowed_use_after_verification: reference_only_by_default
+
+  - id: pulp_axi_selected
+    repository: https://github.com/pulp-platform/axi.git
+    default_branch_hint: master
+    destination_topic: 20_interfaces/pulp_axi_selected
+    priority: essential_for_axi
+    selection_policy: select AXI4 and AXI4-Lite interfaces, register slices, converters, test infrastructure, assertions, and documentation; exclude unrelated generated artifacts
+    topics:
+      - axi4
+      - axi4_lite
+      - ready_valid
+      - crossbar
+      - width_conversion
+      - verification
+    license_hint: verify Solderpad or per-file terms at pinned commit
+    allowed_use_after_verification: reference_only_by_default
+
+  - id: verible_docs_and_configs
+    repository: https://github.com/chipsalliance/verible.git
+    default_branch_hint: master
+    destination_topic: 40_tooling/verible
+    priority: essential_tooling
+    selection_policy: select formatter/linter documentation, configuration examples, and rule documentation rather than the complete implementation
+    topics:
+      - formatter
+      - linter
+      - style_rules
+      - language_server
+    license_hint: verify repository licence at pinned commit
+    allowed_use_after_verification: tooling_documentation_reference
+
+  - id: verilator_docs_and_examples
+    repository: https://github.com/verilator/verilator.git
+    default_branch_hint: master
+    destination_topic: 40_tooling/verilator
+    priority: high
+    selection_policy: select user documentation, example projects, lint, simulation, coverage, and self-checking integration material
+    topics:
+      - lint
+      - compile
+      - simulation
+      - coverage
+      - ci
+    license_hint: verify repository and example-file terms at pinned commit
+    allowed_use_after_verification: tooling_documentation_reference
+
+  - id: zipcpu_wb2axip_optional
+    repository: https://github.com/ZipCPU/wb2axip.git
+    default_branch_hint: master
+    destination_topic: 30_verification/zipcpu_axi_formal_optional
+    priority: optional
+    selection_policy: select only AXI-Lite formal/property material after manual licence review
+    topics:
+      - axi_lite
+      - formal_properties
+      - protocol_failures
+    license_hint: verify carefully at pinned commit
+    allowed_use_after_verification: reference_only_no_copy
+    requires_manual_license_review: true

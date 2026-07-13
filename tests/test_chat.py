@@ -46,18 +46,44 @@ def _project(tmp_path: Path) -> tuple[ChatProject, ConversationStore]:
 def test_nested_json_and_fenced_json_normalize_to_readable_content(tmp_path: Path) -> None:
     project, _ = _project(tmp_path)
     evidence = _evidence()
-    nested = json.dumps({"answer": json.dumps({"content": "The latency is 3 ms. [1]", "citations": [1]})})
-    response, _ = normalize_response(nested, conversation_id="c", query="latency", evidence=evidence, model=project.model, collections=["MyWorks"], candidate_count=1)
+    nested = json.dumps(
+        {"answer": json.dumps({"content": "The latency is 3 ms. [1]", "citations": [1]})}
+    )
+    response, _ = normalize_response(
+        nested,
+        conversation_id="c",
+        query="latency",
+        evidence=evidence,
+        model=project.model,
+        collections=["MyWorks"],
+        candidate_count=1,
+    )
     assert response.status == "GROUNDED"
     assert response.content == "The latency is 3 ms. [1]"
     assert response.citations[0].chunk_id == "document:p2:c0"
-    fenced, _ = normalize_response("```json\n{\"content\":\"3 ms [1]\",\"citations\":[1]}\n```", conversation_id="c", query="latency", evidence=evidence, model=project.model, collections=["MyWorks"], candidate_count=1)
+    fenced, _ = normalize_response(
+        '```json\n{"content":"3 ms [1]","citations":[1]}\n```',
+        conversation_id="c",
+        query="latency",
+        evidence=evidence,
+        model=project.model,
+        collections=["MyWorks"],
+        candidate_count=1,
+    )
     assert fenced.content == "3 ms [1]"
 
 
 def test_invalid_or_empty_citations_use_extractable_fallback(tmp_path: Path) -> None:
     project, _ = _project(tmp_path)
-    response, audit = normalize_response('{"content":"Unsupported claim","citations":[99]}', conversation_id="c", query="q", evidence=_evidence(), model=project.model, collections=["MyWorks"], candidate_count=1)
+    response, audit = normalize_response(
+        '{"content":"Unsupported claim","citations":[99]}',
+        conversation_id="c",
+        query="q",
+        evidence=_evidence(),
+        model=project.model,
+        collections=["MyWorks"],
+        candidate_count=1,
+    )
     assert response.status == "GROUNDED_EXTRACTIVE_FALLBACK"
     assert response.fallback_used is True
     assert response.citations and response.citations[0].citation_id == 1
@@ -70,8 +96,12 @@ def test_rejected_draft_and_fallback_are_distinct_revisions(tmp_path: Path) -> N
     evidence = _evidence()
     candidate, fallback, audit = normalize_revisions(
         '{"content":"Model draft with an unsupported claim","citations":[99]}',
-        conversation_id=conversation.conversation_id, query="latency", evidence=evidence,
-        model=project.model, collections=["MyWorks"], candidate_count=1,
+        conversation_id=conversation.conversation_id,
+        query="latency",
+        evidence=evidence,
+        model=project.model,
+        collections=["MyWorks"],
+        candidate_count=1,
     )
     assert fallback is not None
     assert candidate.message_id != fallback.message_id
@@ -93,27 +123,41 @@ def test_compact_evidence_ids_and_marker_recovery(tmp_path: Path) -> None:
     assert '"evidence_id": "E1"' in prompt
     response, _ = normalize_response(
         '{"content":"The latency is 3 ms [E1]","citations":[]}',
-        conversation_id="c", query="latency", evidence=evidence, model=project.model,
-        collections=["MyWorks"], candidate_count=1,
+        conversation_id="c",
+        query="latency",
+        evidence=evidence,
+        model=project.model,
+        collections=["MyWorks"],
+        candidate_count=1,
     )
     assert response.status == "GROUNDED"
     assert response.citations[0].evidence_id == "E1"
 
 
-def test_stream_preserves_rejected_draft_then_emits_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stream_preserves_rejected_draft_then_emits_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     project, store = _project(tmp_path)
     conversation = store.create("Stream")
     engine = ChatEngine(project, store)
     engine._retrieve = lambda query, selected: _evidence()  # type: ignore[method-assign]
 
     def fake_generation(*args: object, **kwargs: object):
-        yield {"response": '{"content":"Draft","citations":[99]}' }
+        yield {"response": '{"content":"Draft","citations":[99]}'}
 
     monkeypatch.setattr("research_workspace.chat.generate_stream", fake_generation)
     events = list(engine.stream(conversation.conversation_id, "latency"))
     kinds = [event["type"] for event in events]
-    assert "message_rejected" in kinds and "fallback_started" in kinds and "fallback_completed" in kinds
-    assert kinds.index("message_rejected") < kinds.index("fallback_started") < kinds.index("fallback_completed")
+    assert (
+        "message_rejected" in kinds
+        and "fallback_started" in kinds
+        and "fallback_completed" in kinds
+    )
+    assert (
+        kinds.index("message_rejected")
+        < kinds.index("fallback_started")
+        < kinds.index("fallback_completed")
+    )
     messages = store.detail(conversation.conversation_id).messages
     assert len(messages) == 3
     assert messages[-2]["state"] == "CITATION_REJECTED"
@@ -145,18 +189,39 @@ def test_stop_only_marks_active_generation(tmp_path: Path) -> None:
     assert engine.stop("missing") is False
 
 
-def test_chat_api_contract_stream_and_attachment_validation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_chat_api_contract_stream_and_attachment_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client = TestClient(create_app(tmp_path, tmp_path / "db.sqlite"))
     created = client.post("/api/chat/conversations", json={"title": "API chat"})
     assert created.status_code == 200
     conversation_id = created.json()["conversation_id"]
 
     response = ChatEngine
-    def fake_answer(self: ChatEngine, conversation_id: str, query: str, **kwargs: object) -> ChatResponse:
-        return ChatResponse(message_id="m", conversation_id=conversation_id, content="Readable answer [1]", status="GROUNDED", created_at="now", model="qwen3:4b", retrieval={"query": query, "collections": ["MyWorks"], "candidate_count": 1, "evidence_count": 1, "mode": "hybrid"})
+
+    def fake_answer(
+        self: ChatEngine, conversation_id: str, query: str, **kwargs: object
+    ) -> ChatResponse:
+        return ChatResponse(
+            message_id="m",
+            conversation_id=conversation_id,
+            content="Readable answer [1]",
+            status="GROUNDED",
+            created_at="now",
+            model="qwen3:4b",
+            retrieval={
+                "query": query,
+                "collections": ["MyWorks"],
+                "candidate_count": 1,
+                "evidence_count": 1,
+                "mode": "hybrid",
+            },
+        )
 
     monkeypatch.setattr(response, "answer", fake_answer)
-    reply = client.post(f"/api/chat/conversations/{conversation_id}/messages", json={"content": "Question"})
+    reply = client.post(
+        f"/api/chat/conversations/{conversation_id}/messages", json={"content": "Question"}
+    )
     assert reply.status_code == 200
     assert reply.json()["content"] == "Readable answer [1]"
     assert client.get("/chat").status_code == 200
@@ -168,29 +233,59 @@ def test_chat_api_contract_stream_and_attachment_validation(tmp_path: Path, monk
     assert client.get("/downloads").status_code == 200
     assert client.get("/settings").status_code == 200
     assert client.get("/api/project/settings").json()["secrets_included"] is False
-    changed = client.patch("/api/project/settings/retrieval.yaml", json={"content": "mode: semantic\n"})
+    changed = client.patch(
+        "/api/project/settings/retrieval.yaml", json={"content": "mode: semantic\n"}
+    )
     assert changed.status_code == 200
-    assert client.patch("/api/project/settings/retrieval.yaml", json={"content": "not: [valid"}).status_code == 400
-    assert client.post(f"/api/chat/conversations/{conversation_id}/attachments", files={"file": ("../bad.exe", b"x")}).status_code == 415
+    assert (
+        client.patch(
+            "/api/project/settings/retrieval.yaml", json={"content": "not: [valid"}
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            f"/api/chat/conversations/{conversation_id}/attachments",
+            files={"file": ("../bad.exe", b"x")},
+        ).status_code
+        == 415
+    )
     assert client.delete(f"/api/chat/conversations/{conversation_id}").status_code == 400
 
     def fake_stream(self: ChatEngine, conversation_id: str, query: str, **kwargs: object):
         yield {"type": "message_started", "conversation_id": conversation_id}
         yield {"type": "token", "text": "hello"}
-        yield {"type": "message_completed", "message": {"content": "hello", "status": "GROUNDED", "citations": []}}
+        yield {
+            "type": "message_completed",
+            "message": {"content": "hello", "status": "GROUNDED", "citations": []},
+        }
 
     monkeypatch.setattr(response, "stream", fake_stream)
-    with client.stream("POST", f"/api/chat/conversations/{conversation_id}/messages?stream=true", json={"content": "Stream"}) as stream:
+    with client.stream(
+        "POST",
+        f"/api/chat/conversations/{conversation_id}/messages?stream=true",
+        json={"content": "Stream"},
+    ) as stream:
         text = stream.read().decode()
     assert "message_started" in text and "token" in text and "message_completed" in text
 
 
-def test_laplace_ask_terminal_output_and_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_laplace_ask_terminal_output_and_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     monkeypatch.setattr(laplace_cli, "APP_HOME", tmp_path / "home")
     monkeypatch.setattr(laplace_cli, "REGISTRY_PATH", tmp_path / "home" / "projects.json")
     monkeypatch.setattr(laplace_cli, "CONFIG_PATH", tmp_path / "home" / "config.yaml")
     root = Path(laplace_cli.init_laplace("ChatProject", cwd=tmp_path)["project"])
-    result = {"response": {"content": "Readable answer", "status": "GROUNDED", "model": "qwen3:4b", "citations": [{"citation_id": 1, "title": "Paper", "filename": "paper.pdf", "page": 1}],}, "answer_path": str(root / "Outputs" / "Conversations" / "response.json")}
+    result = {
+        "response": {
+            "content": "Readable answer",
+            "status": "GROUNDED",
+            "model": "qwen3:4b",
+            "citations": [{"citation_id": 1, "title": "Paper", "filename": "paper.pdf", "page": 1}],
+        },
+        "answer_path": str(root / "Outputs" / "Conversations" / "response.json"),
+    }
     monkeypatch.setattr(laplace_cli, "_ask", lambda paths, query: result)
     assert laplace_cli.main(["--project", str(root), "--ask", "question"]) == 0
     assert "Readable answer" in capsys.readouterr().out

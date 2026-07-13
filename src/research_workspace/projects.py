@@ -48,7 +48,9 @@ def project_paths(name: str, root: Path | None = None) -> ProjectPaths:
         if laplace_config.is_file():
             if candidate.name != name:
                 raise ProjectError("Laplace project name does not match its directory")
-            return ProjectPaths(name, candidate, laplace_config, candidate / "Data", candidate / "Outputs")
+            return ProjectPaths(
+                name, candidate, laplace_config, candidate / "Data", candidate / "Outputs"
+            )
     formal = (root or formalscience_root()).resolve()
     workspace = (formal / "Workspace").resolve()
     target = (workspace / name).resolve()

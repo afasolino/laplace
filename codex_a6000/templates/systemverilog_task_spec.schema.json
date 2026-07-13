@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.laplace/schemas/systemverilog-task-spec.schema.json",
+  "title": "SystemVerilog implementation task specification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_id",
+    "objective",
+    "target",
+    "interfaces",
+    "clock_reset",
+    "functional_requirements",
+    "verification",
+    "deliverables",
+    "out_of_scope",
+    "blocking_questions"
+  ],
+  "properties": {
+    "task_id": {"type": "string", "minLength": 1},
+    "objective": {"type": "string", "minLength": 1},
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class", "language", "toolchain"],
+      "properties": {
+        "class": {"enum": ["portable_rtl", "fpga", "asic", "simulation_only"]},
+        "language": {"type": "string"},
+        "toolchain": {"type": "array", "items": {"type": "string"}},
+        "technology_or_device": {"type": ["string", "null"]},
+        "frequency_mhz": {"type": ["number", "null"], "exclusiveMinimum": 0}
+      }
+    },
+    "parameters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "type", "default", "constraints"],
+        "properties": {
+          "name": {"type": "string"},
+          "type": {"type": "string"},
+          "default": {},
+          "constraints": {"type": "string"}
+        }
+      }
+    },
+    "interfaces": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "protocol", "direction", "signals", "ordering", "backpressure"],
+        "properties": {
+          "name": {"type": "string"},
+          "protocol": {"type": "string"},
+          "direction": {"enum": ["input", "output", "master", "slave", "bidirectional"]},
+          "signals": {"type": "array", "items": {"type": "string"}},
+          "ordering": {"type": "string"},
+          "backpressure": {"type": "string"}
+        }
+      }
+    },
+    "clock_reset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["clock_domains", "reset_semantics", "cdc_rdc_assumptions"],
+      "properties": {
+        "clock_domains": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "reset_semantics": {"type": "string"},
+        "cdc_rdc_assumptions": {"type": "string"}
+      }
+    },
+    "functional_requirements": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    "performance_requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "latency_cycles": {"type": ["integer", "string", "null"]},
+        "initiation_interval_cycles": {"type": ["integer", "string", "null"]},
+        "throughput": {"type": ["string", "null"]},
+        "area_power_constraints": {"type": ["string", "null"]}
+      }
+    },
+    "error_and_corner_behavior": {"type": "array", "items": {"type": "string"}},
+    "coding_constraints": {"type": "array", "items": {"type": "string"}},
+    "files_allowed_to_change": {"type": "array", "items": {"type": "string"}},
+    "references": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "identifier", "purpose"],
+        "properties": {
+          "kind": {"enum": ["project", "private", "open_source", "standard", "tool_documentation"]},
+          "identifier": {"type": "string"},
+          "purpose": {"type": "string"}
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["self_checking", "tests", "assertions", "commands", "acceptance_criteria"],
+      "properties": {
+        "self_checking": {"const": true},
+        "tests": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "assertions": {"type": "array", "items": {"type": "string"}},
+        "commands": {"type": "array", "items": {"type": "string"}},
+        "acceptance_criteria": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+      }
+    },
+    "deliverables": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    "out_of_scope": {"type": "array", "items": {"type": "string"}},
+    "assumptions": {"type": "array", "items": {"type": "string"}},
+    "blocking_questions": {"type": "array", "items": {"type": "string"}}
+  }
+}

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sqlite3
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from collections.abc import AsyncIterator, Iterator
 from typing import Any, Literal
 
 import yaml
@@ -16,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .chat import ChatEngine, ChatProject, ConversationStore
 from .core import ensure_layout, load_settings
 from .documents import ALLOWED, ingest
+from .engineering import EngineeringError, LocalToolRunner, ReferenceLibrary
 from .library import ingest_library
 from .online import search_ieee, search_scholarly
 from .projects import init_project, list_projects, project_summary
@@ -79,6 +82,16 @@ class SettingsUpdateRequest(BaseModel):
     content: str = Field(max_length=50_000)
 
 
+class EngineeringReferenceRequest(BaseModel):
+    """Strict, project-scoped reference operations exposed over localhost."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    action: Literal["initialize", "status", "sync", "select", "ingest", "verify"] = "status"
+    topics: list[str] = Field(default_factory=list, max_length=32)
+    reference_id: str | None = Field(default=None, max_length=120)
+
+
 def _project_info(root: Path, config: dict[str, Any], database: Path) -> ChatProject:
     project = config.get("project", {}) if isinstance(config, dict) else {}
     models = config.get("models", {}) if isinstance(config, dict) else {}
@@ -88,7 +101,9 @@ def _project_info(root: Path, config: dict[str, Any], database: Path) -> ChatPro
         project_id=str(project.get("project_id") or f"legacy:{root.resolve()}"),
         name=str(project.get("name") or root.name),
         model=str(models.get("main_text") or os.getenv("RW_MODEL") or "qwen3:4b"),
-        endpoint=str(models.get("endpoint") or os.getenv("RW_MODEL_ENDPOINT") or "http://127.0.0.1:11434"),
+        endpoint=str(
+            models.get("endpoint") or os.getenv("RW_MODEL_ENDPOINT") or "http://127.0.0.1:11434"
+        ),
         context_tokens=min(8192, int(models.get("context_tokens", 8192))),
     )
 
@@ -125,7 +140,9 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
     assert root is not None and database is not None
     root = root.resolve()
     config = _load_project_config(root)
-    project = _project_info(root, config, database if config == {} else root / "Data" / "Metadata" / "laplace.db")
+    project = _project_info(
+        root, config, database if config == {} else root / "Data" / "Metadata" / "laplace.db"
+    )
     index_database = database if config == {} else root / "Data" / "Metadata" / "workspace.db"
     store = ConversationStore(project)
     engine = ChatEngine(project, store)
@@ -182,11 +199,20 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
 
     @app.get("/api/project/current")
     def current_project() -> dict[str, Any]:
-        return {"name": project.name, "project_id": project.project_id, "root": str(project.root), "model": project.model, "endpoint": project.endpoint, "context_tokens": project.context_tokens, "local_only": True}
+        return {
+            "name": project.name,
+            "project_id": project.project_id,
+            "root": str(project.root),
+            "model": project.model,
+            "endpoint": project.endpoint,
+            "context_tokens": project.context_tokens,
+            "local_only": True,
+        }
 
     @app.get("/api/project/collections")
     def project_collections() -> dict[str, Any]:
         from .projects import COLLECTIONS
+
         counts: dict[str, int] = {item: 0 for item in COLLECTIONS}
         if index_database.exists():
             try:
@@ -202,13 +228,68 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
                         counts[collection] += 1
             except sqlite3.Error:
                 pass
-        return {"collections": [{"name": item, "selected": item in ["MyWorks"], "documents": counts[item]} for item in COLLECTIONS]}
+        return {
+            "collections": [
+                {"name": item, "selected": item in ["MyWorks"], "documents": counts[item]}
+                for item in COLLECTIONS
+            ]
+        }
 
     @app.get("/api/project/status")
     def project_status() -> dict[str, Any]:
         counts = _counts(index_database)
-        downloads = len(list((root / "Data" / "Downloads").rglob("*.pdf"))) if (root / "Data" / "Downloads").is_dir() else 0
-        return {"project": project.name, "project_id": project.project_id, **counts, "downloads": downloads, "model": project.model, "embedding_model": str(config.get("models", {}).get("embedding", "qwen3-embedding:0.6b")), "bind": "127.0.0.1", "ollama": project.endpoint}
+        downloads = (
+            len(list((root / "Data" / "Downloads").rglob("*.pdf")))
+            if (root / "Data" / "Downloads").is_dir()
+            else 0
+        )
+        return {
+            "project": project.name,
+            "project_id": project.project_id,
+            **counts,
+            "downloads": downloads,
+            "model": project.model,
+            "embedding_model": str(
+                config.get("models", {}).get("embedding", "qwen3-embedding:0.6b")
+            ),
+            "bind": "127.0.0.1",
+            "ollama": project.endpoint,
+        }
+
+    @app.post("/api/engineering/references/{domain}")
+    def engineering_references(
+        domain: Literal["python", "systemverilog"], request: EngineeringReferenceRequest
+    ) -> dict[str, object]:
+        library = ReferenceLibrary(root, domain)
+        try:
+            if request.action == "initialize":
+                catalog = (
+                    Path(__file__).resolve().parents[2]
+                    / "codex_a6000"
+                    / "reference_sources"
+                    / f"{domain}_sources.yaml"
+                )
+                return library.initialize(catalog)
+            if request.action == "status":
+                return library.status()
+            if request.action == "sync":
+                return library.synchronize()
+            if request.action == "select":
+                return library.select(request.topics)
+            if request.action == "ingest":
+                return library.ingest(index_database)
+            return library.verify(request.reference_id)
+        except EngineeringError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/api/engineering/python-quality")
+    def engineering_python_quality() -> dict[str, object]:
+        try:
+            return LocalToolRunner(
+                Path(__file__).resolve().parents[2], root / "Outputs" / "AgentTeam" / "tool_logs"
+            ).run_python_quality_gates()
+        except EngineeringError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @app.get("/api/project/settings")
     def project_settings() -> dict[str, Any]:
@@ -233,13 +314,22 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
         target = root / "Config" / name
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
-            backup = target.with_name(f"{target.name}.{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.bak")
+            backup = target.with_name(
+                f"{target.name}.{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.bak"
+            )
             backup.write_bytes(target.read_bytes())
         target.write_text(request.content, encoding="utf-8")
-        return {"status": "UPDATED", "name": name, "backup": str(backup) if 'backup' in locals() else None, "secrets_included": False}
+        return {
+            "status": "UPDATED",
+            "name": name,
+            "backup": str(backup) if "backup" in locals() else None,
+            "secrets_included": False,
+        }
 
     @app.get("/api/chat/conversations")
-    def conversations(include_archived: bool = False, q: str | None = Query(default=None, max_length=200)) -> dict[str, Any]:
+    def conversations(
+        include_archived: bool = False, q: str | None = Query(default=None, max_length=200)
+    ) -> dict[str, Any]:
         values = store.list(include_archived)
         if q:
             values = [item for item in values if q.lower() in item.title.lower()]
@@ -257,7 +347,9 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
             raise HTTPException(404, str(exc)) from exc
 
     @app.patch("/api/chat/conversations/{conversation_id}")
-    def patch_conversation(conversation_id: str, request: ConversationPatchRequest) -> dict[str, Any]:
+    def patch_conversation(
+        conversation_id: str, request: ConversationPatchRequest
+    ) -> dict[str, Any]:
         try:
             result = store.summary(conversation_id)
             if request.title is not None:
@@ -271,7 +363,9 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
     @app.delete("/api/chat/conversations/{conversation_id}")
     def delete_conversation(conversation_id: str, confirm: bool = False) -> dict[str, str]:
         if not confirm:
-            raise HTTPException(400, "confirm=true is required; documents and indexes are not deleted")
+            raise HTTPException(
+                400, "confirm=true is required; documents and indexes are not deleted"
+            )
         try:
             store.delete(conversation_id)
         except KeyError as exc:
@@ -279,28 +373,57 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
         return {"status": "DELETED", "conversation_id": conversation_id}
 
     @app.post("/api/chat/conversations/{conversation_id}/messages")
-    def post_message(conversation_id: str, request: ChatMessageRequest, stream: bool = False) -> Any:
+    def post_message(
+        conversation_id: str, request: ChatMessageRequest, stream: bool = False
+    ) -> Any:
         try:
             store.summary(conversation_id)
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
         if stream:
-            def events() -> Any:
+
+            def next_event(iterator: Iterator[dict[str, Any]]) -> dict[str, Any] | None:
                 try:
-                    for event in engine.stream(conversation_id, request.content, collections=request.collections, mode=request.mode):
+                    return next(iterator)
+                except StopIteration:
+                    return None
+
+            async def events() -> AsyncIterator[str]:
+                iterator = iter(
+                    engine.stream(
+                        conversation_id,
+                        request.content,
+                        collections=request.collections,
+                        mode=request.mode,
+                    )
+                )
+                try:
+                    while True:
+                        event = await asyncio.to_thread(next_event, iterator)
+                        if event is None:
+                            return
                         yield _sse(event)
                 except Exception as exc:
                     yield _sse({"type": "message_failed", "error": str(exc)})
 
-            return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+            return StreamingResponse(
+                events(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
         try:
-            return engine.answer(conversation_id, request.content, collections=request.collections, mode=request.mode).model_dump()
+            return engine.answer(
+                conversation_id, request.content, collections=request.collections, mode=request.mode
+            ).model_dump()
         except (KeyError, RuntimeError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
     @app.post("/api/chat/conversations/{conversation_id}/stop")
     def stop_message(conversation_id: str) -> dict[str, Any]:
-        return {"status": "STOP_REQUESTED" if engine.stop(conversation_id) else "NOT_GENERATING", "conversation_id": conversation_id}
+        return {
+            "status": "STOP_REQUESTED" if engine.stop(conversation_id) else "NOT_GENERATING",
+            "conversation_id": conversation_id,
+        }
 
     @app.post("/api/chat/conversations/{conversation_id}/regenerate")
     def regenerate(conversation_id: str) -> dict[str, Any]:
@@ -309,7 +432,12 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
             user_messages = [item for item in detail.messages if item.get("role") == "user"]
             if not user_messages:
                 raise HTTPException(400, "no user message to regenerate")
-            return engine.answer(conversation_id, str(user_messages[-1]["content"]), collections=detail.collections, mode=detail.mode).model_dump()
+            return engine.answer(
+                conversation_id,
+                str(user_messages[-1]["content"]),
+                collections=detail.collections,
+                mode=detail.mode,
+            ).model_dump()
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
 
@@ -339,13 +467,26 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
             if not source_value:
                 raise HTTPException(404, "source path unavailable")
             source = Path(str(source_value)).resolve()
-            library_root = Path(str(config.get("library", {}).get("root", ""))).expanduser().resolve() if config.get("library", {}).get("root") else None
+            library_root = (
+                Path(str(config.get("library", {}).get("root", ""))).expanduser().resolve()
+                if config.get("library", {}).get("root")
+                else None
+            )
             allowed_roots = [root.resolve()]
             if library_root is not None:
                 allowed_roots.append(library_root)
-            if not any(source == allowed or allowed in source.parents for allowed in allowed_roots) or not source.is_file():
-                raise HTTPException(403, "source is outside the active project and configured Library")
-            return FileResponse(source, media_type="application/pdf" if source.suffix.lower() == ".pdf" else None, filename=source.name)
+            if (
+                not any(source == allowed or allowed in source.parents for allowed in allowed_roots)
+                or not source.is_file()
+            ):
+                raise HTTPException(
+                    403, "source is outside the active project and configured Library"
+                )
+            return FileResponse(
+                source,
+                media_type="application/pdf" if source.suffix.lower() == ".pdf" else None,
+                filename=source.name,
+            )
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
 
@@ -356,10 +497,14 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
             store.export(conversation_id, target)
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
-        return FileResponse(target, media_type="application/json", filename=f"{conversation_id}.json")
+        return FileResponse(
+            target, media_type="application/json", filename=f"{conversation_id}.json"
+        )
 
     @app.post("/api/chat/conversations/{conversation_id}/attachments")
-    async def attachment(conversation_id: str, file: UploadFile = File(...), request: AttachmentRequest | None = None) -> dict[str, Any]:
+    async def attachment(
+        conversation_id: str, file: UploadFile = File(...), request: AttachmentRequest | None = None
+    ) -> dict[str, Any]:
         try:
             store.summary(conversation_id)
         except KeyError as exc:
@@ -377,32 +522,78 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
         target = root / "Data" / "Cache" / "ChatAttachments" / f"{uuid.uuid4().hex}_{name}"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
-        return {"status": "STAGED", "filename": name, "path": str(target), "use_once": True, "ingest": bool(request and request.ingest)}
+        return {
+            "status": "STAGED",
+            "filename": name,
+            "path": str(target),
+            "use_once": True,
+            "ingest": bool(request and request.ingest),
+        }
 
     @app.get("/api/search/scholarly")
-    def scholarly_search(query: str, providers: str = "crossref,openalex,arxiv", limit: int = 10, offline: bool = False) -> dict[str, object]:
-        return search_scholarly(query, providers=[item.strip() for item in providers.split(",") if item.strip()], limit=limit, offline=offline)
+    def scholarly_search(
+        query: str,
+        providers: str = "crossref,openalex,arxiv",
+        limit: int = 10,
+        offline: bool = False,
+    ) -> dict[str, object]:
+        return search_scholarly(
+            query,
+            providers=[item.strip() for item in providers.split(",") if item.strip()],
+            limit=limit,
+            offline=offline,
+        )
 
     @app.get("/search/scholarly")
-    def legacy_scholarly_search(query: str, providers: str = "crossref,openalex,arxiv", limit: int = 10, offline: bool = False) -> dict[str, object]:
+    def legacy_scholarly_search(
+        query: str,
+        providers: str = "crossref,openalex,arxiv",
+        limit: int = 10,
+        offline: bool = False,
+    ) -> dict[str, object]:
         return scholarly_search(query, providers, limit, offline)
 
     @app.get("/search/ieee")
     def ieee_search(query: str, limit: int = 10) -> dict[str, object]:
         response = search_ieee(query, limit=limit)
-        return {"provider": response.provider, "status": response.status, "query": response.query, "error": response.error, "results": [item.__dict__ for item in response.results]}
+        return {
+            "provider": response.provider,
+            "status": response.status,
+            "query": response.query,
+            "error": response.error,
+            "results": [item.__dict__ for item in response.results],
+        }
 
     @app.post("/search")
     def do_search(request: SearchRequest) -> dict[str, Any]:
-        evidence = search(index_database, request.query, request.mode, request.limit, request.document_class, None, request.collection, request.author, request.year, request.doi, request.availability, request.source_kind)
+        evidence = search(
+            index_database,
+            request.query,
+            request.mode,
+            request.limit,
+            request.document_class,
+            None,
+            request.collection,
+            request.author,
+            request.year,
+            request.doi,
+            request.availability,
+            request.source_kind,
+        )
         return evidence_packet(request.query, evidence)
 
     @app.post("/ingest")
-    async def do_ingest(file: UploadFile = File(...), document_class: str = "project_document") -> dict[str, Any]:
+    async def do_ingest(
+        file: UploadFile = File(...), document_class: str = "project_document"
+    ) -> dict[str, Any]:
         name = Path(file.filename or "").name
         if Path(name).suffix.lower() not in ALLOWED:
             raise HTTPException(415, "unsupported file extension")
-        if file.content_type in {"application/x-msdownload", "application/x-sh", "text/x-shellscript"}:
+        if file.content_type in {
+            "application/x-msdownload",
+            "application/x-sh",
+            "text/x-shellscript",
+        }:
             raise HTTPException(415, "unsafe MIME type")
         content = await file.read(50 * 1024 * 1024 + 1)
         if len(content) > 50 * 1024 * 1024:

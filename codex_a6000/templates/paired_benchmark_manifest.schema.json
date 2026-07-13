@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://laplace.local/schemas/paired_benchmark_manifest.schema.json",
+  "title": "Codex versus Laplace paired benchmark manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["benchmark_id", "base_commit", "tasks", "lanes", "scoring", "validity_rules"],
+  "properties": {
+    "benchmark_id": {"type": "string"},
+    "base_commit": {"type": "string", "pattern": "^[0-9a-f]{7,40}$"},
+    "tasks": {
+      "type": "array",
+      "minItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["task_id", "domain", "fixture", "task_spec", "public_tests", "held_out_tests", "timeout_s"],
+        "properties": {
+          "task_id": {"type": "string"},
+          "domain": {"enum": ["python", "systemverilog"]},
+          "fixture": {"type": "string"},
+          "task_spec": {"type": "string"},
+          "public_tests": {"type": "array", "items": {"type": "string"}},
+          "held_out_tests": {"type": "array", "items": {"type": "string"}},
+          "timeout_s": {"type": "integer", "minimum": 60}
+        }
+      }
+    },
+    "lanes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["codex_direct", "laplace_team"],
+      "properties": {
+        "codex_direct": {"type": "object"},
+        "laplace_team": {"type": "object"}
+      }
+    },
+    "scoring": {
+      "type": "object",
+      "required": ["python", "systemverilog"]
+    },
+    "validity_rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string"}
+    }
+  }
+}

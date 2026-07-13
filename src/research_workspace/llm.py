@@ -5,7 +5,8 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
+from urllib.parse import urlparse
 
 
 class ModelRequired(RuntimeError):
@@ -19,16 +20,44 @@ class GenerationResult:
     ttft_seconds: float | None
     output_tokens_per_second: float | None
     status: str
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    input_tokens_per_second: float | None = None
+
+
+class LocalGenerationBackend(Protocol):
+    """Narrow local generation boundary shared by all Laplace backends."""
+
+    def generate(self, prompt: str, *, context_tokens: int = 8192) -> GenerationResult:
+        """Generate one bounded response through a local endpoint."""
+
+    def health(self) -> dict[str, str]:
+        """Return a local health record without exposing credentials."""
+
+    def model_identity(self) -> dict[str, str]:
+        """Return backend and configured model identity."""
 
 
 class Provider:
     def generate(self, prompt: str, *, context_tokens: int = 8192) -> GenerationResult:
         raise NotImplementedError
 
+    def health(self) -> dict[str, str]:
+        return {"status": "UNKNOWN", "backend": self.__class__.__name__}
+
+    def model_identity(self) -> dict[str, str]:
+        return {"backend": self.__class__.__name__, "model": "unknown"}
+
 
 class MockProvider(Provider):
     def generate(self, prompt: str, *, context_tokens: int = 8192) -> GenerationResult:
         return GenerationResult("[MOCK] " + prompt[:200], "mock", 0.0, None, "mock")
+
+    def health(self) -> dict[str, str]:
+        return {"status": "MOCK", "backend": "mock"}
+
+    def model_identity(self) -> dict[str, str]:
+        return {"backend": "mock", "model": "mock"}
 
 
 class OllamaProvider(Provider):
@@ -49,31 +78,63 @@ class OllamaProvider(Provider):
             data=payload,
             headers={"Content-Type": "application/json"},
         )
-        started = time.perf_counter()
         try:
             with urllib.request.urlopen(request, timeout=120) as response:
                 value = json.loads(response.read())
         except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
             raise ModelRequired(f"Local Ollama endpoint unavailable: {exc}") from exc
-        elapsed = time.perf_counter() - started
         text = str(value.get("response", ""))
+        prompt_tokens = value.get("prompt_eval_count")
         tokens = value.get("eval_count")
+        prompt_duration = value.get("prompt_eval_duration")
+        eval_duration = value.get("eval_duration")
+        ttft = float(prompt_duration) / 1e9 if isinstance(prompt_duration, (int, float)) else None
+        output_rate = (
+            float(tokens) / (float(eval_duration) / 1e9)
+            if isinstance(tokens, int)
+            and isinstance(eval_duration, (int, float))
+            and eval_duration > 0
+            else None
+        )
         return GenerationResult(
             text,
             self.model,
-            value.get("prompt_eval_duration", 0) / 1e9
-            if value.get("prompt_eval_duration")
-            else None,
-            float(tokens) / elapsed if tokens and elapsed else None,
+            ttft,
+            output_rate,
             "measured",
+            prompt_tokens if isinstance(prompt_tokens, int) else None,
+            tokens if isinstance(tokens, int) else None,
+            float(prompt_tokens) / ttft
+            if isinstance(prompt_tokens, int) and ttft is not None and ttft > 0
+            else None,
         )
+
+    def health(self) -> dict[str, str]:
+        try:
+            with urllib.request.urlopen(self.endpoint + "/api/tags", timeout=10) as response:
+                json.loads(response.read())
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            return {"status": "UNAVAILABLE", "backend": "ollama", "error": str(exc)}
+        return {"status": "AVAILABLE", "backend": "ollama", "endpoint": self.endpoint}
+
+    def model_identity(self) -> dict[str, str]:
+        return {"backend": "ollama", "model": self.model, "endpoint": self.endpoint}
 
 
 class OpenAICompatibleProvider(Provider):
     """Client for a localhost OpenAI-compatible server (LM Studio/llama.cpp)."""
 
-    def __init__(self, endpoint: str, model: str):
-        self.endpoint, self.model = endpoint.rstrip("/"), model
+    def __init__(self, endpoint: str, model: str, *, max_tokens: int = 2048):
+        parsed = urlparse(endpoint)
+        if parsed.scheme not in {"http", "https"} or parsed.hostname not in {
+            "127.0.0.1",
+            "localhost",
+            "::1",
+        }:
+            raise ModelRequired("OpenAI-compatible endpoints must be loopback-only")
+        if max_tokens < 1 or max_tokens > 8192:
+            raise ModelRequired("OpenAI-compatible max_tokens must be between 1 and 8192")
+        self.endpoint, self.model, self.max_tokens = endpoint.rstrip("/"), model, max_tokens
 
     def generate(self, prompt: str, *, context_tokens: int = 8192) -> GenerationResult:
         payload = json.dumps(
@@ -81,7 +142,7 @@ class OpenAICompatibleProvider(Provider):
                 "model": self.model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0,
-                "max_tokens": 512,
+                "max_tokens": self.max_tokens,
             }
         ).encode()
         request = urllib.request.Request(
@@ -99,18 +160,151 @@ class OpenAICompatibleProvider(Provider):
         choices = value.get("choices", [])
         text = str(choices[0].get("message", {}).get("content", "")) if choices else ""
         usage = value.get("usage", {})
-        tokens = usage.get("completion_tokens")
+        prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+        tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
         return GenerationResult(
             text,
             self.model,
             None,
             float(tokens) / elapsed if tokens and elapsed else None,
             "measured",
+            prompt_tokens if isinstance(prompt_tokens, int) else None,
+            tokens if isinstance(tokens, int) else None,
+            None,
         )
+
+    def _generate_streaming(self, prompt: str) -> GenerationResult:
+        """Measure a loopback OpenAI stream using server-reported token counts."""
+        payload = json.dumps(
+            {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0,
+                "max_tokens": self.max_tokens,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            }
+        ).encode()
+        request = urllib.request.Request(
+            self.endpoint + "/v1/chat/completions",
+            data=payload,
+            headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
+        )
+        started = time.perf_counter()
+        first_token_at: float | None = None
+        chunks: list[str] = []
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
+        try:
+            with urllib.request.urlopen(request, timeout=300) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data: "):
+                        continue
+                    event = line[6:]
+                    if event == "[DONE]":
+                        continue
+                    value: object = json.loads(event)
+                    if not isinstance(value, dict):
+                        continue
+                    choices = value.get("choices")
+                    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                        delta = choices[0].get("delta")
+                        if isinstance(delta, dict):
+                            fragment = delta.get("content", delta.get("reasoning_content", ""))
+                            if isinstance(fragment, str) and fragment:
+                                if first_token_at is None:
+                                    first_token_at = time.perf_counter()
+                                chunks.append(fragment)
+                    usage = value.get("usage")
+                    if isinstance(usage, dict):
+                        raw_prompt_tokens = usage.get("prompt_tokens")
+                        raw_completion_tokens = usage.get("completion_tokens")
+                        prompt_tokens = (
+                            raw_prompt_tokens
+                            if isinstance(raw_prompt_tokens, int)
+                            else prompt_tokens
+                        )
+                        completion_tokens = (
+                            raw_completion_tokens
+                            if isinstance(raw_completion_tokens, int)
+                            else completion_tokens
+                        )
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            raise ModelRequired(f"Local OpenAI-compatible endpoint unavailable: {exc}") from exc
+        completed = time.perf_counter()
+        ttft = first_token_at - started if first_token_at is not None else None
+        decode_seconds = completed - first_token_at if first_token_at is not None else None
+        return GenerationResult(
+            "".join(chunks),
+            self.model,
+            ttft,
+            float(completion_tokens) / decode_seconds
+            if completion_tokens is not None and decode_seconds is not None and decode_seconds > 0
+            else None,
+            "measured",
+            prompt_tokens,
+            completion_tokens,
+            float(prompt_tokens) / ttft
+            if prompt_tokens is not None and ttft is not None and ttft > 0
+            else None,
+        )
+
+    def token_count(self, prompt: str) -> int:
+        """Ask a loopback serving engine for an exact tokenizer count."""
+        payload = json.dumps({"model": self.model, "prompt": prompt}).encode()
+        request = urllib.request.Request(
+            self.endpoint + "/tokenize",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                value: object = json.loads(response.read())
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            raise ModelRequired(f"Local tokenizer endpoint unavailable: {exc}") from exc
+        count = value.get("count") if isinstance(value, dict) else None
+        if not isinstance(count, int) or count < 0:
+            raise ModelRequired("Local tokenizer endpoint did not return a valid token count")
+        return count
+
+    def health(self) -> dict[str, str]:
+        request = urllib.request.Request(self.endpoint + "/v1/models", method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                json.loads(response.read())
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            return {"status": "UNAVAILABLE", "backend": "openai_compatible", "error": str(exc)}
+        return {
+            "status": "AVAILABLE",
+            "backend": "openai_compatible",
+            "endpoint": self.endpoint,
+        }
+
+    def model_identity(self) -> dict[str, str]:
+        return {"backend": "openai_compatible", "model": self.model, "endpoint": self.endpoint}
 
 
 class LlamaCppProvider(OpenAICompatibleProvider):
     """llama.cpp server compatibility through its OpenAI-compatible endpoint."""
+
+
+class VllmProvider(OpenAICompatibleProvider):
+    """vLLM's local OpenAI-compatible serving surface."""
+
+    def generate(self, prompt: str, *, context_tokens: int = 8192) -> GenerationResult:
+        del context_tokens
+        return self._generate_streaming(prompt)
+
+    def model_identity(self) -> dict[str, str]:
+        return {"backend": "vllm", "model": self.model, "endpoint": self.endpoint}
+
+
+class SglangProvider(OpenAICompatibleProvider):
+    """SGLang's local OpenAI-compatible serving surface."""
+
+    def model_identity(self) -> dict[str, str]:
+        return {"backend": "sglang", "model": self.model, "endpoint": self.endpoint}
 
 
 def benchmark(provider: Provider, prompts: list[str], context_tokens: int = 8192) -> dict[str, Any]:

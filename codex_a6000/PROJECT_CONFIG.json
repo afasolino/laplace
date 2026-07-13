@@ -1,0 +1,330 @@
+{
+  "schema_version": 4,
+  "project_name": "laplace_a6000_software_agents_python_systemverilog",
+  "baseline_repository": {
+    "url": "https://github.com/afasolino/laplace",
+    "root": ".",
+    "record_runtime_commit": true,
+    "reuse_first": true,
+    "preserve_root_files": [
+      "README.md",
+      "AGENTS.md",
+      "CODEX_PROMPT.md",
+      "PROJECT_CONFIG.yaml",
+      "PROMPTS.md",
+      "pyproject.toml"
+    ],
+    "implemented_package": "src/research_workspace",
+    "known_current_modules": [
+      "laplace_cli.py",
+      "cli.py",
+      "core.py",
+      "projects.py",
+      "library.py",
+      "documents.py",
+      "retrieval.py",
+      "llm.py",
+      "chat.py",
+      "drafting.py",
+      "draft_workflow.py",
+      "analysis.py",
+      "extraction.py",
+      "probe.py",
+      "real_benchmark.py",
+      "api.py",
+      "laplace_server.py",
+      "ui.py",
+      "acquisition.py",
+      "online.py",
+      "optional.py"
+    ],
+    "known_current_tests": [
+      "tests/test_chat.py",
+      "tests/test_laplace.py",
+      "tests/test_workspace.py"
+    ],
+    "preserve": [
+      "cli_entry_points",
+      "project_discovery_and_registry",
+      "rag_and_citation_validation",
+      "immutable_rejected_drafts_and_grounded_fallback",
+      "provenance_and_audit",
+      "fastapi_ui_local_server",
+      "queue_and_background_jobs",
+      "source_immutability",
+      "ollama_fallback",
+      "windows_primary_linux_compatible_workflows"
+    ]
+  },
+  "environment": {
+    "control_venv": ".venv",
+    "vllm_venv": ".venv-vllm",
+    "sglang_venv": ".venv-sglang",
+    "python_minimum": "3.11",
+    "reuse_healthy_control_venv": true,
+    "cuda_required_for_real_inference": true,
+    "supported_host_modes": [
+      "linux",
+      "windows",
+      "wsl"
+    ]
+  },
+  "hardware": {
+    "required_gpu_name_contains": "A6000",
+    "minimum_vram_gib": 45,
+    "expected_vram_gib": 48,
+    "minimum_free_vram_gib_after_main_server_start": 4
+  },
+  "inference": {
+    "existing_backend": "ollama",
+    "candidate_primary_engines": [
+      "vllm",
+      "sglang"
+    ],
+    "main_model_class": "24-32B coding/instruct, 4-bit",
+    "candidate_checkpoints_to_verify_at_runtime": [
+      "Qwen/Qwen2.5-Coder-32B-Instruct-AWQ",
+      "Qwen/Qwen2.5-Coder-32B-Instruct-GPTQ-Int4",
+      "Qwen/Qwen3-32B-AWQ"
+    ],
+    "routine_model_class": "3-14B optional",
+    "contexts": [
+      8192,
+      16384,
+      24576,
+      32768
+    ],
+    "concurrency": [
+      1,
+      2,
+      4
+    ],
+    "scheduler_features": [
+      "cuda_graphs",
+      "prefix_caching",
+      "chunked_prefill",
+      "continuous_batching"
+    ],
+    "speculation_order": [
+      "none",
+      "ngram_or_suffix",
+      "compatible_draft_model",
+      "eagle_if_officially_supported",
+      "mtp_if_officially_supported"
+    ]
+  },
+  "agents": {
+    "primary_domain": "high_quality_software_implementation",
+    "roles": [
+      "supervisor",
+      "researcher",
+      "implementer",
+      "verifier",
+      "reviewer"
+    ],
+    "state_graph": [
+      "request",
+      "requirements",
+      "plan",
+      "retrieval",
+      "implementation",
+      "verification",
+      "review",
+      "bounded_correction",
+      "final_report"
+    ],
+    "max_correction_loops": 2,
+    "max_recursive_delegation_depth": 0,
+    "shared_main_model": true,
+    "implementation_worktrees": true,
+    "typed_artifacts": true,
+    "primary_languages": [
+      "python",
+      "systemverilog"
+    ]
+  },
+  "systemverilog": {
+    "enabled": true,
+    "reference_catalog": "codex_a6000/reference_sources/systemverilog_sources.yaml",
+    "preferred_shared_library_subpath": "Library/SystemVerilog",
+    "project_local_fallback_logical_subpath": "Data/References/SystemVerilog",
+    "logical_folders": [
+      "00_policies",
+      "10_rtl_patterns",
+      "20_interfaces",
+      "30_verification",
+      "40_tooling",
+      "50_vendor_flows",
+      "90_manifests"
+    ],
+    "source_precedence": [
+      "target_project_code_and_task_spec",
+      "target_project_conventions",
+      "private_curated_references",
+      "curated_open_source_references",
+      "model_prior_knowledge"
+    ],
+    "default_reference_policy": "reference_only_no_copy_until_verified",
+    "required_task_schema": "codex_a6000/templates/systemverilog_task_spec.schema.json",
+    "preferred_tools": [
+      "verible-verilog-format",
+      "verible-verilog-lint",
+      "verilator",
+      "yosys",
+      "surelog",
+      "sby"
+    ],
+    "optional_vendor_tools": [
+      "vivado",
+      "quartus",
+      "vsim",
+      "xrun",
+      "genus"
+    ],
+    "verification_requirements": [
+      "self_checking_test",
+      "lint",
+      "compile_or_elaboration",
+      "simulation",
+      "synthesis_check_when_available",
+      "assertions_or_formal_for_protocols_when_practical"
+    ]
+  },
+  "mcp": {
+    "localhost_only": true,
+    "transports": [
+      "stdio",
+      "streamable_http_localhost"
+    ],
+    "tools": [
+      "normalize_software_task",
+      "normalize_python_task",
+      "normalize_systemverilog_task",
+      "research_task",
+      "implement_task",
+      "verify_patch",
+      "review_patch",
+      "run_tests",
+      "run_python_quality_gates",
+      "run_eda_flow",
+      "reference_status",
+      "benchmark_local_models",
+      "run_paired_quality_benchmark"
+    ]
+  },
+  "security": {
+    "command_allowlist_required": true,
+    "references_read_only": true,
+    "implementation_isolated_worktrees": true,
+    "implementation_can_merge": false,
+    "verification_can_modify_source": false,
+    "bind_address": "127.0.0.1",
+    "approval_required_for": [
+      "network_access",
+      "licence_acceptance",
+      "host_package_installation",
+      "privilege_escalation",
+      "outside_workspace_access",
+      "file_deletion",
+      "git_merge",
+      "credentials"
+    ]
+  },
+  "benchmark": {
+    "warmups": 2,
+    "repetitions": 5,
+    "statistics": [
+      "mean",
+      "median",
+      "std",
+      "p95"
+    ],
+    "model_metrics": [
+      "ttft_s",
+      "inter_token_latency_s",
+      "output_tokens_per_s",
+      "aggregate_output_tokens_per_s",
+      "complete_task_s",
+      "peak_vram_mib",
+      "gpu_utilization",
+      "oom_and_error_rate"
+    ],
+    "software_metrics": [
+      "build_success",
+      "test_success",
+      "lint_defects",
+      "review_defects",
+      "correction_loops",
+      "human_intervention_count"
+    ],
+    "paired_codex_vs_laplace": {
+      "enabled": true,
+      "must_be_final_phase": true,
+      "catalog": "codex_a6000/benchmarks/paired_task_catalog.yaml",
+      "manifest_schema": "codex_a6000/templates/paired_benchmark_manifest.schema.json",
+      "minimum_valid_tasks": 6,
+      "required_mix": {
+        "python": 4,
+        "systemverilog": 2
+      },
+      "concurrent_lanes": [
+        "codex_direct",
+        "laplace_team"
+      ],
+      "identical_base_commit": true,
+      "isolated_worktrees": true,
+      "held_out_tests_outside_worktrees": true,
+      "primary_evidence": "deterministic_tools_and_tests",
+      "reports": [
+        "outputs/a6000_agent_team/comparison/codex_vs_laplace_results.json",
+        "outputs/a6000_agent_team/comparison/codex_vs_laplace_results.csv",
+        "outputs/a6000_agent_team/comparison/codex_vs_laplace_summary.md"
+      ]
+    }
+  },
+  "python": {
+    "enabled": true,
+    "reference_catalog": "codex_a6000/reference_sources/python_sources.yaml",
+    "preferred_shared_library_subpath": "Library/Python",
+    "project_local_fallback_logical_subpath": "Data/References/Python",
+    "logical_folders": [
+      "00_policies",
+      "10_language_stdlib",
+      "20_architecture_patterns",
+      "30_web_api",
+      "40_testing",
+      "50_typing_validation",
+      "60_tooling_packaging",
+      "70_agents_mcp",
+      "80_security_performance",
+      "90_manifests"
+    ],
+    "source_precedence": [
+      "target_project_code_and_task_spec",
+      "target_project_conventions",
+      "private_curated_references",
+      "curated_open_source_references",
+      "model_prior_knowledge"
+    ],
+    "default_reference_policy": "reference_only_no_copy_until_verified",
+    "required_task_schema": "codex_a6000/templates/python_task_spec.schema.json",
+    "required_quality_gates": [
+      "ruff_format_check",
+      "ruff_check",
+      "mypy_strict",
+      "pytest",
+      "coverage_for_new_and_critical_paths",
+      "failure_and_boundary_tests"
+    ],
+    "quality_rules": [
+      "complete_public_api_typing",
+      "narrow_exceptions",
+      "explicit_resource_lifecycle",
+      "safe_paths_and_atomic_writes",
+      "transactional_sqlite",
+      "async_cancellation_and_timeouts",
+      "backward_compatible_cli_and_api",
+      "no_unjustified_any_or_type_ignore"
+    ]
+  }
+}
