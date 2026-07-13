@@ -9,6 +9,7 @@ from research_workspace.paired_benchmark import (
     _BENCHMARK_TASKS,
     _codex_environment,
     _lane_prompt,
+    _patch_from_lane,
     _shared_task_specification,
     _task_spec,
     _write_reports,
@@ -41,6 +42,40 @@ def test_python_lanes_receive_absolute_shared_interpreter_commands() -> None:
     commands = specification["verification_commands"]
     assert isinstance(commands, list)
     assert all(str(Path(sys.executable).absolute()) in command for command in commands)
+
+
+def test_lane_patch_paths_do_not_keep_the_git_b_prefix(tmp_path: Path) -> None:
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "fixture@example.invalid"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Fixture"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    source = tmp_path / "allowed.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "allowed.py"], cwd=tmp_path, check=True, capture_output=True, text=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "fixture"], cwd=tmp_path, check=True, capture_output=True, text=True
+    )
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    source.write_text("value = 2\n", encoding="utf-8")
+    _, changed = _patch_from_lane(tmp_path, base, tmp_path / "lane.patch")
+    assert changed == ["allowed.py"]
 
 
 def test_comparison_report_flattens_each_lane_and_keeps_quality_dimensions(tmp_path: Path) -> None:

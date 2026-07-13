@@ -776,9 +776,7 @@ def _patch_from_lane(lane_root: Path, base_commit: str, patch_path: Path) -> tup
     patch_path.parent.mkdir(parents=True, exist_ok=True)
     patch_path.write_text(patch, encoding="utf-8")
     changed = [
-        line[4:]
-        for line in patch.splitlines()
-        if line.startswith("+++ b/") and line[4:] != "/dev/null"
+        line.removeprefix("+++ b/") for line in patch.splitlines() if line.startswith("+++ b/")
     ]
     return patch, changed
 
@@ -1280,6 +1278,7 @@ def run_valid_paired_benchmark(
     }
     paths = _write_reports(root / "outputs" / "a6000_agent_team" / "comparison", payload)
     payload["reports"] = paths
+    _write_reports(root / "outputs" / "a6000_agent_team" / "comparison", payload)
     return payload
 
 
