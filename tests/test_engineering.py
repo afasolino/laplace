@@ -70,6 +70,19 @@ def test_task_normalization_and_bounded_persisted_state_machine(tmp_path: Path) 
     assert store.load(task.task_id).correction_loops == 1
 
 
+def test_patch_rejection_can_use_the_bounded_repair_budget(tmp_path: Path) -> None:
+    normalized = normalize_task_spec(REPOSITORY_ROOT, "python", _python_task())
+    store = AgentTaskStore(tmp_path)
+    task = store.create("python", normalized)
+    for target in ("requirements", "plan", "retrieval", "implementation"):
+        task = store.transition(task.task_id, target, role="supervisor", note=target)
+    repaired = store.transition(
+        task.task_id, "bounded_correction", role="supervisor", note="patch validation rejected"
+    )
+    assert repaired.correction_loops == 1
+    assert repaired.state == "bounded_correction"
+
+
 def test_task_schema_rejects_missing_required_contract() -> None:
     invalid = _python_task()
     invalid.pop("verification_commands")

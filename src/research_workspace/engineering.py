@@ -78,7 +78,10 @@ _TASK_TRANSITIONS: dict[TaskState, set[TaskState]] = {
     "requirements": {"plan", "blocked"},
     "plan": {"retrieval", "blocked"},
     "retrieval": {"implementation", "blocked"},
-    "implementation": {"verification", "blocked"},
+    # A malformed or out-of-scope model patch can fail before verifier entry;
+    # it must consume the same bounded repair budget rather than stranding the
+    # persisted task in implementation.
+    "implementation": {"verification", "bounded_correction", "blocked"},
     "verification": {"review", "blocked"},
     "review": {"bounded_correction", "final_report", "blocked"},
     "bounded_correction": {"implementation", "final_report", "blocked"},
