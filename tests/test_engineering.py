@@ -22,6 +22,7 @@ from research_workspace.team_runner import (
     LocalTeamRunner,
     PatchValidationError,
     Worktree,
+    _extract_model_patch,
     apply_validated_patch,
 )
 
@@ -253,6 +254,38 @@ index 1e8b314..5b40bd0 100644
     )
     assert report["status"] == "APPLIED"
     assert (tmp_path / "allowed.py").read_text(encoding="utf-8") == "value = 3\n"
+
+
+def test_fenced_model_replacement_is_wrapped_then_git_validated(tmp_path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "fixture@example.invalid"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Fixture"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (tmp_path / "allowed.py").write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "allowed.py"], cwd=tmp_path, check=True, capture_output=True, text=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "fixture"], cwd=tmp_path, check=True, capture_output=True, text=True
+    )
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    worktree = Worktree(tmp_path, commit, "replacement")
+    patch = _extract_model_patch(worktree, "```python\nvalue = 4\n```", ["allowed.py"])
+    apply_validated_patch(worktree, patch, ["allowed.py"], tmp_path / "logs")
+    assert (tmp_path / "allowed.py").read_text(encoding="utf-8") == "value = 4\n"
 
 
 def test_local_team_records_gpu_block_without_cpu_substitution(

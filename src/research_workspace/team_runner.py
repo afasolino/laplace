@@ -6,6 +6,7 @@ import os
 import re
 import signal
 import shutil
+import difflib
 
 # Git invocation is restricted to fixed worktree/apply operations.
 import subprocess  # nosec B404
@@ -145,6 +146,48 @@ def _extract_diff(model_text: str) -> str:
     return patch.strip() + "\n"
 
 
+def _extract_model_patch(worktree: Worktree, model_text: str, allowed_paths: list[str]) -> str:
+    """Accept a model diff or one fenced replacement for one allowed source file.
+
+    The replacement fallback does not synthesize code: it only wraps complete
+    code emitted by the local model in a standard diff, then the regular Git
+    path/scope/context checks still decide whether it may apply.
+    """
+    patch = _extract_diff(model_text)
+    if "+++ b/" in patch and "--- a/" in patch:
+        return patch
+    source_paths = [path for path in allowed_paths if not Path(path).name.startswith("tb_")]
+    if len(source_paths) != 1:
+        raise PatchValidationError(
+            "Model output is not a diff and task has no unambiguous source file"
+        )
+    blocks = re.findall(
+        r"```(?:python|py|systemverilog|verilog|sv)?\s*\n(.*?)```",
+        model_text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if len(blocks) != 1:
+        raise PatchValidationError("Model output contains no unambiguous fenced source replacement")
+    relative = _safe_relative(source_paths[0], label="allowed source path")
+    source = _inside(worktree.root, worktree.root / relative)
+    if not source.is_file():
+        raise PatchValidationError("Allowed source file is missing from isolated worktree")
+    replacement = blocks[0].strip() + "\n"
+    if len(replacement.encode("utf-8")) > 1_000_000:
+        raise PatchValidationError("Model replacement exceeds the one MiB task safety limit")
+    diff = "".join(
+        difflib.unified_diff(
+            source.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True),
+            replacement.splitlines(keepends=True),
+            fromfile=f"a/{relative.as_posix()}",
+            tofile=f"b/{relative.as_posix()}",
+        )
+    )
+    if not diff:
+        raise PatchValidationError("Model replacement makes no source change")
+    return f"diff --git a/{relative.as_posix()} b/{relative.as_posix()}\n{diff}"
+
+
 def apply_validated_patch(
     worktree: Worktree, patch: str, allowed_paths: list[str], log_root: Path
 ) -> JsonObject:
@@ -269,7 +312,7 @@ class LocalTeamRunner:
             f"Task specification: {task.specification}\n"
             f"Allowed paths: {_allowed_paths(task)}\n"
             f"Evidence in precedence order: {evidence}\n"
-            "Implement the smallest complete change with tests in the allowed paths."
+            "Implement the smallest complete change with tests in the allowed paths. If your decoder cannot emit a unified diff, emit exactly one fenced full replacement for the single non-test source file and nothing else."
         )
 
     def run(self, task_id: str, *, query: str) -> JsonObject:
@@ -319,7 +362,7 @@ class LocalTeamRunner:
         for attempt in range(0, 3):
             try:
                 generated = backend.generate(self._prompt(task, evidence_raw), context_tokens=8192)
-                patch = _extract_diff(generated.text)
+                patch = _extract_model_patch(worktree, generated.text, allowed)
                 patch_report = apply_validated_patch(worktree, patch, allowed, self.log_root)
                 self.store.write_artifact(
                     task.task_id, role="implementer", name="patch_manifest", payload=patch_report
