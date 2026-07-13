@@ -637,6 +637,21 @@ def _task_environment(task: BenchmarkTask, fixture_root: Path) -> dict[str, str]
     return {}
 
 
+def _codex_environment(control_python: str) -> dict[str, str]:
+    """Pin Codex's shell to the same control-plane tool environment as Laplace."""
+    # Preserve a virtualenv's symlink path rather than resolving it to the
+    # system interpreter, so PATH starts at the virtualenv's ``bin`` folder.
+    interpreter = Path(control_python).expanduser().absolute()
+    bin_directory = interpreter.parent
+    if not interpreter.is_file() or not bin_directory.is_dir():
+        raise RuntimeError(f"Codex control Python is unavailable: {interpreter}")
+    environment = os.environ.copy()
+    environment["PATH"] = str(bin_directory) + os.pathsep + environment.get("PATH", "")
+    environment["VIRTUAL_ENV"] = str(bin_directory.parent)
+    environment["PYTHONNOUSERSITE"] = "1"
+    return environment
+
+
 def _lane_prompt(task: BenchmarkTask, specification: JsonObject) -> str:
     return (
         "Implement the following normalized benchmark task in the current worktree. "
@@ -1055,6 +1070,7 @@ def run_valid_paired_benchmark(
     if cuda["status"] != "CUDA_A6000_VERIFIED":
         raise RuntimeError("Paired benchmark refuses to run without verified A6000 CUDA")
     python_executable = control_python or sys.executable
+    codex_environment = _codex_environment(python_executable)
     codex = codex_command or shutil.which("codex")
     if not codex:
         raise RuntimeError("codex executable is unavailable for the Codex-direct lane")
@@ -1106,6 +1122,7 @@ def run_valid_paired_benchmark(
                 stderr=subprocess.STDOUT,
                 text=True,
                 start_new_session=True,
+                env=codex_environment,
             )
             laplace_started_at, laplace_started = _now(), time.monotonic()
             with laplace_log.open("w", encoding="utf-8") as laplace_stream:
@@ -1203,7 +1220,7 @@ def run_valid_paired_benchmark(
                     "same_public_tests": True,
                     "same_timeout_seconds": timeout_seconds,
                     "same_correction_budget": 2,
-                    "same_tool_access": "repository-local approved tools only",
+                    "same_tool_access": "repository-local tools with PATH pinned to the shared control-plane environment",
                 },
                 "lanes": {
                     "codex_direct": {

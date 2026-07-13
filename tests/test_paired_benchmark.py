@@ -6,6 +6,7 @@ from pathlib import Path
 from research_workspace.engineering import normalize_task_spec
 from research_workspace.paired_benchmark import (
     _BENCHMARK_TASKS,
+    _codex_environment,
     _lane_prompt,
     _task_spec,
     _write_reports,
@@ -24,6 +25,12 @@ def test_all_six_public_benchmark_specs_normalize() -> None:
 def test_codex_lane_receives_the_same_two_repair_cycle_budget() -> None:
     task = _BENCHMARK_TASKS[0]
     assert "at most two repair cycles" in _lane_prompt(task, _task_spec(task))
+
+
+def test_codex_lane_pins_the_control_plane_python_environment() -> None:
+    environment = _codex_environment(__import__("sys").executable)
+    assert environment["PATH"].split(":")[0].endswith(".venv/bin")
+    assert environment["PYTHONNOUSERSITE"] == "1"
 
 
 def test_comparison_report_flattens_each_lane_and_keeps_quality_dimensions(tmp_path: Path) -> None:
