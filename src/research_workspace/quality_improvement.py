@@ -603,6 +603,17 @@ def run_ablations(
                     **{key: score_dict.get(key) for key in fields if key in score_dict},
                 }
             )
+    _write_json_atomic(
+        output_root / "agent_ablation_results.json",
+        {
+            "status": "MEASURED",
+            "candidate": candidate.to_json(),
+            "base_commit": ORIGINAL_BASE_COMMIT,
+            "held_out_exposed_to_implementation": False,
+            "records": records,
+            "created_at": _now(),
+        },
+    )
     return records
 
 
@@ -686,6 +697,15 @@ def main(argv: list[str] | None = None) -> int:
         output_root=output,
         timeout_seconds=arguments.timeout_seconds,
     )
+    ablation_file = output / "agent_ablation_results.json"
+    stored_ablation_records = (
+        _read_json(ablation_file).get("records", []) if ablation_file.is_file() else []
+    )
+    prior_ablations = (
+        [item for item in stored_ablation_records if isinstance(item, dict)]
+        if isinstance(stored_ablation_records, list)
+        else []
+    )
     ablations = (
         run_ablations(
             root,
@@ -694,7 +714,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout_seconds=arguments.timeout_seconds,
         )
         if arguments.run_ablations
-        else []
+        else prior_ablations
     )
     unseen = run_unseen_tasks(
         root,
