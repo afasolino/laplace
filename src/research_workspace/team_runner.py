@@ -362,6 +362,20 @@ class LocalTeamRunner:
         for attempt in range(0, 3):
             try:
                 generated = backend.generate(self._prompt(task, evidence_raw), context_tokens=8192)
+                self.store.write_artifact(
+                    task.task_id,
+                    role="implementer",
+                    name="implementation_report",
+                    payload={
+                        "status": "MODEL_OUTPUT_RECEIVED",
+                        "attempt": attempt,
+                        "model": generated.model,
+                        "ttft_seconds": generated.ttft_seconds,
+                        "prompt_tokens": generated.prompt_tokens,
+                        "completion_tokens": generated.completion_tokens,
+                        "model_output": generated.text,
+                    },
+                )
                 patch = _extract_model_patch(worktree, generated.text, allowed)
                 patch_report = apply_validated_patch(worktree, patch, allowed, self.log_root)
                 self.store.write_artifact(
