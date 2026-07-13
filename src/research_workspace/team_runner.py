@@ -146,6 +146,18 @@ def _extract_diff(model_text: str) -> str:
     return patch.strip() + "\n"
 
 
+def _normalize_added_line_whitespace(patch: str) -> str:
+    """Remove only trailing spaces from model-added lines before Git validation."""
+    normalized: list[str] = []
+    for line in patch.splitlines(keepends=True):
+        if line.startswith("+") and not line.startswith("+++ "):
+            ending = "\n" if line.endswith("\n") else ""
+            normalized.append("+" + line[1:].rstrip(" \t\r\n") + ending)
+        else:
+            normalized.append(line)
+    return "".join(normalized)
+
+
 def _extract_model_patch(worktree: Worktree, model_text: str, allowed_paths: list[str]) -> str:
     """Accept a model diff or one fenced replacement for one allowed source file.
 
@@ -155,7 +167,7 @@ def _extract_model_patch(worktree: Worktree, model_text: str, allowed_paths: lis
     """
     patch = _extract_diff(model_text)
     if "+++ b/" in patch and "--- a/" in patch:
-        return patch
+        return _normalize_added_line_whitespace(patch)
     source_paths = [path for path in allowed_paths if not Path(path).name.startswith("tb_")]
     if len(source_paths) != 1:
         raise PatchValidationError(
@@ -185,7 +197,9 @@ def _extract_model_patch(worktree: Worktree, model_text: str, allowed_paths: lis
     )
     if not diff:
         raise PatchValidationError("Model replacement makes no source change")
-    return f"diff --git a/{relative.as_posix()} b/{relative.as_posix()}\n{diff}"
+    return _normalize_added_line_whitespace(
+        f"diff --git a/{relative.as_posix()} b/{relative.as_posix()}\n{diff}"
+    )
 
 
 def apply_validated_patch(

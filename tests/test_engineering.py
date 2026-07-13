@@ -283,7 +283,8 @@ def test_fenced_model_replacement_is_wrapped_then_git_validated(tmp_path: Path) 
         ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
     ).stdout.strip()
     worktree = Worktree(tmp_path, commit, "replacement")
-    patch = _extract_model_patch(worktree, "```python\nvalue = 4\n```", ["allowed.py"])
+    patch = _extract_model_patch(worktree, "```python\nvalue = 4  \n```", ["allowed.py"])
+    assert "+value = 4  \n" not in patch
     apply_validated_patch(worktree, patch, ["allowed.py"], tmp_path / "logs")
     assert (tmp_path / "allowed.py").read_text(encoding="utf-8") == "value = 4\n"
 
