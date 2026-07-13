@@ -4,6 +4,10 @@ Laplace is the user-facing, local-only command for private PDF retrieval, struct
 
 The application repository is separate from the user-owned FormalScience library. A Laplace project can live in any safe working directory and contains its own `.laplace/project.yaml`, `Config`, `Data`, `Outputs`, and lifecycle state.
 
+### Citation-safe chat revisions
+
+Streaming is revision-aware. The model draft is persisted as an immutable `CITATION_REJECTED` assistant message when its citations do not resolve; a separate `GROUNDED_FALLBACK` message is then generated from retrieved evidence. The browser keeps the rejected draft expandable and shows the fallback as the primary answer, so a late validation event can never overwrite a streamed draft. Evidence supplied to the model uses compact IDs (`E1`, `E2`, …); the audit retains the raw model response and full provenance packet. The terminal equivalent is `laplace --ask "..." --show-rejected-draft` (or `--json`).
+
 ## Install
 
 From this repository in PowerShell:

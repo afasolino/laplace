@@ -371,15 +371,31 @@ def _ask(paths: ProjectPaths, query: str) -> dict[str, Any]:
     target = paths.outputs / "Conversations" / conversation.conversation_id / "response.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(response.model_dump_json(indent=2), encoding="utf-8")
-    return {"response": response.model_dump(), "status": response.status, "answer_path": str(target), "conversation_id": conversation.conversation_id}
+    detail = store.detail(conversation.conversation_id)
+    rejected = next((item for item in detail.messages if item.get("state") == "CITATION_REJECTED"), None)
+    rejected_path: str | None = None
+    if rejected is not None:
+        draft_target = target.parent / "rejected_draft.json"
+        draft_target.write_text(json.dumps(rejected, indent=2, ensure_ascii=False), encoding="utf-8")
+        rejected_path = str(draft_target)
+    return {"response": response.model_dump(), "rejected_response": rejected, "status": response.status,
+            "answer_path": str(target), "rejected_path": rejected_path, "conversation_id": conversation.conversation_id,
+            "revisions": detail.messages[-2:] if rejected is not None else [response.model_dump()]}
 
 
-def _print_chat(result: dict[str, Any], *, as_json: bool = False, verbose: bool = False) -> None:
+def _print_chat(result: dict[str, Any], *, as_json: bool = False, verbose: bool = False, show_rejected_draft: bool = False) -> None:
     if as_json:
         _json(result)
         return
     response = result.get("response", result)
     print(str(response.get("content", "")).strip())
+    rejected = result.get("rejected_response")
+    if rejected:
+        print("\nModel draft: citation rejected")
+        print("Grounded fallback: generated")
+        if show_rejected_draft:
+            print("\nRejected draft:\n" + str(rejected.get("content", "")).strip())
+        print(f"Rejected draft saved: {result.get('rejected_path')}")
     citations = response.get("citations", [])
     if citations:
         print("\nSources:")
@@ -523,6 +539,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--json", action="store_true", help="Emit complete machine-readable output")
+    parser.add_argument("--show-rejected-draft", action="store_true", help="Print the preserved draft rejected by citation validation")
     parser.add_argument("--no-browser", action="store_true", help="Do not open the local chat page")
     parser.add_argument("--init", metavar="NAME")
     parser.add_argument("--list", action="store_true")
@@ -631,13 +648,13 @@ def main(argv: list[str] | None = None) -> int:
             _print_search(_search(paths, args.search), as_json=args.json, verbose=args.verbose)
             return 0
         if args.ask:
-            _print_chat(_ask(paths, args.ask), as_json=args.json, verbose=args.verbose)
+            _print_chat(_ask(paths, args.ask), as_json=args.json, verbose=args.verbose, show_rejected_draft=args.show_rejected_draft)
             return 0
         if args.write:
             mode, instruction = args.write
             if args.instructions:
                 instruction = args.instructions.read_text(encoding="utf-8", errors="replace")
-            _print_chat(_write(paths, mode, instruction, args.input), as_json=args.json, verbose=args.verbose)
+            _print_chat(_write(paths, mode, instruction, args.input), as_json=args.json, verbose=args.verbose, show_rejected_draft=args.show_rejected_draft)
             return 0
         if args.research:
             result = search_scholarly(args.research, limit=10)

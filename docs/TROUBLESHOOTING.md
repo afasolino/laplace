@@ -11,5 +11,7 @@
 - **Offline mode:** `research-workspace search ... --offline` returns no network results while local retrieval remains available.
 - **Chat does not open:** run `laplace --start --no-browser`, verify `http://127.0.0.1:8000/chat`, and inspect the project `Data/Logs/laplace-server.log`; `laplace --stop` only stops the recorded project PID.
 - **Chat says fallback:** this is an intentional citation-safety result. Inspect `/api/chat/messages/{message_id}/audit`; the model response was retained, but the visible answer uses exact retrieved evidence because its citation IDs were invalid or empty.
+- **A draft appears above a fallback:** this is expected. Expand `Unverified model draft · citation validation failed` to inspect the immutable rejected candidate; the separate green grounded fallback is the answer used for citations. In the terminal use `laplace --ask "..." --show-rejected-draft`.
+- **Repeated/late stream events:** the UI keys events by `message_id`, `revision_id`, and `sequence`; refresh the conversation if a browser extension buffers SSE. The server never replaces a stored message in place.
 - **Conversation history missing:** confirm the active project and inspect `Data/Metadata/laplace.db`; conversations are never stored in the application repository.
 - **Generation remains active:** press Stop. Cancellation sets only the current Laplace generation event and does not terminate Ollama or unrelated processes.

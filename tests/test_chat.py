@@ -14,6 +14,8 @@ from research_workspace.chat import (
     ChatProject,
     ChatResponse,
     ConversationStore,
+    _prompt,
+    normalize_revisions,
     normalize_response,
 )
 from research_workspace.retrieval import Evidence
@@ -62,6 +64,63 @@ def test_invalid_or_empty_citations_use_extractable_fallback(tmp_path: Path) -> 
     assert audit["model_citation_valid"] is False
 
 
+def test_rejected_draft_and_fallback_are_distinct_revisions(tmp_path: Path) -> None:
+    project, store = _project(tmp_path)
+    conversation = store.create("Revisions")
+    evidence = _evidence()
+    candidate, fallback, audit = normalize_revisions(
+        '{"content":"Model draft with an unsupported claim","citations":[99]}',
+        conversation_id=conversation.conversation_id, query="latency", evidence=evidence,
+        model=project.model, collections=["MyWorks"], candidate_count=1,
+    )
+    assert fallback is not None
+    assert candidate.message_id != fallback.message_id
+    assert candidate.state == "CITATION_REJECTED"
+    assert candidate.content == "Model draft with an unsupported claim"
+    assert fallback.fallback_of_message_id == candidate.message_id
+    assert len(fallback.content) <= 1100
+    assert fallback.content.startswith("The retrieved evidence indicates:")
+    store.append_assistant(candidate, audit)
+    store.append_assistant(fallback, audit)
+    messages = store.detail(conversation.conversation_id).messages
+    assert [item["state"] for item in messages] == ["CITATION_REJECTED", "GROUNDED_FALLBACK"]
+
+
+def test_compact_evidence_ids_and_marker_recovery(tmp_path: Path) -> None:
+    project, _ = _project(tmp_path)
+    evidence = _evidence()
+    prompt = _prompt("latency", evidence, [])
+    assert '"evidence_id": "E1"' in prompt
+    response, _ = normalize_response(
+        '{"content":"The latency is 3 ms [E1]","citations":[]}',
+        conversation_id="c", query="latency", evidence=evidence, model=project.model,
+        collections=["MyWorks"], candidate_count=1,
+    )
+    assert response.status == "GROUNDED"
+    assert response.citations[0].evidence_id == "E1"
+
+
+def test_stream_preserves_rejected_draft_then_emits_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project, store = _project(tmp_path)
+    conversation = store.create("Stream")
+    engine = ChatEngine(project, store)
+    engine._retrieve = lambda query, selected: _evidence()  # type: ignore[method-assign]
+
+    def fake_generation(*args: object, **kwargs: object):
+        yield {"response": '{"content":"Draft","citations":[99]}' }
+
+    monkeypatch.setattr("research_workspace.chat.generate_stream", fake_generation)
+    events = list(engine.stream(conversation.conversation_id, "latency"))
+    kinds = [event["type"] for event in events]
+    assert "message_rejected" in kinds and "fallback_started" in kinds and "fallback_completed" in kinds
+    assert kinds.index("message_rejected") < kinds.index("fallback_started") < kinds.index("fallback_completed")
+    messages = store.detail(conversation.conversation_id).messages
+    assert len(messages) == 3
+    assert messages[-2]["state"] == "CITATION_REJECTED"
+    assert messages[-1]["state"] == "GROUNDED_FALLBACK"
+    assert messages[-1]["fallback_of_message_id"] == messages[-2]["message_id"]
+
+
 def test_conversation_store_persists_and_isolates_project(tmp_path: Path) -> None:
     project, store = _project(tmp_path)
     conversation = store.create("Persistent", ["MyWorks"])
@@ -101,7 +160,9 @@ def test_chat_api_contract_stream_and_attachment_validation(tmp_path: Path, monk
     assert reply.status_code == 200
     assert reply.json()["content"] == "Readable answer [1]"
     assert client.get("/chat").status_code == 200
-    assert "Evidence" in client.get("/chat").text
+    page = client.get("/chat").text
+    assert "Evidence" in page
+    assert "message_rejected" in page and "fallback_started" in page and "activeGenerations" in page
     assert client.get("/library").status_code == 200
     assert client.get("/research").status_code == 200
     assert client.get("/downloads").status_code == 200
