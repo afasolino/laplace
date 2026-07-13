@@ -159,9 +159,14 @@ def apply_validated_patch(
     patch_file.parent.mkdir(parents=True, exist_ok=True)
     patch_file.write_text(patch, encoding="utf-8")
     patch_file.chmod(0o444)
-    _, check_stdout, check_stderr = _run_git(worktree.root, ["apply", "--check", str(patch_file)])
+    # Local models occasionally emit a correct diff body with stale hunk
+    # counts.  ``--recount`` recalculates only those counts; Git still checks
+    # every context line and rejects a patch that does not apply.
+    _, check_stdout, check_stderr = _run_git(
+        worktree.root, ["apply", "--check", "--recount", str(patch_file)]
+    )
     _, apply_stdout, apply_stderr = _run_git(
-        worktree.root, ["apply", "--whitespace=error", str(patch_file)]
+        worktree.root, ["apply", "--whitespace=error", "--recount", str(patch_file)]
     )
     report: JsonObject = {
         "status": "APPLIED",
