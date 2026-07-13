@@ -13,6 +13,7 @@ import csv
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import statistics
@@ -652,13 +653,32 @@ def _codex_environment(control_python: str) -> dict[str, str]:
     return environment
 
 
+def _shared_task_specification(task: BenchmarkTask, control_python: str) -> JsonObject:
+    """Return one lane-neutral specification with an explicit shared interpreter."""
+    specification = _task_spec(task)
+    if task.domain != "python":
+        return specification
+    interpreter = shlex.quote(str(Path(control_python).expanduser().absolute()))
+    commands = specification.get("verification_commands")
+    if not isinstance(commands, list) or not all(isinstance(command, str) for command in commands):
+        raise RuntimeError("Python paired task has malformed verification commands")
+    specification["verification_commands"] = [
+        command.replace(" python -m ", f" {interpreter} -m ", 1)
+        if " python -m " in command
+        else command.replace("python -m ", f"{interpreter} -m ", 1)
+        for command in commands
+    ]
+    return specification
+
+
 def _lane_prompt(task: BenchmarkTask, specification: JsonObject) -> str:
     return (
         "Implement the following normalized benchmark task in the current worktree. "
         "You may edit only the declared allowed paths. Run the listed public tests and applicable "
         "static checks. The correction budget is one initial implementation plus at most two repair "
         "cycles. Do not look for held-out tests, do not access another worktree, do not use network "
-        "access, and finish with a concise report.\n\n"
+        "access, and finish with a concise report. For Python, use the absolute shared interpreter "
+        "in verification_commands; do not substitute a bare `python`.\n\n"
         f"Normalized task specification:\n{json.dumps(specification, indent=2, sort_keys=True)}\n\n"
         f"Public fixture: {task.fixture}\n"
         "The evaluator will restore public tests before scoring, so do not modify tests."
@@ -1079,7 +1099,7 @@ def run_valid_paired_benchmark(
     run_root.mkdir(parents=True, exist_ok=False)
     task_rows: list[JsonObject] = []
     for task in _BENCHMARK_TASKS:
-        spec = _task_spec(task)
+        spec = _shared_task_specification(task, python_executable)
         validate_root = root
         normalized = normalize_task_spec(validate_root, task.domain, spec)
         _write_json_atomic(run_root / "task_specs" / f"{task.task_id}.json", normalized)

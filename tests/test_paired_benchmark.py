@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import sys
 from pathlib import Path
 
 from research_workspace.engineering import normalize_task_spec
@@ -8,6 +9,7 @@ from research_workspace.paired_benchmark import (
     _BENCHMARK_TASKS,
     _codex_environment,
     _lane_prompt,
+    _shared_task_specification,
     _task_spec,
     _write_reports,
 )
@@ -28,9 +30,17 @@ def test_codex_lane_receives_the_same_two_repair_cycle_budget() -> None:
 
 
 def test_codex_lane_pins_the_control_plane_python_environment() -> None:
-    environment = _codex_environment(__import__("sys").executable)
+    environment = _codex_environment(sys.executable)
     assert environment["PATH"].split(":")[0].endswith(".venv/bin")
     assert environment["PYTHONNOUSERSITE"] == "1"
+
+
+def test_python_lanes_receive_absolute_shared_interpreter_commands() -> None:
+    task = _BENCHMARK_TASKS[0]
+    specification = _shared_task_specification(task, sys.executable)
+    commands = specification["verification_commands"]
+    assert isinstance(commands, list)
+    assert all(str(Path(sys.executable).absolute()) in command for command in commands)
 
 
 def test_comparison_report_flattens_each_lane_and_keeps_quality_dimensions(tmp_path: Path) -> None:
