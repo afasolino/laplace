@@ -10,7 +10,7 @@ or server.
 | Existing component | Reused extension point | Compatibility rule |
 | --- | --- | --- |
 | `laplace_cli.py` | Added governed-reference, task, quality, EDA, serving and paired-benchmark options | Existing lifecycle and chat options are unchanged. |
-| `projects.py` and `.laplace/project.yaml` | Project-local `Data/References` and `Data/AgentTeam` artifacts | No shared Library source or project source is overwritten. |
+| `projects.py` and `.laplace/project.yaml` | Shared governed `Library/{Python,SystemVerilog}` plus project-local `Data/AgentTeam` state | Shared sources remain immutable and task projects store only derived evidence and execution artifacts. |
 | `documents.py` and `library.py` | The existing SQLite `documents`/`chunks` index receives hash-verified selected reference text | Reference snapshots and selected files remain separate and read-only. |
 | `retrieval.py`, `chat.py`, provenance records | Engineering research packets retain source paths, hashes, licence policy and exact commits | Chat citation validation and rejected-draft/fallback semantics are untouched. |
 | `llm.py` | Existing narrow provider shape now has loopback health/model identity plus vLLM/SGLang clients | Ollama remains the fallback and no CPU fallback is treated as GPU inference. |

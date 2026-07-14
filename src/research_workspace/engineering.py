@@ -28,6 +28,7 @@ from typing import Literal, TypeAlias
 import yaml
 
 from .documents import _chunks, _db
+from .retrieval import embed
 
 
 JsonValue: TypeAlias = object
@@ -105,6 +106,10 @@ class ReferencePolicyError(EngineeringError):
     """A reference would violate its provenance or read-only policy."""
 
 
+class ReferenceEvidenceError(EngineeringError):
+    """A workflow requiring governed evidence could not retrieve any."""
+
+
 class ToolExecutionError(EngineeringError):
     """An allowlisted local tool could not be executed safely."""
 
@@ -115,6 +120,19 @@ class InferenceBlockedError(EngineeringError):
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def resolve_shared_reference_root(explicit: Path | None = None) -> Path | None:
+    """Resolve an explicitly configured shared FormalScience Library root."""
+    if explicit is not None:
+        return explicit.expanduser().resolve()
+    configured = os.getenv("LAPLACE_SHARED_REFERENCE_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    formal_root = os.getenv("FORMALSCIENCE_ROOT")
+    if formal_root:
+        return (Path(formal_root).expanduser() / "Library").resolve()
+    return None
 
 
 def _sha256(path: Path) -> str:
@@ -375,16 +393,35 @@ class ReferenceManifest:
 
 
 class ReferenceLibrary:
-    """Project-scoped, hash-verified and immutable curated references."""
+    """Hash-verified immutable references in project-local or shared layout."""
 
-    def __init__(self, project_root: Path, domain: Domain) -> None:
+    def __init__(self, project_root: Path, domain: Domain, *, shared: bool = False) -> None:
         self.project_root = project_root.resolve()
         self.domain = domain
-        self.root = self.project_root / "Data" / "References" / _DOMAIN_LIBRARY[domain]
+        self.shared = shared
+        self.root = (
+            self.project_root / _DOMAIN_LIBRARY[domain]
+            if shared
+            else self.project_root / "Data" / "References" / _DOMAIN_LIBRARY[domain]
+        )
 
     @property
     def manifests(self) -> Path:
         return self.root / "90_manifests"
+
+    @property
+    def index_database(self) -> Path:
+        """Dedicated derived index for this immutable reference library."""
+        return self.root / "indexes" / "reference_index.db"
+
+    def snapshot_hash(self) -> str | None:
+        """Return a stable hash of every exact registered manifest."""
+        manifests = self.manifests_list()
+        if not manifests:
+            return None
+        payload = [item.to_json() for item in manifests]
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     def initialize(self, catalog_path: Path) -> JsonObject:
         catalog = catalog_path.resolve()
@@ -567,7 +604,9 @@ class ReferenceLibrary:
         manifest_path = self._manifest_path(reference_id)
         if manifest_path.exists():
             previous = self._read_manifest(reference_id)
-            if previous.to_json() != manifest.to_json():
+            candidate = manifest.to_json()
+            candidate["registered_at"] = previous.registered_at
+            if previous.to_json() != candidate:
                 raise ReferencePolicyError(
                     "Reference manifest is immutable; use a new id for a new snapshot"
                 )
@@ -628,9 +667,10 @@ class ReferenceLibrary:
             "next_step": "After explicit network and licence approval, register a new exact-commit snapshot rather than updating an immutable reference.",
         }
 
-    def ingest(self, database: Path) -> JsonObject:
+    def ingest(self, database: Path | None = None) -> JsonObject:
         """Index selected reference text in the existing project SQLite database."""
-        conn = _db(database)
+        target_database = (database or self.index_database).resolve()
+        conn = _db(target_database)
         conn.execute(
             "CREATE TABLE IF NOT EXISTS reference_ingestions(reference_id TEXT NOT NULL, selected_path TEXT NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY(reference_id, selected_path))"
         )
@@ -676,6 +716,11 @@ class ReferenceLibrary:
                         "commit": manifest.commit,
                         "licence_identifier": manifest.licence_identifier,
                         "permitted_use": manifest.permitted_use,
+                        "repository": manifest.repository,
+                        "attribution": manifest.attribution,
+                        "selected_path": record.selected_path,
+                        "sha256": record.sha256,
+                        "topics": list(record.topics),
                         "read_only": True,
                     }
                     conn.execute(
@@ -707,14 +752,116 @@ class ReferenceLibrary:
             conn.close()
         report: JsonObject = {
             "domain": self.domain,
-            "database": str(database),
+            "database": str(target_database),
             "counts": counts,
             "ingested_at": _now(),
+            "snapshot_hash": self.snapshot_hash(),
         }
         target = self.root / "indexes" / "ingestion_report.json"
         _write_json_atomic(target, report)
         report["report_path"] = str(target)
         return report
+
+    def search_chunks(
+        self,
+        query: str,
+        *,
+        limit: int = 6,
+        token_budget: int = 3500,
+    ) -> list[JsonObject]:
+        """Retrieve ranked, provenance-complete governed-reference content."""
+        if limit <= 0 or token_budget <= 0:
+            raise ReferencePolicyError("Reference search limits must be positive")
+        manifests = self.manifests_list()
+        if not manifests:
+            return []
+        verification = self.verify()
+        if verification.get("status") != "VERIFIED":
+            raise ReferencePolicyError("Governed reference library failed hash verification")
+        self.ingest()
+        conn = _db(self.index_database)
+        try:
+            rows = conn.execute(
+                "SELECT c.id,c.text,d.filename,d.metadata "
+                "FROM chunks c JOIN documents d ON d.id=c.document_id "
+                "WHERE d.class=?",
+                ("technical_documentation",),
+            ).fetchall()
+        finally:
+            conn.close()
+        query_tokens = set(re.findall(r"[\w.-]+", query.lower()))
+        query_vector = embed(query)
+        ranked: list[tuple[float, str, str, dict[str, object]]] = []
+        for chunk_id, text, filename, metadata_text in rows:
+            if not isinstance(chunk_id, str) or not isinstance(text, str):
+                continue
+            try:
+                metadata_raw: object = json.loads(metadata_text or "{}")
+            except (TypeError, json.JSONDecodeError):
+                metadata_raw = {}
+            if not isinstance(metadata_raw, dict):
+                metadata_raw = {}
+            if metadata_raw.get("source_kind") != "governed_reference":
+                continue
+            metadata = {str(key): value for key, value in metadata_raw.items()}
+            topics_raw = metadata.get("topics", [])
+            topics = (
+                [item for item in topics_raw if isinstance(item, str)]
+                if isinstance(topics_raw, list)
+                else []
+            )
+            selected_path = str(metadata.get("selected_path", filename or ""))
+            searchable = " ".join([text, str(filename or ""), selected_path, *topics])
+            tokens = set(re.findall(r"[\w.-]+", searchable.lower()))
+            lexical = len(query_tokens.intersection(tokens)) / max(1, len(query_tokens))
+            semantic = sum(a * b for a, b in zip(query_vector, embed(searchable)))
+            topic_tokens = set(re.findall(r"[\w.-]+", " ".join(topics).lower()))
+            topic_overlap = len(query_tokens.intersection(topic_tokens)) / max(1, len(query_tokens))
+            score = 0.50 * semantic + 0.35 * lexical + 0.15 * topic_overlap
+            if score <= 0:
+                continue
+            ranked.append((score, chunk_id, text, metadata))
+        remaining_chars = token_budget * 4
+        selected: list[JsonObject] = []
+        seen_content: set[str] = set()
+        for score, chunk_id, text, metadata in sorted(
+            ranked, key=lambda item: (item[0], item[1]), reverse=True
+        ):
+            if len(selected) >= limit or remaining_chars <= 0:
+                break
+            fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            if fingerprint in seen_content:
+                continue
+            seen_content.add(fingerprint)
+            content = text[:remaining_chars]
+            if not content.strip():
+                continue
+            topics_raw = metadata.get("topics", [])
+            topics = (
+                [item for item in topics_raw if isinstance(item, str)]
+                if isinstance(topics_raw, list)
+                else []
+            )
+            selected.append(
+                {
+                    "kind": "governed_reference",
+                    "reference_id": metadata.get("reference_id"),
+                    "repository": metadata.get("repository"),
+                    "commit": metadata.get("commit"),
+                    "licence_identifier": metadata.get("licence_identifier"),
+                    "permitted_use": metadata.get("permitted_use"),
+                    "attribution": metadata.get("attribution"),
+                    "path": metadata.get("selected_path"),
+                    "sha256": metadata.get("sha256"),
+                    "topics": topics,
+                    "chunk_id": chunk_id,
+                    "score": round(score, 6),
+                    "estimated_tokens": max(1, (len(content) + 3) // 4),
+                    "content": content,
+                }
+            )
+            remaining_chars -= len(content)
+        return selected
 
     def verify(self, reference_id: str | None = None) -> JsonObject:
         manifests = [self._read_manifest(reference_id)] if reference_id else self.manifests_list()
@@ -752,6 +899,7 @@ class ReferenceLibrary:
         return {
             "domain": self.domain,
             "root": str(self.root),
+            "shared": self.shared,
             "initialized": snapshot.is_file(),
             "network_status": "NOT_CONTACTED_APPROVAL_REQUIRED",
             "references": [item.reference_id for item in self.manifests_list()],
@@ -1150,8 +1298,11 @@ def retrieve_engineering_evidence(
     task: AgentTask,
     *,
     query: str,
+    shared_reference_root: Path | None = None,
+    governed_chunk_limit: int = 6,
+    governed_token_budget: int = 3500,
 ) -> JsonObject:
-    """Return precedence-ordered evidence without allowing source copying."""
+    """Return precedence-ordered project and governed evidence with provenance."""
     root = repository_root.resolve()
     project = project_root.resolve()
     task_paths_key = "allowed_paths" if task.domain == "python" else "files_allowed_to_change"
@@ -1175,21 +1326,17 @@ def retrieve_engineering_evidence(
                         "excerpt": content[:1200],
                     }
                 )
-    library = ReferenceLibrary(project, task.domain)
-    governed: list[JsonObject] = []
-    for manifest in library.manifests_list():
-        for record in manifest.files:
-            governed.append(
-                {
-                    "kind": "governed_reference",
-                    "reference_id": manifest.reference_id,
-                    "commit": manifest.commit,
-                    "licence_identifier": manifest.licence_identifier,
-                    "permitted_use": manifest.permitted_use,
-                    "path": record.selected_path,
-                    "sha256": record.sha256,
-                }
-            )
+    library = (
+        ReferenceLibrary(shared_reference_root, task.domain, shared=True)
+        if shared_reference_root is not None
+        else ReferenceLibrary(project, task.domain)
+    )
+    governed = library.search_chunks(
+        query,
+        limit=governed_chunk_limit,
+        token_budget=governed_token_budget,
+    )
+    snapshot_hash = library.snapshot_hash()
     return {
         "query": query,
         "precedence": [
@@ -1200,6 +1347,14 @@ def retrieve_engineering_evidence(
         ],
         "target_project": target_project,
         "governed_references": governed,
+        "governed_reference_library": {
+            "root": str(library.root),
+            "shared": shared_reference_root is not None,
+            "snapshot_hash": snapshot_hash,
+            "manifest_count": len(library.manifests_list()),
+            "retrieved_chunk_count": len(governed),
+            "token_budget": governed_token_budget,
+        },
         "model_prior_knowledge_allowed_only_after_evidence": True,
     }
 

@@ -1,0 +1,20 @@
+{
+  "reference_id": "approved_reference_id",
+  "repository": "https://github.com/owner/repository.git",
+  "commit": "0000000000000000000000000000000000000000",
+  "licence_identifier": "SPDX-ID",
+  "licence_path": "/absolute/path/to/checked-out/LICENSE",
+  "permitted_use": "reference_only_no_copy",
+  "attribution": "Copyright holder and project name",
+  "selected_files": [
+    {
+      "path": "/absolute/path/to/checked-out/selected_file.sv",
+      "topic": "20_interfaces/axi",
+      "topics": [
+        "axi4_lite",
+        "wstrb",
+        "w1c"
+      ]
+    }
+  ]
+}

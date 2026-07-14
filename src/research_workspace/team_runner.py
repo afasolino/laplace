@@ -24,11 +24,13 @@ from .engineering import (
     EngineeringError,
     JsonObject,
     LocalToolRunner,
+    ReferenceEvidenceError,
     TaskState,
     _inside,
     _safe_relative,
     _write_json_atomic,
     collect_cuda_evidence,
+    resolve_shared_reference_root,
     retrieve_engineering_evidence,
 )
 from .inference import ServingCandidate, backend_for
@@ -270,6 +272,7 @@ class LocalTeamRunner:
         candidate: ServingCandidate,
         *,
         options: TeamWorkflowOptions | None = None,
+        shared_reference_root: Path | None = None,
     ) -> None:
         self.repository_root = repository_root.resolve()
         self.project_root = project_root.resolve()
@@ -277,6 +280,7 @@ class LocalTeamRunner:
         self.candidate = candidate
         self.options = options or TeamWorkflowOptions()
         self.log_root = self.project_root / "Outputs" / "AgentTeam" / "team_logs"
+        self.shared_reference_root = resolve_shared_reference_root(shared_reference_root)
 
     def _transition(self, task: AgentTask, target: TaskState, note: str) -> AgentTask:
         return self.store.transition(task.task_id, target, role="supervisor", note=note)
@@ -352,6 +356,19 @@ class LocalTeamRunner:
         elif mode != "full":
             raise EngineeringError(f"Unknown retrieval mode: {mode}")
         filtered["retrieval_mode"] = mode
+        target = filtered.get("target_project")
+        governed = filtered.get("governed_references")
+        target_available = isinstance(target, list) and bool(target)
+        governed_available = isinstance(governed, list) and bool(governed)
+        filtered["retrieval_availability"] = {
+            "target_project": target_available,
+            "governed_references": governed_available,
+        }
+        if mode == "curated_only" and not governed_available:
+            raise ReferenceEvidenceError(
+                "BLOCKED_REFERENCE_EMPTY: curated-only execution requires at least one "
+                "verified governed-reference content chunk"
+            )
         return filtered
 
     @staticmethod
@@ -691,7 +708,11 @@ end endmodule
             task = self._transition(task, "retrieval", "Researcher may retrieve read-only evidence")
         if task.state == "retrieval":
             evidence = retrieve_engineering_evidence(
-                self.repository_root, self.project_root, task, query=query
+                self.repository_root,
+                self.project_root,
+                task,
+                query=query,
+                shared_reference_root=self.shared_reference_root,
             )
             evidence = self._filter_evidence(evidence, self.options.retrieval_mode)
             researcher_summary: JsonObject = {
@@ -822,6 +843,15 @@ end endmodule
             }
         try:
             task = self._prepare(task, query, backend)
+        except ReferenceEvidenceError as exc:
+            task = self.store.load(task.task_id)
+            task = self._transition(task, "blocked", str(exc))
+            return {
+                "status": "BLOCKED_REFERENCE_EMPTY",
+                "task": task.to_json(),
+                "cuda_evidence": cuda,
+                "error": str(exc),
+            }
         except ModelRequired as exc:
             task = self._transition(
                 task, "blocked", f"MODEL_REQUIRED: role generation failed: {exc}"
@@ -960,6 +990,7 @@ end endmodule
                         "look for hidden tests. State missing evidence as changes requested. Do not edit or merge.\n"
                         f"Task: {task.specification}\n"
                         f"Acceptance matrix: {self._acceptance_matrix(task)}\n"
+                        f"Reference evidence: {evidence_raw}\n"
                         f"Verifier report: {verification}",
                     )
                 task = self.store.load(task.task_id)
@@ -974,6 +1005,7 @@ end endmodule
                     "verification_report": task.artifacts.get("verification_report"),
                     "repair_cycles_used": task.correction_loops,
                     "reviewer_can_merge": False,
+                    "reference_library": evidence_raw.get("governed_reference_library", {}),
                     "reviewer_model_contribution": reviewer_contribution,
                 }
                 self.store.write_artifact(

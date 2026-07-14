@@ -21,6 +21,7 @@ from .engineering import (
     LocalToolRunner,
     ReferenceLibrary,
     normalize_task_spec,
+    resolve_shared_reference_root,
     retrieve_engineering_evidence,
 )
 from .inference import Engine, ServingCandidate, benchmark_local_candidate
@@ -118,7 +119,12 @@ class McpService:
         )
 
     def _reference(self, domain: Domain) -> ReferenceLibrary:
-        return ReferenceLibrary(self.project_root, domain)
+        shared = resolve_shared_reference_root()
+        return (
+            ReferenceLibrary(shared, domain, shared=True)
+            if shared is not None
+            else ReferenceLibrary(self.project_root, domain)
+        )
 
     def call(self, name: str, arguments: JsonObject) -> JsonObject:
         if name in {
@@ -161,14 +167,22 @@ class McpService:
                     raise EngineeringError("topics must be a list of strings")
                 return library.select(list(topics))
             if action == "ingest":
-                return library.ingest(self.project_root / "Data" / "Metadata" / "workspace.db")
+                return library.ingest(
+                    None
+                    if library.shared
+                    else self.project_root / "Data" / "Metadata" / "workspace.db"
+                )
             raise EngineeringError("Unsupported reference_status action")
         if name == "research_task":
             task_id = _text(arguments.get("task_id"), label="task_id")
             query = _text(arguments.get("query"), label="query")
             task = AgentTaskStore(self.project_root).load(task_id)
             return retrieve_engineering_evidence(
-                self.repository_root, self.project_root, task, query=query
+                self.repository_root,
+                self.project_root,
+                task,
+                query=query,
+                shared_reference_root=resolve_shared_reference_root(),
             )
         if name == "implement_task":
             task_id = _text(arguments.get("task_id"), label="task_id")

@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.laplace/schemas/shared-reference-registration.schema.json",
+  "title": "Approved shared reference registration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "reference_id",
+    "repository",
+    "commit",
+    "licence_identifier",
+    "licence_path",
+    "permitted_use",
+    "attribution",
+    "selected_files"
+  ],
+  "properties": {
+    "reference_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "repository": {
+      "type": "string",
+      "minLength": 1
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "licence_identifier": {
+      "type": "string",
+      "minLength": 1
+    },
+    "licence_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "permitted_use": {
+      "type": "string",
+      "minLength": 1
+    },
+    "attribution": {
+      "type": "string",
+      "minLength": 1
+    },
+    "selected_files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "topic", "topics"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "topic": {
+            "type": "string",
+            "minLength": 1
+          },
+          "topics": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    }
+  }
+}

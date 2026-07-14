@@ -18,7 +18,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from .chat import ChatEngine, ChatProject, ConversationStore
 from .core import ensure_layout, load_settings
 from .documents import ALLOWED, ingest
-from .engineering import EngineeringError, LocalToolRunner, ReferenceLibrary
+from .engineering import (
+    EngineeringError,
+    LocalToolRunner,
+    ReferenceLibrary,
+    resolve_shared_reference_root,
+)
 from .library import ingest_library
 from .online import search_ieee, search_scholarly
 from .projects import init_project, list_projects, project_summary
@@ -260,7 +265,12 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
     def engineering_references(
         domain: Literal["python", "systemverilog"], request: EngineeringReferenceRequest
     ) -> dict[str, object]:
-        library = ReferenceLibrary(root, domain)
+        shared = resolve_shared_reference_root()
+        library = (
+            ReferenceLibrary(shared, domain, shared=True)
+            if shared is not None
+            else ReferenceLibrary(root, domain)
+        )
         try:
             if request.action == "initialize":
                 catalog = (
@@ -277,7 +287,7 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
             if request.action == "select":
                 return library.select(request.topics)
             if request.action == "ingest":
-                return library.ingest(index_database)
+                return library.ingest(None if library.shared else index_database)
             return library.verify(request.reference_id)
         except EngineeringError as exc:
             raise HTTPException(400, str(exc)) from exc

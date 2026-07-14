@@ -155,6 +155,7 @@ def _task_record(
     options: TeamWorkflowOptions,
     control_python: str,
     timeout_seconds: int,
+    shared_reference_root: Path | None = None,
 ) -> JsonObject:
     """Run an isolated Laplace task, then score it in a fresh evaluator worktree."""
     project_root = root / "projects" / task.task_id
@@ -167,6 +168,7 @@ def _task_record(
         project_root,
         candidate,
         options=options,
+        shared_reference_root=shared_reference_root,
     ).run(task_state.task_id, query=task.objective)
     elapsed = time.monotonic() - started
     record: JsonObject = {
@@ -187,6 +189,9 @@ def _task_record(
             "adversarial_verification": options.adversarial_verification,
             "reviewer_invariants": options.reviewer_invariants,
             "repair_budget": 2,
+            "shared_reference_root": (
+                str(shared_reference_root.resolve()) if shared_reference_root is not None else None
+            ),
         },
     }
     worktree = _worktree_from_result(result)
@@ -244,6 +249,7 @@ def run_original_rerun(
     output_root: Path,
     control_python: str | None = None,
     timeout_seconds: int = 900,
+    shared_reference_root: Path | None = None,
 ) -> JsonObject:
     """Re-run the original six fixtures from their historic, common checkpoint."""
     root = repository_root.resolve()
@@ -259,6 +265,7 @@ def run_original_rerun(
             options=options,
             control_python=control_python or sys.executable,
             timeout_seconds=timeout_seconds,
+            shared_reference_root=shared_reference_root,
         )
         for task in _BENCHMARK_TASKS
     ]
@@ -293,6 +300,7 @@ def run_unseen_tasks(
     output_root: Path,
     control_python: str | None = None,
     timeout_seconds: int = 900,
+    shared_reference_root: Path | None = None,
 ) -> JsonObject:
     """Evaluate six new fixtures from one post-improvement checkpoint.
 
@@ -313,6 +321,7 @@ def run_unseen_tasks(
             options=options,
             control_python=control_python or sys.executable,
             timeout_seconds=timeout_seconds,
+            shared_reference_root=shared_reference_root,
         )
         for task in _UNSEEN_TASKS
     ]
@@ -520,6 +529,7 @@ def run_ablations(
     output_root: Path,
     control_python: str | None = None,
     timeout_seconds: int = 900,
+    shared_reference_root: Path | None = None,
 ) -> list[JsonObject]:
     """Run controlled single-factor workflow ablations on representative failures."""
     task_by_id = {task.task_id: task for task in _BENCHMARK_TASKS}
@@ -573,6 +583,7 @@ def run_ablations(
                 options=ablation.options,
                 control_python=control_python or sys.executable,
                 timeout_seconds=timeout_seconds,
+                shared_reference_root=shared_reference_root,
             )
             record["ablation"] = ablation.name
             records.append(record)
@@ -678,6 +689,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout-seconds", type=int, default=900)
     parser.add_argument("--analysis-only", action="store_true")
     parser.add_argument("--run-ablations", action="store_true")
+    parser.add_argument(
+        "--shared-reference-root",
+        type=Path,
+        help="Exact shared FormalScience Library root containing Python/ and SystemVerilog/",
+    )
     arguments = parser.parse_args(argv)
     root = Path.cwd().resolve()
     output = (root / arguments.output_root).resolve()
@@ -696,6 +712,7 @@ def main(argv: list[str] | None = None) -> int:
         candidate,
         output_root=output,
         timeout_seconds=arguments.timeout_seconds,
+        shared_reference_root=arguments.shared_reference_root,
     )
     ablation_file = output / "agent_ablation_results.json"
     stored_ablation_records = (
@@ -712,6 +729,7 @@ def main(argv: list[str] | None = None) -> int:
             candidate,
             output_root=output,
             timeout_seconds=arguments.timeout_seconds,
+            shared_reference_root=arguments.shared_reference_root,
         )
         if arguments.run_ablations
         else prior_ablations
@@ -721,6 +739,7 @@ def main(argv: list[str] | None = None) -> int:
         candidate,
         output_root=output,
         timeout_seconds=arguments.timeout_seconds,
+        shared_reference_root=arguments.shared_reference_root,
     )
     write_summary(output, original, unseen, ablations)
     return 0

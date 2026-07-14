@@ -35,6 +35,7 @@ from .engineering import (
     LocalToolRunner,
     ReferenceLibrary,
     normalize_task_spec,
+    resolve_shared_reference_root,
     retrieve_engineering_evidence,
 )
 from .extraction import Provenance, extract_metrics, write_record
@@ -745,7 +746,12 @@ def _reference_operation(paths: ProjectPaths, values: list[str]) -> dict[str, An
         )
     action, domain_value, *rest = values
     domain = _engineering_domain(domain_value)
-    library = ReferenceLibrary(paths.root, domain)
+    shared = resolve_shared_reference_root()
+    library = (
+        ReferenceLibrary(shared, domain, shared=True)
+        if shared is not None
+        else ReferenceLibrary(paths.root, domain)
+    )
     if action == "init":
         catalog = APPLICATION_ROOT / "codex_a6000" / "reference_sources" / f"{domain}_sources.yaml"
         return library.initialize(catalog)
@@ -758,7 +764,7 @@ def _reference_operation(paths: ProjectPaths, values: list[str]) -> dict[str, An
     if action == "select":
         return library.select(rest)
     if action == "ingest":
-        return library.ingest(_database(paths))
+        return library.ingest(None if library.shared else _database(paths))
     raise LaplaceError("Reference usage: init|status|sync|verify|select|ingest DOMAIN [VALUE ...]")
 
 
@@ -784,7 +790,13 @@ def _agent_task_operation(
 def _agent_research(paths: ProjectPaths, task_id: str, query: str) -> dict[str, Any]:
     store = AgentTaskStore(paths.root)
     task = store.load(task_id)
-    evidence = retrieve_engineering_evidence(APPLICATION_ROOT, paths.root, task, query=query)
+    evidence = retrieve_engineering_evidence(
+        APPLICATION_ROOT,
+        paths.root,
+        task,
+        query=query,
+        shared_reference_root=resolve_shared_reference_root(),
+    )
     artifact = store.write_artifact(
         task_id, role="researcher", name="evidence_packet", payload=evidence
     )

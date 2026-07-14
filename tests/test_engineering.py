@@ -12,6 +12,7 @@ from research_workspace.engineering import (
     AgentTaskStore,
     EngineeringError,
     LocalToolRunner,
+    ReferenceEvidenceError,
     ReferenceLibrary,
     SchemaValidationError,
     normalize_task_spec,
@@ -146,12 +147,223 @@ def test_research_evidence_prefers_target_project_before_governed_references(
     assert evidence["target_project"]
 
 
+def test_shared_governed_reference_is_retrieved_from_fresh_task_project(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "approved-source"
+    source_root.mkdir()
+    licence = source_root / "LICENSE"
+    licence.write_text("Fixture licence text\n", encoding="utf-8")
+    guide = source_root / "axi_guide.sv"
+    guide.write_text(
+        "AXI4-Lite writes must apply WSTRB byte enables and write-one-to-clear semantics.\n",
+        encoding="utf-8",
+    )
+    shared_root = tmp_path / "FormalScience" / "Library"
+    library = ReferenceLibrary(shared_root, "systemverilog", shared=True)
+    library.initialize(
+        REPOSITORY_ROOT / "codex_a6000" / "reference_sources" / "systemverilog_sources.yaml"
+    )
+    library.register_local(
+        reference_id="fixture_axi",
+        repository="https://example.invalid/axi.git",
+        commit="b" * 40,
+        licence_identifier="MIT",
+        licence_path=licence,
+        selected_files=[(guide, "20_interfaces/axi", ("axi4_lite", "wstrb", "w1c"))],
+        permitted_use="reference_only_no_copy",
+        attribution="Fixture author",
+    )
+    fresh_project = tmp_path / "fresh-task-project"
+    task = AgentTaskStore(fresh_project).create(
+        "systemverilog",
+        normalize_task_spec(
+            REPOSITORY_ROOT,
+            "systemverilog",
+            {
+                "task_id": "shared-reference-task",
+                "objective": "Implement WSTRB and W1C behavior.",
+                "target": {
+                    "class": "portable_rtl",
+                    "language": "SystemVerilog",
+                    "toolchain": ["verilator", "iverilog", "yosys"],
+                },
+                "files_allowed_to_change": [
+                    "benchmarks/a6000_agent_team/paired_public/sv_axi_lite_irq_regs/axi_lite_irq_regs.sv"
+                ],
+                "interfaces": [
+                    {
+                        "name": "s_axi",
+                        "protocol": "AXI4-Lite",
+                        "direction": "slave",
+                        "signals": ["AW", "W", "B", "AR", "R"],
+                        "ordering": "independent address and data channels",
+                        "backpressure": "supported",
+                    }
+                ],
+                "clock_reset": {
+                    "clock_domains": ["aclk"],
+                    "reset_semantics": "active-low synchronous reset",
+                    "cdc_rdc_assumptions": "single clock domain",
+                },
+                "functional_requirements": ["Respect WSTRB and W1C semantics."],
+                "error_and_corner_behavior": ["No protocol deadlock."],
+                "verification": {
+                    "self_checking": True,
+                    "tests": ["byte strobes and W1C clear"],
+                    "assertions": ["responses remain stable while stalled"],
+                    "commands": ["verilator --lint-only"],
+                    "acceptance_criteria": ["public simulation passes"],
+                },
+                "deliverables": ["rtl"],
+                "out_of_scope": ["AXI4 full"],
+                "blocking_questions": [],
+            },
+        ),
+    )
+    evidence = retrieve_engineering_evidence(
+        REPOSITORY_ROOT,
+        fresh_project,
+        task,
+        query="AXI4-Lite WSTRB W1C",
+        shared_reference_root=shared_root,
+    )
+    governed = evidence["governed_references"]
+    assert isinstance(governed, list) and governed
+    first = governed[0]
+    assert isinstance(first, dict)
+    assert first["reference_id"] == "fixture_axi"
+    assert first["chunk_id"].startswith("reference:fixture_axi:")
+    assert "write-one-to-clear" in str(first["content"])
+    assert evidence["governed_reference_library"]["snapshot_hash"] == library.snapshot_hash()
+
+
+def test_curated_only_fails_closed_when_governed_content_is_empty() -> None:
+    evidence: dict[str, object] = {
+        "target_project": [{"path": "local.py"}],
+        "governed_references": [],
+    }
+    with pytest.raises(ReferenceEvidenceError, match="BLOCKED_REFERENCE_EMPTY"):
+        LocalTeamRunner._filter_evidence(evidence, "curated_only")
+
+
+def test_governed_reference_search_excludes_irrelevant_chunks(tmp_path: Path) -> None:
+    source_root = tmp_path / "sources"
+    source_root.mkdir()
+    licence = source_root / "LICENSE"
+    licence.write_text("Fixture licence\n", encoding="utf-8")
+    async_guide = source_root / "async.md"
+    async_guide.write_text(
+        "Await cancellation cleanup before raising a timeout from an asynchronous job.\n",
+        encoding="utf-8",
+    )
+    unrelated = source_root / "optics.md"
+    unrelated.write_text("Thin lenses form images using focal distance.\n", encoding="utf-8")
+    shared_root = tmp_path / "Library"
+    library = ReferenceLibrary(shared_root, "python", shared=True)
+    library.initialize(
+        REPOSITORY_ROOT / "codex_a6000" / "reference_sources" / "python_sources.yaml"
+    )
+    library.register_local(
+        reference_id="fixture_python_topics",
+        repository="https://example.invalid/python.git",
+        commit="c" * 40,
+        licence_identifier="MIT",
+        licence_path=licence,
+        selected_files=[
+            (async_guide, "20_architecture_patterns/async", ("async", "cancellation", "timeout")),
+            (unrelated, "20_architecture_patterns/optics", ("optics", "lens")),
+        ],
+        permitted_use="reference_only_no_copy",
+        attribution="Fixture author",
+    )
+    chunks = library.search_chunks("async cancellation timeout", limit=1)
+    assert len(chunks) == 1
+    assert chunks[0]["path"] == "20_architecture_patterns/async/async.md"
+
+
+def test_shared_reference_registration_is_idempotent_and_snapshot_is_stable(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    licence = source_root / "LICENSE"
+    licence.write_text("Fixture licence\n", encoding="utf-8")
+    guide = source_root / "typing.md"
+    guide.write_text("Use explicit return types and reject invalid inputs.\n", encoding="utf-8")
+    shared_root = tmp_path / "Library"
+    library = ReferenceLibrary(shared_root, "python", shared=True)
+    library.initialize(
+        REPOSITORY_ROOT / "codex_a6000" / "reference_sources" / "python_sources.yaml"
+    )
+    arguments = {
+        "reference_id": "fixture_idempotent",
+        "repository": "https://example.invalid/idempotent.git",
+        "commit": "d" * 40,
+        "licence_identifier": "MIT",
+        "licence_path": licence,
+        "selected_files": [(guide, "50_typing_validation/typing", ("typing", "validation"))],
+        "permitted_use": "reference_only_no_copy",
+        "attribution": "Fixture author",
+    }
+    first = library.register_local(**arguments)
+    first_hash = library.snapshot_hash()
+    second = library.register_local(**arguments)
+    assert first["status"] == "VERIFIED"
+    assert second["status"] == "VERIFIED"
+    assert first_hash == library.snapshot_hash()
+
+
 def test_mcp_tools_list_is_a_harmless_stdio_discovery_call(tmp_path: Path) -> None:
     input_stream = io.StringIO('{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n')
     output_stream = io.StringIO()
     assert run_stdio(McpService(REPOSITORY_ROOT, tmp_path), input_stream, output_stream) == 0
     response = json.loads(output_stream.getvalue())
     assert response["result"]["tools"][0]["name"] == "normalize_software_task"
+
+
+def test_mcp_research_uses_configured_shared_reference_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_root = tmp_path / "approved"
+    source_root.mkdir()
+    licence = source_root / "LICENSE"
+    licence.write_text("Fixture licence\n", encoding="utf-8")
+    guide = source_root / "validation.md"
+    guide.write_text(
+        "A typed explicit operation validates every input before invoking a tool.\n",
+        encoding="utf-8",
+    )
+    shared_root = tmp_path / "FormalScience" / "Library"
+    library = ReferenceLibrary(shared_root, "python", shared=True)
+    library.initialize(
+        REPOSITORY_ROOT / "codex_a6000" / "reference_sources" / "python_sources.yaml"
+    )
+    library.register_local(
+        reference_id="fixture_mcp_shared",
+        repository="https://example.invalid/mcp.git",
+        commit="f" * 40,
+        licence_identifier="MIT",
+        licence_path=licence,
+        selected_files=[(guide, "50_typing_validation/input", ("typing", "validation", "tools"))],
+        permitted_use="reference_only_no_copy",
+        attribution="Fixture author",
+    )
+    project_root = tmp_path / "project"
+    task = AgentTaskStore(project_root).create(
+        "python", normalize_task_spec(REPOSITORY_ROOT, "python", _python_task("mcp-shared"))
+    )
+    monkeypatch.setenv("LAPLACE_SHARED_REFERENCE_ROOT", str(shared_root))
+    result = McpService(REPOSITORY_ROOT, project_root).call(
+        "research_task",
+        {"task_id": task.task_id, "query": "typed explicit operation validation"},
+    )
+    governed = result["governed_references"]
+    assert isinstance(governed, list) and governed
+    library_record = result["governed_reference_library"]
+    assert isinstance(library_record, dict)
+    assert library_record["shared"] is True
+    assert library_record["snapshot_hash"] == library.snapshot_hash()
 
 
 def test_eda_flow_runs_lint_self_checking_simulation_and_synthesis() -> None:
