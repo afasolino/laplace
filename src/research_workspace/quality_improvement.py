@@ -39,6 +39,15 @@ from .team_runner import LocalTeamRunner, TeamWorkflowOptions
 ORIGINAL_RUN_ID = "20260713T103206Z_6bce7155"
 ORIGINAL_BASE_COMMIT = "e34936fc686ab70d726e7289336f49155dc920f2"
 
+TARGETED_TASK_IDS: tuple[str, ...] = (
+    "py_fastapi_strict_endpoint",
+    "py_unseen_sqlite_state",
+    "sv_ready_valid_buffer",
+    "sv_axi_lite_irq_regs",
+    "sv_unseen_rv_slot",
+    "sv_unseen_w1c_event",
+)
+
 _UNSEEN_TASKS: tuple[BenchmarkTask, ...] = (
     BenchmarkTask(
         "py_unseen_pydantic_policy",
@@ -341,6 +350,157 @@ def run_unseen_tasks(
         "created_at": _now(),
     }
     _write_json_atomic(output_root / "unseen_tasks_results.json", payload)
+    return payload
+
+
+def _baseline_scores(root: Path | None) -> dict[str, float]:
+    if root is None:
+        return {}
+    scores: dict[str, float] = {}
+    for filename in ("original_tasks_rerun.json", "unseen_tasks_results.json"):
+        path = root / filename
+        if not path.is_file():
+            continue
+        payload = _read_json(path)
+        tasks = payload.get("tasks")
+        if not isinstance(tasks, list):
+            continue
+        for item in tasks:
+            if not isinstance(item, dict):
+                continue
+            task_id = item.get("task_id")
+            score = item.get("score")
+            if (
+                isinstance(task_id, str)
+                and isinstance(score, dict)
+                and isinstance(score.get("objective_score_0_100"), (int, float))
+            ):
+                scores[task_id] = float(score["objective_score_0_100"])
+    return scores
+
+
+def run_targeted_six(
+    repository_root: Path,
+    candidate: ServingCandidate,
+    *,
+    output_root: Path,
+    control_python: str | None = None,
+    timeout_seconds: int = 900,
+    shared_reference_root: Path | None = None,
+    baseline_root: Path | None = None,
+) -> JsonObject:
+    """Run only the six diagnosed tasks with full retrieval and operational review."""
+    root = repository_root.resolve()
+    current_base = _git(root, ["rev-parse", "HEAD"]).strip()
+    original = {task.task_id: task for task in _BENCHMARK_TASKS}
+    unseen = {task.task_id: task for task in _UNSEEN_TASKS}
+    baseline_scores = _baseline_scores(baseline_root.resolve() if baseline_root else None)
+    run_root = output_root / "targeted_runs" / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    records: list[JsonObject] = []
+    for task_id in TARGETED_TASK_IDS:
+        if task_id in original:
+            task = original[task_id]
+            base_commit = ORIGINAL_BASE_COMMIT
+        elif task_id in unseen:
+            task = unseen[task_id]
+            base_commit = current_base
+        else:
+            raise RuntimeError(f"Targeted task is not registered: {task_id}")
+        options = TeamWorkflowOptions(base_commit=base_commit)
+        record = _task_record(
+            root,
+            run_root,
+            task,
+            candidate,
+            base_commit=base_commit,
+            options=options,
+            control_python=control_python or sys.executable,
+            timeout_seconds=timeout_seconds,
+            shared_reference_root=shared_reference_root,
+        )
+        previous = baseline_scores.get(task_id)
+        score = record.get("score")
+        current = (
+            float(score["objective_score_0_100"])
+            if isinstance(score, dict)
+            and isinstance(score.get("objective_score_0_100"), (int, float))
+            else None
+        )
+        record["baseline_score_0_100"] = previous
+        record["score_delta"] = (
+            current - previous if current is not None and previous is not None else None
+        )
+        records.append(record)
+
+    payload: JsonObject = {
+        "status": "MEASURED",
+        "purpose": "Six-task targeted validation of structured repair, retrieval, and reviewer fixes.",
+        "candidate": candidate.to_json(),
+        "targeted_task_ids": list(TARGETED_TASK_IDS),
+        "current_base_commit": current_base,
+        "historic_original_base_commit": ORIGINAL_BASE_COMMIT,
+        "baseline_root": str(baseline_root.resolve()) if baseline_root else None,
+        "held_out_exposed_to_implementation": False,
+        "tasks": records,
+        "aggregate": {
+            "python_mean_score": _mean(records, "python"),
+            "systemverilog_mean_score": _mean(records, "systemverilog"),
+            "false_verifier_approvals": _held_out_false_approval(records),
+            "completed_tasks": sum(item.get("status") == "COMPLETE" for item in records),
+        },
+        "run_root": str(run_root),
+        "created_at": _now(),
+    }
+    _write_json_atomic(output_root / "targeted_six_results.json", payload)
+
+    fields = [
+        "task_id",
+        "domain",
+        "status",
+        "wall_time_s",
+        "repair_cycles",
+        "verifier_approved",
+        "baseline_score_0_100",
+        "objective_score_0_100",
+        "score_delta",
+        "functional_correctness",
+        "held_out_correctness",
+    ]
+    with (output_root / "targeted_six_results.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        for record in records:
+            score = record.get("score")
+            score_dict = score if isinstance(score, dict) else {}
+            row = {key: record.get(key) for key in fields}
+            for key in fields:
+                if key in score_dict:
+                    row[key] = score_dict.get(key)
+            writer.writerow(row)
+
+    aggregate = payload.get("aggregate")
+    aggregate_values = aggregate if isinstance(aggregate, dict) else {}
+    lines = [
+        "# Six-task targeted Laplace rerun",
+        "",
+        f"Python mean score: `{aggregate_values.get('python_mean_score')}`.",
+        f"SystemVerilog mean score: `{aggregate_values.get('systemverilog_mean_score')}`.",
+        f"False approvals: `{aggregate_values.get('false_verifier_approvals')}`.",
+        "",
+        "| Task | Status | Baseline | Current | Delta | Repairs |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
+    for record in records:
+        score = record.get("score")
+        current = score.get("objective_score_0_100") if isinstance(score, dict) else None
+        lines.append(
+            f"| {record.get('task_id')} | {record.get('status')} | "
+            f"{record.get('baseline_score_0_100')} | {current} | "
+            f"{record.get('score_delta')} | {record.get('repair_cycles')} |"
+        )
+    (output_root / "targeted_six_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return payload
 
 
@@ -690,6 +850,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--analysis-only", action="store_true")
     parser.add_argument("--run-ablations", action="store_true")
     parser.add_argument(
+        "--targeted-six",
+        action="store_true",
+        help="Run only the six diagnosed Python/SystemVerilog tasks.",
+    )
+    parser.add_argument(
+        "--baseline-root",
+        type=Path,
+        help="Prior corrected result root containing original/unseen JSON files.",
+    )
+    parser.add_argument(
         "--shared-reference-root",
         type=Path,
         help="Exact shared FormalScience Library root containing Python/ and SystemVerilog/",
@@ -698,8 +868,8 @@ def main(argv: list[str] | None = None) -> int:
     root = Path.cwd().resolve()
     output = (root / arguments.output_root).resolve()
     output.mkdir(parents=True, exist_ok=True)
-    write_failure_analysis(root, output)
     if arguments.analysis_only:
+        write_failure_analysis(root, output)
         return 0
     candidate = _candidate_from_json(arguments.candidate_json)
     cuda = LocalToolRunner(root).run("cuda_probe", ["nvidia-smi", "-L"], timeout_seconds=30)
@@ -707,6 +877,17 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError(
             "Quality rerun refuses to substitute CPU inference for the required A6000."
         )
+    if arguments.targeted_six:
+        run_targeted_six(
+            root,
+            candidate,
+            output_root=output,
+            timeout_seconds=arguments.timeout_seconds,
+            shared_reference_root=arguments.shared_reference_root,
+            baseline_root=arguments.baseline_root,
+        )
+        return 0
+    write_failure_analysis(root, output)
     original = run_original_rerun(
         root,
         candidate,

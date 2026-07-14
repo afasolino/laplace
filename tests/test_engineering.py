@@ -19,11 +19,11 @@ from research_workspace.engineering import (
     retrieve_engineering_evidence,
 )
 from research_workspace.inference import ServingCandidate
+from research_workspace.repair_protocol import build_local_patch, parse_replacement_plan
 from research_workspace.team_runner import (
     LocalTeamRunner,
     PatchValidationError,
     Worktree,
-    _extract_model_patch,
     apply_validated_patch,
 )
 
@@ -468,7 +468,7 @@ index 1e8b314..5b40bd0 100644
     assert (tmp_path / "allowed.py").read_text(encoding="utf-8") == "value = 3\n"
 
 
-def test_fenced_model_replacement_is_wrapped_then_git_validated(tmp_path: Path) -> None:
+def test_structured_replacement_is_locally_diffed_then_git_validated(tmp_path: Path) -> None:
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
     subprocess.run(
         ["git", "config", "user.email", "fixture@example.invalid"],
@@ -484,21 +484,46 @@ def test_fenced_model_replacement_is_wrapped_then_git_validated(tmp_path: Path) 
         capture_output=True,
         text=True,
     )
-    (tmp_path / "allowed.py").write_text("value = 1\n", encoding="utf-8")
+    source = tmp_path / "allowed.py"
+    source.write_text("value = 1\n", encoding="utf-8")
     subprocess.run(
         ["git", "add", "allowed.py"], cwd=tmp_path, check=True, capture_output=True, text=True
     )
     subprocess.run(
-        ["git", "commit", "-m", "fixture"], cwd=tmp_path, check=True, capture_output=True, text=True
+        ["git", "commit", "-m", "fixture"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
     )
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
     ).stdout.strip()
-    worktree = Worktree(tmp_path, commit, "replacement")
-    patch = _extract_model_patch(worktree, "```python\nvalue = 4  \n```", ["allowed.py"])
-    assert "+value = 4  \n" not in patch
-    apply_validated_patch(worktree, patch, ["allowed.py"], tmp_path / "logs")
-    assert (tmp_path / "allowed.py").read_text(encoding="utf-8") == "value = 4\n"
+    model_json = json.dumps(
+        {
+            "schema_version": 1,
+            "replacements": [
+                {
+                    "path": "allowed.py",
+                    "language": "python",
+                    "kind": "source",
+                    "expected_sha256": __import__("hashlib")
+                    .sha256(source.read_bytes())
+                    .hexdigest(),
+                    "content": "value = 4  ",
+                }
+            ],
+        }
+    )
+    plan = parse_replacement_plan(
+        model_json, root=tmp_path, allowed_paths=["allowed.py"], domain="python"
+    )
+    patch = build_local_patch(plan, root=tmp_path)
+    report = apply_validated_patch(
+        Worktree(tmp_path, commit, "replacement"), patch, ["allowed.py"], tmp_path / "logs"
+    )
+    assert report["patch_origin"] == "locally_generated_from_hash_bound_replacements"
+    assert source.read_text(encoding="utf-8") == "value = 4\n"
 
 
 def test_local_team_records_gpu_block_without_cpu_substitution(

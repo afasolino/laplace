@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.laplace/schemas/reviewer-verdict.schema.json",
+  "title": "Operational reviewer verdict",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "verdict", "reason", "missing_evidence"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "verdict": {"enum": ["approve", "request_changes", "block"]},
+    "reason": {"type": "string", "minLength": 1},
+    "missing_evidence": {"type": "array", "items": {"type": "string"}}
+  }
+}

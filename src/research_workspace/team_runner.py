@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import signal
 import shutil
-import difflib
 
 # Git invocation is restricted to fixed worktree/apply operations.
 import subprocess  # nosec B404
@@ -35,6 +35,14 @@ from .engineering import (
 )
 from .inference import ServingCandidate, backend_for
 from .llm import LocalGenerationBackend, ModelRequired
+from .repair_protocol import (
+    StructuredOutputError,
+    build_local_patch,
+    file_sha256,
+    parse_replacement_plan,
+    parse_reviewer_verdict,
+    source_state,
+)
 
 
 class PatchValidationError(EngineeringError):
@@ -140,12 +148,14 @@ def _diff_paths(patch: str) -> list[str]:
         if line.startswith("+++ "):
             path = line[4:].strip()
             if not path.startswith("b/") or path == "/dev/null":
-                raise PatchValidationError("Patch must use git-style non-deleting +++ paths")
+                raise PatchValidationError(
+                    "Locally generated patch must use git-style non-deleting +++ paths"
+                )
             paths.append(path[2:])
         if line.startswith("--- ") and line[4:].strip() == "/dev/null":
             raise PatchValidationError("Patch deletion is not permitted")
     if not paths:
-        raise PatchValidationError("Model output contains no unified-diff file headers")
+        raise PatchValidationError("Locally generated patch contains no unified-diff file headers")
     return paths
 
 
@@ -156,70 +166,6 @@ def _is_allowed(path: str, allowed_paths: list[str]) -> bool:
         if relative == permitted or relative.startswith(permitted + "/"):
             return True
     return False
-
-
-def _extract_diff(model_text: str) -> str:
-    fenced = re.search(r"```(?:diff|patch)?\s*(.*?)```", model_text, re.DOTALL | re.IGNORECASE)
-    patch = fenced.group(1) if fenced else model_text
-    if len(patch.encode("utf-8")) > 1_000_000:
-        raise PatchValidationError("Patch exceeds the one MiB task safety limit")
-    return patch.strip() + "\n"
-
-
-def _normalize_added_line_whitespace(patch: str) -> str:
-    """Remove only trailing spaces from model-added lines before Git validation."""
-    normalized: list[str] = []
-    for line in patch.splitlines(keepends=True):
-        if line.startswith("+") and not line.startswith("+++ "):
-            ending = "\n" if line.endswith("\n") else ""
-            normalized.append("+" + line[1:].rstrip(" \t\r\n") + ending)
-        else:
-            normalized.append(line)
-    return "".join(normalized)
-
-
-def _extract_model_patch(worktree: Worktree, model_text: str, allowed_paths: list[str]) -> str:
-    """Accept a model diff or one fenced replacement for one allowed source file.
-
-    The replacement fallback does not synthesize code: it only wraps complete
-    code emitted by the local model in a standard diff, then the regular Git
-    path/scope/context checks still decide whether it may apply.
-    """
-    patch = _extract_diff(model_text)
-    if "+++ b/" in patch and "--- a/" in patch:
-        return _normalize_added_line_whitespace(patch)
-    source_paths = [path for path in allowed_paths if not Path(path).name.startswith("tb_")]
-    if len(source_paths) != 1:
-        raise PatchValidationError(
-            "Model output is not a diff and task has no unambiguous source file"
-        )
-    blocks = re.findall(
-        r"```(?:python|py|systemverilog|verilog|sv)?\s*\n(.*?)```",
-        model_text,
-        flags=re.DOTALL | re.IGNORECASE,
-    )
-    if len(blocks) != 1:
-        raise PatchValidationError("Model output contains no unambiguous fenced source replacement")
-    relative = _safe_relative(source_paths[0], label="allowed source path")
-    source = _inside(worktree.root, worktree.root / relative)
-    if not source.is_file():
-        raise PatchValidationError("Allowed source file is missing from isolated worktree")
-    replacement = blocks[0].strip() + "\n"
-    if len(replacement.encode("utf-8")) > 1_000_000:
-        raise PatchValidationError("Model replacement exceeds the one MiB task safety limit")
-    diff = "".join(
-        difflib.unified_diff(
-            source.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True),
-            replacement.splitlines(keepends=True),
-            fromfile=f"a/{relative.as_posix()}",
-            tofile=f"b/{relative.as_posix()}",
-        )
-    )
-    if not diff:
-        raise PatchValidationError("Model replacement makes no source change")
-    return _normalize_added_line_whitespace(
-        f"diff --git a/{relative.as_posix()} b/{relative.as_posix()}\n{diff}"
-    )
 
 
 def apply_validated_patch(
@@ -242,15 +188,24 @@ def apply_validated_patch(
     _, check_stdout, check_stderr = _run_git(
         worktree.root, ["apply", "--check", "--recount", str(patch_file)]
     )
+    before_hashes = {
+        path: file_sha256(_inside(worktree.root, worktree.root / Path(path))) for path in paths
+    }
     _, apply_stdout, apply_stderr = _run_git(
         worktree.root, ["apply", "--whitespace=error", "--recount", str(patch_file)]
     )
+    after_hashes = {
+        path: file_sha256(_inside(worktree.root, worktree.root / Path(path))) for path in paths
+    }
     report: JsonObject = {
         "status": "APPLIED",
         "worktree": str(worktree.root),
         "base_commit": worktree.base_commit,
         "changed_paths": paths,
         "patch_path": str(patch_file),
+        "patch_origin": "locally_generated_from_hash_bound_replacements",
+        "before_sha256": before_hashes,
+        "after_sha256": after_hashes,
         "git_apply_check_stdout": check_stdout[-4000:],
         "git_apply_check_stderr": check_stderr[-4000:],
         "git_apply_stdout": apply_stdout[-4000:],
@@ -329,18 +284,44 @@ class LocalTeamRunner:
         return [{"requirement": item, "required_evidence": checks} for item in requirement_text]
 
     @staticmethod
-    def _current_source_context(worktree: Worktree, allowed_paths: list[str]) -> JsonObject:
-        sources: list[JsonObject] = []
-        for relative in allowed_paths:
-            path = _inside(worktree.root, worktree.root / _safe_relative(relative, label="source"))
-            if path.is_file():
-                sources.append(
-                    {
-                        "path": relative,
-                        "content": path.read_text(encoding="utf-8", errors="replace")[:16000],
-                    }
-                )
-        return {"current_worktree_sources": sources}
+    def _current_source_context(
+        worktree: Worktree, allowed_paths: list[str], domain: Literal["python", "systemverilog"]
+    ) -> JsonObject:
+        sources = source_state(worktree.root, allowed_paths, domain)
+        fingerprint = hashlib.sha256(
+            json.dumps(sources, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+        return {
+            "current_worktree_sources": sources,
+            "source_state_fingerprint": fingerprint,
+        }
+
+    def _append_artifact_history(
+        self,
+        task_id: str,
+        *,
+        role: Literal["supervisor", "researcher", "implementer", "verifier", "reviewer"],
+        name: str,
+        entry: JsonObject,
+    ) -> None:
+        task = self.store.load(task_id)
+        history: list[JsonObject] = []
+        prior_path = task.artifacts.get(name)
+        if isinstance(prior_path, str) and Path(prior_path).is_file():
+            try:
+                prior_raw: object = json.loads(Path(prior_path).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                prior_raw = {}
+            if isinstance(prior_raw, dict):
+                prior_history = prior_raw.get("history")
+                if isinstance(prior_history, list):
+                    history = [item for item in prior_history if isinstance(item, dict)]
+                elif prior_raw:
+                    history = [dict(prior_raw)]
+        history.append(dict(entry))
+        payload = dict(entry)
+        payload["history"] = history
+        self.store.write_artifact(task_id, role=role, name=name, payload=payload)
 
     @staticmethod
     def _filter_evidence(evidence: JsonObject, mode: str) -> JsonObject:
@@ -348,20 +329,25 @@ class LocalTeamRunner:
         filtered = dict(evidence)
         if mode == "none":
             filtered["target_project"] = []
+            filtered["project_knowledge_cards"] = []
             filtered["governed_references"] = []
         elif mode == "project_local":
             filtered["governed_references"] = []
         elif mode == "curated_only":
             filtered["target_project"] = []
+            filtered["project_knowledge_cards"] = []
         elif mode != "full":
             raise EngineeringError(f"Unknown retrieval mode: {mode}")
         filtered["retrieval_mode"] = mode
         target = filtered.get("target_project")
+        knowledge = filtered.get("project_knowledge_cards")
         governed = filtered.get("governed_references")
         target_available = isinstance(target, list) and bool(target)
+        knowledge_available = isinstance(knowledge, list) and bool(knowledge)
         governed_available = isinstance(governed, list) and bool(governed)
         filtered["retrieval_availability"] = {
             "target_project": target_available,
+            "project_knowledge_cards": knowledge_available,
             "governed_references": governed_available,
         }
         if mode == "curated_only" and not governed_available:
@@ -740,37 +726,71 @@ end endmodule
         task: AgentTask,
         evidence: JsonObject,
         *,
-        defect_report: JsonObject | None = None,
-        current_sources: JsonObject | None = None,
+        defect_report: JsonObject | None,
+        current_sources: JsonObject,
     ) -> str:
         domain_requirements = (
-            "For Python: preserve public interfaces, validate errors explicitly, account for async "
-            "lifecycle and transactions, and maintain strict types."
+            "For Python, preserve public interfaces, use current Pydantic v2 APIs, reject forbidden "
+            "coercion and extra fields, preserve specified domain exceptions, and maintain strict types."
             if task.domain == "python"
-            else "For SystemVerilog: state the intended microarchitecture in code structure, keep "
-            "ready/valid or AXI payloads stable under stall, define reset behavior, and keep RTL synthesizable."
+            else "For SystemVerilog, preserve interfaces, support simultaneous handshakes, independent "
+            "AXI channels, WSTRB and W1C semantics where specified, stable stalled payloads, reset behavior, "
+            "synthesis, simulation, and warning-clean lint."
         )
-        repair = ""
-        if defect_report is not None:
-            repair = (
-                "\nThis is a bounded repair. Address only the structured defect report below; retain "
-                "all already-passing behavior. The current worktree source is authoritative, not a stale "
-                "earlier excerpt.\n"
-                f"Defect report: {defect_report}\nCurrent sources: {current_sources}\n"
-            )
+        repair = (
+            "No prior defect report exists."
+            if defect_report is None
+            else "Address only this structured defect report while retaining all passing behavior: "
+            + json.dumps(defect_report, sort_keys=True)
+        )
+        schema = {
+            "schema_version": 1,
+            "replacements": [
+                {
+                    "path": "exact allowed path",
+                    "language": "python or systemverilog",
+                    "kind": "source or testbench",
+                    "expected_sha256": "64 lowercase hex from current source state",
+                    "content": "complete replacement file text",
+                }
+            ],
+        }
         return (
-            "You are the Laplace implementer. Return ONLY one unified git diff. "
-            "Do not include shell commands, prose, Markdown fences, binary files, deletions, or paths outside the task scope. "
-            f"Task specification: {task.specification}\n"
-            f"Allowed paths: {_allowed_paths(task)}\n"
-            f"Acceptance matrix: {self._acceptance_matrix(task)}\n"
-            f"Evidence in precedence order: {evidence}\n"
-            f"{domain_requirements}\n"
-            "The test strategy is already persisted before this production change. Make the smallest complete "
-            "change that will satisfy every listed invariant and public test. If the task allows a testbench, "
-            "update it into a self-checking regression before or with the RTL. If your decoder cannot emit a "
-            "unified diff, emit exactly one fenced full replacement for the single non-test source file and nothing else."
-            f"{repair}"
+            "You are the Laplace implementer. Return exactly one JSON object and no Markdown or prose. "
+            "Raw unified diffs are forbidden. The required JSON shape is "
+            + json.dumps(schema, separators=(",", ":"))
+            + ". Every replacement must copy the exact current SHA-256 supplied below. Include only files "
+            "that require a meaningful change. Do not return duplicate paths, unknown paths, shell commands, "
+            "partial snippets, deletions, or unchanged content. Testbench paths require kind=testbench; all "
+            "other paths require kind=source. The orchestrator generates and validates the patch locally.\n"
+            f"Task specification: {json.dumps(task.specification, sort_keys=True)}\n"
+            f"Allowed paths: {json.dumps(_allowed_paths(task))}\n"
+            f"Acceptance matrix: {json.dumps(self._acceptance_matrix(task), sort_keys=True)}\n"
+            f"Evidence in precedence order: {json.dumps(evidence, sort_keys=True)}\n"
+            f"Current authoritative source state: {json.dumps(current_sources, sort_keys=True)}\n"
+            f"Domain requirements: {domain_requirements}\n"
+            f"Repair status: {repair}"
+        )
+
+    @staticmethod
+    def _review_prompt(task: AgentTask, evidence: JsonObject, verification: JsonObject) -> str:
+        schema = {
+            "schema_version": 1,
+            "verdict": "approve|request_changes|block",
+            "reason": "specific evidence-based reason",
+            "missing_evidence": ["items"],
+        }
+        return (
+            "You are the operational Laplace reviewer. Return exactly one JSON object and no Markdown or "
+            "prose. The required JSON shape is "
+            + json.dumps(schema, separators=(",", ":"))
+            + ". Approve only when every required deterministic verifier record and adversarial invariant "
+            "passes. Request changes for a repairable implementation or evidence defect. Block only for a "
+            "non-repairable scope, policy, or environment defect. Do not infer hidden tests and do not edit code.\n"
+            f"Task: {json.dumps(task.specification, sort_keys=True)}\n"
+            f"Acceptance matrix: {json.dumps(LocalTeamRunner._acceptance_matrix(task), sort_keys=True)}\n"
+            f"Reference evidence: {json.dumps(evidence, sort_keys=True)}\n"
+            f"Verifier report: {json.dumps(verification, sort_keys=True)}"
         )
 
     def _defect_report(
@@ -878,13 +898,11 @@ end endmodule
         last_error = ""
         latest_verification: JsonObject | None = None
         latest_defect: JsonObject | None = None
-        for attempt in range(0, 3):
-            try:
-                current_sources = (
-                    self._current_source_context(worktree, allowed)
-                    if latest_defect is not None
-                    else None
-                )
+        invalid_response_limit = 3
+        for meaningful_attempt in range(3):
+            current_sources = self._current_source_context(worktree, allowed, task.domain)
+            patch_applied = False
+            for response_retry in range(invalid_response_limit):
                 generated = backend.generate(
                     self._prompt(
                         task,
@@ -894,169 +912,248 @@ end endmodule
                     ),
                     context_tokens=8192,
                 )
-                self.store.write_artifact(
-                    task.task_id,
-                    role="implementer",
-                    name="implementation_report",
-                    payload={
-                        "status": "MODEL_OUTPUT_RECEIVED",
-                        "attempt": attempt,
-                        "model": generated.model,
-                        "ttft_seconds": generated.ttft_seconds,
-                        "prompt_tokens": generated.prompt_tokens,
-                        "completion_tokens": generated.completion_tokens,
-                        "model_output": generated.text,
-                    },
-                )
-                patch = _extract_model_patch(worktree, generated.text, allowed)
-                patch_report = apply_validated_patch(worktree, patch, allowed, self.log_root)
-                self.store.write_artifact(
-                    task.task_id, role="implementer", name="patch_manifest", payload=patch_report
-                )
-                self.store.write_artifact(
-                    task.task_id,
-                    role="implementer",
-                    name="implementation_report",
-                    payload={
-                        "status": "PATCH_APPLIED",
-                        "attempt": attempt,
-                        "model": generated.model,
-                        "worktree": str(worktree.root),
-                    },
-                )
-                task = self._transition(
-                    task, "verification", "Validated patch applied in isolated worktree"
-                )
-                if task.domain == "python":
-                    formatter = runner.run(
-                        "ruff_format",
-                        [sys.executable, "-m", "ruff", "format", *allowed],
-                        timeout_seconds=120,
-                    ).to_json()
-                    required_tests = self._public_python_tests(worktree, allowed)
-                    verification = runner.run_python_quality_gates(
-                        allowed, required_test_paths=required_tests
-                    )
-                    verification["formatter_preparation"] = formatter
-                    verification["passed"] = bool(verification.get("passed")) and (
-                        formatter["status"] == "PASS"
-                    )
-                    adversarial = (
-                        self._run_python_adversarial_checks(runner, task, worktree)
-                        if self.options.adversarial_verification
-                        else {"tool": "adversarial_python", "status": "SKIPPED_BY_ABLATION"}
-                    )
-                else:
-                    testbench = next(
-                        (path for path in allowed if Path(path).stem.startswith("tb_")), None
-                    )
-                    source_files = [path for path in allowed if path != testbench]
-                    verification = runner.run_eda_flow(
-                        source_files,
-                        top_module=Path(source_files[0]).stem,
-                        testbench=testbench,
-                    )
-                    adversarial = (
-                        self._run_systemverilog_adversarial_checks(runner, task, worktree)
-                        if self.options.adversarial_verification
-                        else {
-                            "tool": "adversarial_systemverilog",
-                            "status": "SKIPPED_BY_ABLATION",
-                        }
-                    )
-                verification["adversarial"] = adversarial
-                verification["acceptance_matrix"] = self._acceptance_matrix(task)
-                verification["passed"] = bool(verification.get("passed")) and (
-                    adversarial.get("status") == "PASS"
-                    or adversarial.get("status") == "SKIPPED_BY_ABLATION"
-                )
-                latest_verification = verification
-                self.store.write_artifact(
-                    task.task_id, role="verifier", name="verification_report", payload=verification
-                )
-                task = self._transition(
-                    task, "review", "Verifier emitted immutable command evidence"
-                )
-                reviewer_contribution: JsonObject = {
-                    "status": "SKIPPED_FOR_DIRECT_ABLATION",
-                    "reason": "One-agent ablation omits reviewer generation.",
+                response_entry: JsonObject = {
+                    "status": "MODEL_OUTPUT_RECEIVED",
+                    "meaningful_attempt": meaningful_attempt,
+                    "response_retry": response_retry,
+                    "model": generated.model,
+                    "ttft_seconds": generated.ttft_seconds,
+                    "prompt_tokens": generated.prompt_tokens,
+                    "completion_tokens": generated.completion_tokens,
+                    "source_state_fingerprint": current_sources.get("source_state_fingerprint"),
+                    "model_output": generated.text,
                 }
-                if self.options.role_mode == "five_role":
-                    reviewer_contribution = self._role_generation(
-                        backend,
-                        "You are the Laplace reviewer. Do not approve merely because code compiles. "
-                        "For each acceptance criterion, require an explicit passing verifier record. "
-                        "The invariant matrix below is held-out-style guidance, not evaluator tests; do not "
-                        "look for hidden tests. State missing evidence as changes requested. Do not edit or merge.\n"
-                        f"Task: {task.specification}\n"
-                        f"Acceptance matrix: {self._acceptance_matrix(task)}\n"
-                        f"Reference evidence: {evidence_raw}\n"
-                        f"Verifier report: {verification}",
+                try:
+                    plan = parse_replacement_plan(
+                        generated.text,
+                        root=worktree.root,
+                        allowed_paths=allowed,
+                        domain=task.domain,
                     )
-                task = self.store.load(task.task_id)
-                evidence_complete = verification.get("passed") is True
-                if self.options.reviewer_invariants:
-                    evidence_complete = evidence_complete and isinstance(
-                        verification.get("acceptance_matrix"), list
-                    )
-                review: JsonObject = {
-                    "status": "APPROVED" if evidence_complete else "CHANGES_REQUESTED",
-                    "task_id": task.task_id,
-                    "verification_report": task.artifacts.get("verification_report"),
-                    "repair_cycles_used": task.correction_loops,
-                    "reviewer_can_merge": False,
-                    "reference_library": evidence_raw.get("governed_reference_library", {}),
-                    "reviewer_model_contribution": reviewer_contribution,
-                }
-                self.store.write_artifact(
-                    task.task_id, role="reviewer", name="review_report", payload=review
-                )
-                if review["status"] == "APPROVED":
-                    task = self._transition(
-                        task, "final_report", "Independent review accepted verifier evidence"
-                    )
-                    self.store.write_artifact(
+                    patch = build_local_patch(plan, root=worktree.root)
+                    patch_report = apply_validated_patch(worktree, patch, allowed, self.log_root)
+                except (StructuredOutputError, EngineeringError) as exc:
+                    last_error = str(exc)
+                    response_entry["status"] = "MODEL_OUTPUT_REJECTED"
+                    response_entry["error"] = last_error
+                    self._append_artifact_history(
                         task.task_id,
-                        role="supervisor",
-                        name="final_report",
-                        payload={
-                            "status": "COMPLETE",
-                            "task_id": task.task_id,
-                            "worktree": str(worktree.root),
-                            "base_commit": worktree.base_commit,
-                            "references": evidence_raw,
-                            "verification": verification,
-                            "residual_risks": [
-                                "Patch remains isolated and is not merged automatically."
-                            ],
-                        },
+                        role="implementer",
+                        name="implementation_report",
+                        entry=response_entry,
                     )
-                    return {
-                        "status": "COMPLETE",
-                        "task": self.store.load(task.task_id).to_json(),
-                        "worktree": str(worktree.root),
+                    latest_defect = self._defect_report(
+                        task, latest_verification, last_error, worktree
+                    )
+                    latest_defect["rejected_response_retry"] = response_retry
+                    latest_defect["source_state"] = current_sources
+                    continue
+                response_entry["status"] = "PATCH_APPLIED"
+                response_entry["worktree"] = str(worktree.root)
+                response_entry["replacement_paths"] = [item.path for item in plan.replacements]
+                self._append_artifact_history(
+                    task.task_id,
+                    role="implementer",
+                    name="implementation_report",
+                    entry=response_entry,
+                )
+                patch_report["meaningful_attempt"] = meaningful_attempt
+                patch_report["response_retry"] = response_retry
+                patch_report["source_state_fingerprint"] = current_sources.get(
+                    "source_state_fingerprint"
+                )
+                self._append_artifact_history(
+                    task.task_id,
+                    role="implementer",
+                    name="patch_manifest",
+                    entry=patch_report,
+                )
+                patch_applied = True
+                break
+            if not patch_applied:
+                last_error = (
+                    f"Structured model-output retry budget exhausted after {invalid_response_limit} "
+                    f"rejections: {last_error}"
+                )
+                break
+
+            task = self._transition(
+                task, "verification", "Locally generated hash-bound patch applied"
+            )
+            if task.domain == "python":
+                formatter = runner.run(
+                    "ruff_format",
+                    [sys.executable, "-m", "ruff", "format", *allowed],
+                    timeout_seconds=120,
+                ).to_json()
+                required_tests = self._public_python_tests(worktree, allowed)
+                verification = runner.run_python_quality_gates(
+                    allowed, required_test_paths=required_tests
+                )
+                verification["formatter_preparation"] = formatter
+                verification["passed"] = bool(verification.get("passed")) and (
+                    formatter["status"] == "PASS"
+                )
+                adversarial = (
+                    self._run_python_adversarial_checks(runner, task, worktree)
+                    if self.options.adversarial_verification
+                    else {"tool": "adversarial_python", "status": "SKIPPED_BY_ABLATION"}
+                )
+            else:
+                testbench = next(
+                    (path for path in allowed if Path(path).stem.startswith("tb_")), None
+                )
+                source_files = [path for path in allowed if path != testbench]
+                verification = runner.run_eda_flow(
+                    source_files,
+                    top_module=Path(source_files[0]).stem,
+                    testbench=testbench,
+                )
+                adversarial = (
+                    self._run_systemverilog_adversarial_checks(runner, task, worktree)
+                    if self.options.adversarial_verification
+                    else {
+                        "tool": "adversarial_systemverilog",
+                        "status": "SKIPPED_BY_ABLATION",
                     }
+                )
+            verification["adversarial"] = adversarial
+            verification["acceptance_matrix"] = self._acceptance_matrix(task)
+            verification["passed"] = bool(verification.get("passed")) and (
+                adversarial.get("status") == "PASS"
+                or adversarial.get("status") == "SKIPPED_BY_ABLATION"
+            )
+            verification["meaningful_attempt"] = meaningful_attempt
+            latest_verification = verification
+            self._append_artifact_history(
+                task.task_id,
+                role="verifier",
+                name="verification_report",
+                entry=verification,
+            )
+            task = self._transition(task, "review", "Verifier emitted immutable command evidence")
+
+            reviewer_contribution: JsonObject = {
+                "status": "SKIPPED_FOR_DIRECT_ABLATION",
+                "reason": "One-agent direct mode omits reviewer generation.",
+            }
+            reviewer_verdict: JsonObject = {
+                "schema_version": 1,
+                "verdict": "approve",
+                "reason": "Deterministic verifier controls direct-mode approval.",
+                "missing_evidence": [],
+            }
+            reviewer_required = (
+                self.options.role_mode == "five_role" and self.options.reviewer_invariants
+            )
+            if self.options.role_mode == "five_role":
+                reviewer_errors: list[str] = []
+                for reviewer_retry in range(2):
+                    reviewer_contribution = self._role_generation(
+                        backend, self._review_prompt(task, evidence_raw, verification)
+                    )
+                    try:
+                        parsed_verdict = parse_reviewer_verdict(
+                            str(reviewer_contribution.get("text", ""))
+                        )
+                    except StructuredOutputError as exc:
+                        reviewer_errors.append(str(exc))
+                        continue
+                    reviewer_verdict = parsed_verdict.to_json()
+                    reviewer_verdict["response_retry"] = reviewer_retry
+                    break
+                else:
+                    reviewer_verdict = {
+                        "schema_version": 1,
+                        "verdict": "request_changes",
+                        "reason": "Reviewer output remained invalid after bounded retries.",
+                        "missing_evidence": reviewer_errors,
+                    }
+
+            task = self.store.load(task.task_id)
+            evidence_complete = verification.get("passed") is True
+            reviewer_accepts = not reviewer_required or reviewer_verdict.get("verdict") == "approve"
+            approved = evidence_complete and reviewer_accepts
+            review: JsonObject = {
+                "status": "APPROVED" if approved else "CHANGES_REQUESTED",
+                "task_id": task.task_id,
+                "verification_report": task.artifacts.get("verification_report"),
+                "repair_cycles_used": task.correction_loops,
+                "reviewer_required_for_approval": reviewer_required,
+                "reviewer_approved": reviewer_verdict.get("verdict") == "approve",
+                "reviewer_can_merge": False,
+                "reference_library": evidence_raw.get("governed_reference_library", {}),
+                "reviewer_verdict": reviewer_verdict,
+                "reviewer_model_contribution": reviewer_contribution,
+                "meaningful_attempt": meaningful_attempt,
+            }
+            self._append_artifact_history(
+                task.task_id, role="reviewer", name="review_report", entry=review
+            )
+            if reviewer_required and reviewer_verdict.get("verdict") == "block":
+                reason = str(reviewer_verdict.get("reason", "Operational reviewer blocked task"))
+                task = self._transition(task, "blocked", reason)
+                return {
+                    "status": "BLOCKED_BY_REVIEWER",
+                    "task": task.to_json(),
+                    "worktree": str(worktree.root),
+                    "error": reason,
+                }
+            if approved:
+                task = self._transition(
+                    task, "final_report", "Operational review accepted verifier evidence"
+                )
+                self.store.write_artifact(
+                    task.task_id,
+                    role="supervisor",
+                    name="final_report",
+                    payload={
+                        "status": "COMPLETE",
+                        "task_id": task.task_id,
+                        "worktree": str(worktree.root),
+                        "base_commit": worktree.base_commit,
+                        "references": evidence_raw,
+                        "verification": verification,
+                        "review": review,
+                        "residual_risks": [
+                            "Patch remains isolated and is not merged automatically."
+                        ],
+                    },
+                )
+                return {
+                    "status": "COMPLETE",
+                    "task": self.store.load(task.task_id).to_json(),
+                    "worktree": str(worktree.root),
+                }
+
+            if not evidence_complete:
                 last_error = "Verifier reported failed quality gates"
-            except (EngineeringError, ModelRequired) as exc:
-                last_error = str(exc)
+            else:
+                last_error = str(
+                    reviewer_verdict.get("reason", "Operational reviewer requested changes")
+                )
             latest_defect = self._defect_report(task, latest_verification, last_error, worktree)
-            self.store.write_artifact(
+            latest_defect["reviewer_verdict"] = reviewer_verdict
+            latest_defect["source_state"] = self._current_source_context(
+                worktree, allowed, task.domain
+            )
+            self._append_artifact_history(
                 task.task_id,
                 role="verifier",
                 name="defect_report",
-                payload=latest_defect,
+                entry=latest_defect,
             )
-            if attempt == 2:
+            if meaningful_attempt == 2:
                 break
             task = self._transition(
                 task,
                 "bounded_correction",
-                "Structured repair requested; see immutable verifier defect report",
+                "Meaningful applied patch failed verification or operational review",
             )
             task = self._transition(
                 task,
                 "implementation",
-                "Implementer receives structured defect evidence and current worktree context",
+                "Implementer receives structured defects and current source hashes",
             )
         task = self._transition(
             task, "blocked", f"Verification failed after two correction loops: {last_error}"

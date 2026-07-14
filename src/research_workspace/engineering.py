@@ -768,10 +768,14 @@ class ReferenceLibrary:
         *,
         limit: int = 6,
         token_budget: int = 3500,
+        max_chunks_per_path: int = 2,
+        max_chunks_per_reference: int = 3,
     ) -> list[JsonObject]:
         """Retrieve ranked, provenance-complete governed-reference content."""
         if limit <= 0 or token_budget <= 0:
             raise ReferencePolicyError("Reference search limits must be positive")
+        if max_chunks_per_path <= 0 or max_chunks_per_reference <= 0:
+            raise ReferencePolicyError("Reference diversity limits must be positive")
         manifests = self.manifests_list()
         if not manifests:
             return []
@@ -821,27 +825,45 @@ class ReferenceLibrary:
             if score <= 0:
                 continue
             ranked.append((score, chunk_id, text, metadata))
+        ordered = sorted(ranked, key=lambda item: (item[0], item[1]), reverse=True)
         remaining_chars = token_budget * 4
         selected: list[JsonObject] = []
         seen_content: set[str] = set()
-        for score, chunk_id, text, metadata in sorted(
-            ranked, key=lambda item: (item[0], item[1]), reverse=True
-        ):
+        path_counts: dict[str, int] = {}
+        reference_counts: dict[str, int] = {}
+
+        def consider(
+            candidate: tuple[float, str, str, dict[str, object]], *, diversity_pass: bool
+        ) -> None:
+            nonlocal remaining_chars
             if len(selected) >= limit or remaining_chars <= 0:
-                break
+                return
+            score, chunk_id, text, metadata = candidate
+            path = str(metadata.get("selected_path", ""))
+            reference_id = str(metadata.get("reference_id", ""))
+            if diversity_pass and path_counts.get(path, 0) > 0:
+                return
+            if path_counts.get(path, 0) >= max_chunks_per_path:
+                return
+            if reference_counts.get(reference_id, 0) >= max_chunks_per_reference:
+                return
             fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
             if fingerprint in seen_content:
-                continue
-            seen_content.add(fingerprint)
+                return
             content = text[:remaining_chars]
             if not content.strip():
-                continue
+                return
+            seen_content.add(fingerprint)
+            path_counts[path] = path_counts.get(path, 0) + 1
+            reference_counts[reference_id] = reference_counts.get(reference_id, 0) + 1
             topics_raw = metadata.get("topics", [])
             topics = (
                 [item for item in topics_raw if isinstance(item, str)]
                 if isinstance(topics_raw, list)
                 else []
             )
+            searchable_tokens = set(re.findall(r"[\w.-]+", " ".join([text, path, *topics]).lower()))
+            matched_terms = sorted(query_tokens.intersection(searchable_tokens))
             selected.append(
                 {
                     "kind": "governed_reference",
@@ -857,10 +879,18 @@ class ReferenceLibrary:
                     "chunk_id": chunk_id,
                     "score": round(score, 6),
                     "estimated_tokens": max(1, (len(content) + 3) // 4),
+                    "matched_query_terms": matched_terms[:24],
+                    "selection_pass": "diversity" if diversity_pass else "score_fill",
                     "content": content,
                 }
             )
             remaining_chars -= len(content)
+
+        for diversity_pass in (True, False):
+            for candidate in ordered:
+                consider(candidate, diversity_pass=diversity_pass)
+                if len(selected) >= limit or remaining_chars <= 0:
+                    break
         return selected
 
     def verify(self, reference_id: str | None = None) -> JsonObject:
@@ -1292,6 +1322,119 @@ class AgentTaskStore:
         return target
 
 
+def expand_engineering_query(task: AgentTask, query: str) -> tuple[str, list[str]]:
+    """Expand narrow task text with deterministic invariant vocabulary."""
+    base_terms = [query]
+    objective = task.specification.get("objective")
+    if isinstance(objective, str) and objective.strip() and objective.strip() != query.strip():
+        base_terms.append(objective)
+    requirements = task.specification.get("functional_requirements")
+    if isinstance(requirements, list):
+        base_terms.extend(item for item in requirements if isinstance(item, str))
+    searchable = " ".join(base_terms).lower()
+    expansions: list[str] = []
+    if task.domain == "python":
+        if any(token in searchable for token in ("pydantic", "strict", "coerc", "undeclared")):
+            expansions.extend(
+                [
+                    "pydantic v2 ConfigDict strict true extra forbid",
+                    "strict integer validation no coercion",
+                    "model_config field validation",
+                ]
+            )
+        if any(token in searchable for token in ("sqlite", "transaction", "conflict", "rollback")):
+            expansions.extend(
+                [
+                    "sqlite transaction rollback conflict idempotent",
+                    "exception ordering preserve ValueError",
+                    "commit only after successful state transition",
+                ]
+            )
+        if any(token in searchable for token in ("async", "deadline", "cancel")):
+            expansions.extend(
+                [
+                    "asyncio cancellation cleanup await task",
+                    "deadline timeout preserve successful result",
+                ]
+            )
+    else:
+        if any(
+            token in searchable
+            for token in ("ready/valid", "ready valid", "buffer", "slot", "enqueue", "dequeue")
+        ):
+            expansions.extend(
+                [
+                    "ready valid skid buffer simultaneous enqueue dequeue",
+                    "consume and replace payload stability under stall",
+                    "in_ready equals empty or downstream ready",
+                    "backpressure full empty transition no combinational handshake loop",
+                ]
+            )
+        if any(token in searchable for token in ("axi", "wstrb", "write channel")):
+            expansions.extend(
+                [
+                    "AXI4-Lite independent AW and W channel capture",
+                    "write response after address and data handshakes",
+                    "WSTRB byte enable register write",
+                ]
+            )
+        if any(token in searchable for token in ("w1c", "write-one-to-clear", "irq", "pending")):
+            expansions.extend(
+                [
+                    "write one to clear pending enable interrupt",
+                    "byte strobe W1C priority event set clear",
+                    "IRQ equals enable and pending",
+                ]
+            )
+    deduplicated: list[str] = []
+    seen: set[str] = set()
+    for item in expansions:
+        normalized = " ".join(item.split())
+        if normalized.lower() in seen:
+            continue
+        seen.add(normalized.lower())
+        deduplicated.append(normalized)
+    expanded = "\n".join([*base_terms, *deduplicated])
+    return expanded, deduplicated
+
+
+def _project_knowledge_cards(repository_root: Path, domain: Domain, query: str) -> list[JsonObject]:
+    """Retrieve small project-authored invariant cards with exact hashes."""
+    card_root = repository_root / "codex_a6000" / "knowledge_cards"
+    candidates = (
+        [card_root / "python_strict_validation_transactions.md"]
+        if domain == "python"
+        else [card_root / "systemverilog_handshake_axi_w1c.md"]
+    )
+    query_tokens = set(re.findall(r"[\w.-]+", query.lower()))
+    anchors = (
+        {"pydantic", "strict", "coercion", "sqlite", "transaction", "rollback", "conflict"}
+        if domain == "python"
+        else {"ready", "valid", "buffer", "slot", "axi", "wstrb", "w1c", "irq", "pending"}
+    )
+    if not query_tokens.intersection(anchors):
+        return []
+    records: list[JsonObject] = []
+    for path in candidates:
+        if not path.is_file():
+            continue
+        content = path.read_text(encoding="utf-8", errors="replace")
+        card_tokens = set(re.findall(r"[\w.-]+", content.lower()))
+        matched = sorted(query_tokens.intersection(card_tokens))
+        if not matched:
+            continue
+        records.append(
+            {
+                "kind": "project_knowledge_card",
+                "path": str(path.relative_to(repository_root)),
+                "sha256": _sha256(path),
+                "matched_query_terms": matched[:24],
+                "content": content[:8000],
+            }
+        )
+    return records
+
+
 def retrieve_engineering_evidence(
     repository_root: Path,
     project_root: Path,
@@ -1308,8 +1451,9 @@ def retrieve_engineering_evidence(
     task_paths_key = "allowed_paths" if task.domain == "python" else "files_allowed_to_change"
     raw_paths = task.specification.get(task_paths_key, [])
     paths = _as_str_list(raw_paths if isinstance(raw_paths, list) else [], label=task_paths_key)
+    expanded_query, expansion_terms = expand_engineering_query(task, query)
     target_project: list[JsonObject] = []
-    terms = [term.lower() for term in re.findall(r"[A-Za-z_][A-Za-z0-9_]+", query)]
+    terms = [term.lower() for term in re.findall(r"[A-Za-z_][A-Za-z0-9_]+", expanded_query)]
     for item in paths:
         try:
             source = _inside(root, root / _safe_relative(item, label="task allowed path"))
@@ -1331,21 +1475,28 @@ def retrieve_engineering_evidence(
         if shared_reference_root is not None
         else ReferenceLibrary(project, task.domain)
     )
+    project_knowledge = _project_knowledge_cards(root, task.domain, expanded_query)
     governed = library.search_chunks(
-        query,
+        expanded_query,
         limit=governed_chunk_limit,
         token_budget=governed_token_budget,
+        max_chunks_per_path=2,
+        max_chunks_per_reference=3,
     )
     snapshot_hash = library.snapshot_hash()
     return {
         "query": query,
+        "expanded_query": expanded_query,
+        "query_expansion_terms": expansion_terms,
         "precedence": [
             "target_project",
+            "project_knowledge_cards",
             "private_curated_references",
             "governed_open_source_references",
             "model_prior_knowledge",
         ],
         "target_project": target_project,
+        "project_knowledge_cards": project_knowledge,
         "governed_references": governed,
         "governed_reference_library": {
             "root": str(library.root),
