@@ -1,0 +1,49 @@
+schema_version: 1
+policy:
+  default_use: reference_only_no_copy_until_verified
+  require_exact_revision_or_release: true
+  require_license_file_hash: true
+  require_selected_file_hashes: true
+  require_attribution: true
+  network_requires_approval: true
+  license_acceptance_requires_approval: true
+  do_not_ingest_entire_repositories: true
+  preserve_source_files: true
+  references_read_only: true
+
+sources:
+  - id: lowrisc_verilog_style_exact
+    repository: https://github.com/lowRISC/style-guides.git
+    exact_commit: 9c15ff5dce23eef969e00ab3715153967419eadd
+    destination_topic: 00_policies/lowrisc_style
+    expected_material: [VerilogCodingStyle.md, LICENSE]
+    topics: [verilog_style, sequential_logic, combinational_completeness, reset, synthesis]
+    license_hint: CC-BY-4.0
+    allowed_use_after_verification: guidance_with_attribution
+
+  - id: iverilog_docs_exact
+    repository: https://github.com/steveicarus/iverilog.git
+    exact_release: v12_0
+    destination_topic: 40_tooling/iverilog_selected
+    selection_policy: select command-line language generation, simulation, warnings and compact Verilog-2001 examples only
+    topics: [iverilog, verilog_2001, compile, simulation, warnings]
+    license_hint: GPL-2.0-or-later; documentation and examples require per-file verification
+    allowed_use_after_verification: tooling_documentation_reference
+
+  - id: yosys_docs_exact
+    repository: https://github.com/YosysHQ/yosys.git
+    exact_release: v0.40
+    destination_topic: 40_tooling/yosys_selected
+    selection_policy: select Verilog frontend, synthesis checks, memory/FIFO inference and portable coding documentation only
+    topics: [yosys, synthesis, verilog_2001, memory_inference, simulation_synthesis_consistency]
+    license_hint: ISC; verify selected files at v0.40
+    allowed_use_after_verification: tooling_documentation_reference
+
+  - id: laplace_verilog2001_cards
+    repository: local://laplace/codex_a6000/governed_corpus
+    exact_release: multilanguage-corpus-v1
+    destination_topic: 10_rtl_patterns/laplace_verilog2001_cards
+    expected_material: [verilog2001_patterns.md, verilog2001_ready_valid.v, LICENSE]
+    topics: [verilog_2001, counter, fifo, ready_valid, reset, combinational_completeness]
+    license_hint: MIT
+    allowed_use_after_verification: reference_and_permissive_reuse_with_attribution

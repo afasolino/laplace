@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from threading import Event
 
+import httpx
 import pytest
-from fastapi.testclient import TestClient
 
 from research_workspace import laplace_cli
 from research_workspace.api import create_app
@@ -192,11 +193,6 @@ def test_stop_only_marks_active_generation(tmp_path: Path) -> None:
 def test_chat_api_contract_stream_and_attachment_validation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client = TestClient(create_app(tmp_path, tmp_path / "db.sqlite"))
-    created = client.post("/api/chat/conversations", json={"title": "API chat"})
-    assert created.status_code == 200
-    conversation_id = created.json()["conversation_id"]
-
     response = ChatEngine
 
     def fake_answer(
@@ -219,38 +215,6 @@ def test_chat_api_contract_stream_and_attachment_validation(
         )
 
     monkeypatch.setattr(response, "answer", fake_answer)
-    reply = client.post(
-        f"/api/chat/conversations/{conversation_id}/messages", json={"content": "Question"}
-    )
-    assert reply.status_code == 200
-    assert reply.json()["content"] == "Readable answer [1]"
-    assert client.get("/chat").status_code == 200
-    page = client.get("/chat").text
-    assert "Evidence" in page
-    assert "message_rejected" in page and "fallback_started" in page and "activeGenerations" in page
-    assert client.get("/library").status_code == 200
-    assert client.get("/research").status_code == 200
-    assert client.get("/downloads").status_code == 200
-    assert client.get("/settings").status_code == 200
-    assert client.get("/api/project/settings").json()["secrets_included"] is False
-    changed = client.patch(
-        "/api/project/settings/retrieval.yaml", json={"content": "mode: semantic\n"}
-    )
-    assert changed.status_code == 200
-    assert (
-        client.patch(
-            "/api/project/settings/retrieval.yaml", json={"content": "not: [valid"}
-        ).status_code
-        == 400
-    )
-    assert (
-        client.post(
-            f"/api/chat/conversations/{conversation_id}/attachments",
-            files={"file": ("../bad.exe", b"x")},
-        ).status_code
-        == 415
-    )
-    assert client.delete(f"/api/chat/conversations/{conversation_id}").status_code == 400
 
     def fake_stream(self: ChatEngine, conversation_id: str, query: str, **kwargs: object):
         yield {"type": "message_started", "conversation_id": conversation_id}
@@ -261,13 +225,60 @@ def test_chat_api_contract_stream_and_attachment_validation(
         }
 
     monkeypatch.setattr(response, "stream", fake_stream)
-    with client.stream(
-        "POST",
-        f"/api/chat/conversations/{conversation_id}/messages?stream=true",
-        json={"content": "Stream"},
-    ) as stream:
-        text = stream.read().decode()
-    assert "message_started" in text and "token" in text and "message_completed" in text
+
+    async def exercise_api() -> None:
+        transport = httpx.ASGITransport(app=create_app(tmp_path, tmp_path / "db.sqlite"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            created = await client.post("/api/chat/conversations", json={"title": "API chat"})
+            assert created.status_code == 200
+            conversation_id = created.json()["conversation_id"]
+            reply = await client.post(
+                f"/api/chat/conversations/{conversation_id}/messages",
+                json={"content": "Question"},
+            )
+            assert reply.status_code == 200
+            assert reply.json()["content"] == "Readable answer [1]"
+            assert (await client.get("/chat")).status_code == 200
+            page = (await client.get("/chat")).text
+            assert "Evidence" in page
+            assert (
+                "message_rejected" in page
+                and "fallback_started" in page
+                and "activeGenerations" in page
+            )
+            assert (await client.get("/library")).status_code == 200
+            assert (await client.get("/research")).status_code == 200
+            assert (await client.get("/downloads")).status_code == 200
+            assert (await client.get("/settings")).status_code == 200
+            settings = await client.get("/api/project/settings")
+            assert settings.json()["secrets_included"] is False
+            changed = await client.patch(
+                "/api/project/settings/retrieval.yaml",
+                json={"content": "mode: semantic\n"},
+            )
+            assert changed.status_code == 200
+            invalid = await client.patch(
+                "/api/project/settings/retrieval.yaml",
+                json={"content": "not: [valid"},
+            )
+            assert invalid.status_code == 400
+            attachment = await client.post(
+                f"/api/chat/conversations/{conversation_id}/attachments",
+                files={"file": ("../bad.exe", b"x")},
+            )
+            assert attachment.status_code == 415
+            assert (
+                await client.delete(f"/api/chat/conversations/{conversation_id}")
+            ).status_code == 400
+            async with client.stream(
+                "POST",
+                f"/api/chat/conversations/{conversation_id}/messages?stream=true",
+                json={"content": "Stream"},
+            ) as stream:
+                text = (await stream.aread()).decode()
+            assert "message_started" in text and "token" in text and "message_completed" in text
+
+    asyncio.run(asyncio.wait_for(exercise_api(), timeout=10.0))
 
 
 def test_laplace_ask_terminal_output_and_json(

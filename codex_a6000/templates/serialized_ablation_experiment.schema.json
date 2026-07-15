@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://laplace.local/schemas/serialized_ablation_experiment.schema.json",
+  "title": "Serialized dual-model ablation configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "experiment_id", "base_revision_environment_variable", "manifest", "model_artifacts", "arms", "phases", "arm_order_strategy", "corpus", "held_out", "execution", "reporting"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "experiment_id": {"const": "multilanguage_dual_model_ablation_v1"},
+    "base_revision_environment_variable": {"const": "LAPLACE_ABLATION_BASE_REVISION"},
+    "manifest": {"type": "string", "minLength": 1},
+    "model_artifacts": {"type": "string", "minLength": 1},
+    "arms": {"type": "array", "minItems": 3, "maxItems": 3},
+    "phases": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["phase_id", "label", "arms", "requires_completed_phase"],
+          "properties": {
+            "phase_id": {"const": "phase1"},
+            "label": {"type": "string", "minLength": 1},
+            "arms": {"const": ["A"]},
+            "requires_completed_phase": {"type": "null"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["phase_id", "label", "arms", "requires_completed_phase"],
+          "properties": {
+            "phase_id": {"const": "phase2"},
+            "label": {"type": "string", "minLength": 1},
+            "arms": {"const": ["B", "C"]},
+            "requires_completed_phase": {"const": "phase1"}
+          }
+        }
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "arm_order_strategy": {"const": "serialized_phase_then_deterministic_rotation"},
+    "corpus": {"type": "object"},
+    "held_out": {"type": "object"},
+    "execution": {"type": "object"},
+    "reporting": {"type": "object"}
+  }
+}

@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "quantization_environment": {
+    "python": "3.11",
+    "llmcompressor": "0.12.0",
+    "llmcompressor_revision": "6d2a0908e45324b76e390bdec600143e85a075f8",
+    "transformers": "5.13.1",
+    "datasets": "5.0.0",
+    "huggingface_hub": "1.23.0",
+    "vllm": "0.25.0"
+  },
+  "calibration": {
+    "repository": "HuggingFaceH4/ultrachat_200k",
+    "revision": "8049631c405ae6576f93f445c6b8166f76f5505a",
+    "split": "train_sft",
+    "samples": 256,
+    "shuffle_seed": 42
+  },
+  "artifacts": [
+    {
+      "artifact_id": "phase1_main",
+      "phase": "phase1",
+      "role": "main",
+      "source_repository": "https://huggingface.co/Qwen/Qwen2.5-Coder-32B-Instruct-AWQ",
+      "source_revision": "1ed0a6145da0ce550c628e8e8b678f51e695995d",
+      "licence_identifier": "Apache-2.0",
+      "source_path": "/home/giando/work/laplace/.models/Qwen2.5-Coder-32B-Instruct-AWQ",
+      "output_path": "/home/giando/work/laplace/.models/Qwen2.5-Coder-32B-Instruct-AWQ",
+      "served_model_name": "/home/giando/work/laplace/.models/Qwen2.5-Coder-32B-Instruct-AWQ",
+      "availability_policy": "installed_official_artifact",
+      "quantization": {
+        "format": "AWQ W4A16",
+        "weights_bits": 4,
+        "activation_bits": 16,
+        "group_size": 128,
+        "symmetric": false,
+        "zero_point": true,
+        "tool": "Qwen upstream published artifact",
+        "tool_version": "not published in model card",
+        "calibration_source": "not published in model card"
+      },
+      "serving": {
+        "backend": "vllm",
+        "backend_version": "0.25.0",
+        "endpoint": "http://127.0.0.1:8101",
+        "context_tokens": 32768,
+        "max_output_tokens": 4096,
+        "kernel": "awq_marlin",
+        "gpu_memory_utilization": 0.85,
+        "max_num_seqs": 4,
+        "extra_args": ["--quantization", "awq_marlin"]
+      },
+      "verification": {
+        "required_files": ["config.json", "model.safetensors.index.json", "tokenizer.json"],
+        "quantization_config": {"quant_method": "awq", "bits": 4, "group_size": 128, "zero_point": true},
+        "artifact_manifest": "/home/giando/work/laplace/.models/Qwen2.5-Coder-32B-Instruct-AWQ/laplace_artifact_manifest.json"
+      }
+    },
+    {
+      "artifact_id": "phase2_main",
+      "phase": "phase2",
+      "role": "main",
+      "source_repository": "https://huggingface.co/Qwen/Qwen3.6-35B-A3B",
+      "source_revision": "995ad96eacd98c81ed38be0c5b274b04031597b0",
+      "licence_identifier": "Apache-2.0",
+      "source_path": "/home/giando/work/laplace/.models/source/Qwen3.6-35B-A3B-995ad96e",
+      "output_path": "/home/giando/work/laplace/.models/Qwen3.6-35B-A3B-W4A16-AWQ",
+      "served_model_name": "laplace-qwen3.6-35b-a3b-w4a16",
+      "availability_policy": "requires_local_quantization",
+      "quantization": {
+        "format": "compressed-tensors AWQ symmetric W4A16",
+        "weights_bits": 4,
+        "activation_bits": 16,
+        "group_size": 128,
+        "symmetric": true,
+        "zero_point": false,
+        "tool": "llmcompressor",
+        "tool_version": "0.12.0",
+        "tool_revision": "6d2a0908e45324b76e390bdec600143e85a075f8",
+        "calibration_source": "HuggingFaceH4/ultrachat_200k@8049631c405ae6576f93f445c6b8166f76f5505a",
+        "calibration_samples": 256,
+        "calibration_sequence_length": 4096,
+        "procedure_status": "UNVERIFIED_ON_LOCAL_ARTIFACT_AND_A6000"
+      },
+      "serving": {
+        "backend": "vllm",
+        "backend_version": "0.25.0",
+        "endpoint": "http://127.0.0.1:8102",
+        "context_tokens": 32768,
+        "max_output_tokens": 4096,
+        "kernel": "compressed_tensors_marlin_runtime_validation_required",
+        "language_model_only": true,
+        "gpu_memory_utilization": 0.65,
+        "max_num_seqs": 2,
+        "extra_args": ["--reasoning-parser", "qwen3", "--language-model-only"]
+      },
+      "verification": {
+        "required_files": ["config.json", "model.safetensors.index.json", "tokenizer.json", "laplace_artifact_manifest.json"],
+        "quantization_config": {"quant_method": "compressed-tensors", "format": "pack-quantized", "weights_type": "int", "num_bits": 4, "group_size": 128, "symmetric": true},
+        "artifact_manifest": "/home/giando/work/laplace/.models/Qwen3.6-35B-A3B-W4A16-AWQ/laplace_artifact_manifest.json"
+      }
+    },
+    {
+      "artifact_id": "phase2_rtl_worker",
+      "phase": "phase2",
+      "role": "rtl_worker",
+      "source_repository": "https://huggingface.co/zhuyaoyu/CodeV-R1-RL-Qwen-7B",
+      "source_revision": "286cf433f596f1b8525529c1163eb81c19425c22",
+      "licence_identifier": "Apache-2.0 (Qwen2.5-derived; upstream model card declaration)",
+      "source_path": "/home/giando/work/laplace/.models/source/CodeV-R1-RL-Qwen-7B-286cf433",
+      "output_path": "/home/giando/work/laplace/.models/CodeV-R1-RL-Qwen-7B-W4A16-AWQ",
+      "served_model_name": "laplace-codev-r1-rl-qwen-7b-w4a16",
+      "availability_policy": "requires_local_quantization",
+      "quantization": {
+        "format": "compressed-tensors AWQ symmetric W4A16",
+        "weights_bits": 4,
+        "activation_bits": 16,
+        "group_size": 128,
+        "symmetric": true,
+        "zero_point": false,
+        "tool": "llmcompressor",
+        "tool_version": "0.12.0",
+        "tool_revision": "6d2a0908e45324b76e390bdec600143e85a075f8",
+        "calibration_source": "HuggingFaceH4/ultrachat_200k@8049631c405ae6576f93f445c6b8166f76f5505a",
+        "calibration_samples": 256,
+        "calibration_sequence_length": 2048,
+        "procedure_status": "UNVERIFIED_ON_LOCAL_ARTIFACT_AND_A6000"
+      },
+      "serving": {
+        "backend": "vllm",
+        "backend_version": "0.25.0",
+        "endpoint": "http://127.0.0.1:8103",
+        "context_tokens": 16384,
+        "max_output_tokens": 4096,
+        "kernel": "compressed_tensors_marlin_runtime_validation_required",
+        "gpu_memory_utilization": 0.20,
+        "max_num_seqs": 1,
+        "extra_args": ["--enforce-eager"]
+      },
+      "verification": {
+        "required_files": ["config.json", "model.safetensors.index.json", "tokenizer.json", "laplace_artifact_manifest.json"],
+        "quantization_config": {"quant_method": "compressed-tensors", "format": "pack-quantized", "weights_type": "int", "num_bits": 4, "group_size": 128, "symmetric": true},
+        "artifact_manifest": "/home/giando/work/laplace/.models/CodeV-R1-RL-Qwen-7B-W4A16-AWQ/laplace_artifact_manifest.json"
+      }
+    }
+  ]
+}

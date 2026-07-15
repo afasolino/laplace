@@ -313,6 +313,12 @@ def test_shared_reference_registration_is_idempotent_and_snapshot_is_stable(
     assert second["status"] == "VERIFIED"
     assert first_hash == library.snapshot_hash()
 
+    manifest_path = library.manifests / "fixture_idempotent.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["registered_at"] = "2099-01-01T00:00:00+00:00"
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    assert first_hash == library.snapshot_hash()
+
 
 def test_mcp_tools_list_is_a_harmless_stdio_discovery_call(tmp_path: Path) -> None:
     input_stream = io.StringIO('{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n')

@@ -21,7 +21,7 @@ import urllib.request
 import webbrowser
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
@@ -57,6 +57,7 @@ from .real_benchmark import ollama_tags
 from .retrieval import evidence_packet, search as local_search
 from .probe import collect_probe
 from .paired_benchmark import run_paired_quality_benchmark, run_valid_paired_benchmark
+from .model_routing import serving_candidate_from_json
 from .team_runner import LocalTeamRunner
 
 
@@ -732,11 +733,9 @@ def _extract(paths: ProjectPaths, kind: str, source: Path) -> dict[str, Any]:
 
 
 def _engineering_domain(value: str) -> Domain:
-    if value == "python":
-        return "python"
-    if value == "systemverilog":
-        return "systemverilog"
-    raise LaplaceError("Engineering domain must be python or systemverilog")
+    if value in {"python", "c", "verilog", "systemverilog"}:
+        return cast(Domain, value)
+    raise LaplaceError("Engineering domain must be python, c, verilog or systemverilog")
 
 
 def _reference_operation(paths: ProjectPaths, values: list[str]) -> dict[str, Any]:
@@ -826,23 +825,10 @@ def _load_serving_candidate(path: Path) -> ServingCandidate:
         raise LaplaceError(f"Cannot read serving candidate: {exc}") from exc
     if not isinstance(raw, dict):
         raise LaplaceError("Serving candidate must be an object")
-    candidate_raw: dict[str, object] = raw
-    prefix_caching = candidate_raw.get("prefix_caching")
-    chunked_prefill = candidate_raw.get("chunked_prefill")
-    if not isinstance(prefix_caching, bool) or not isinstance(chunked_prefill, bool):
-        raise LaplaceError("Serving candidate prefix_caching and chunked_prefill must be booleans")
-    return ServingCandidate(
-        engine=_candidate_engine(candidate_raw.get("engine")),
-        endpoint=_candidate_text(candidate_raw, "endpoint"),
-        model=_candidate_text(candidate_raw, "model"),
-        revision=_candidate_text(candidate_raw, "revision"),
-        quantization=_candidate_text(candidate_raw, "quantization"),
-        kernel=_candidate_text(candidate_raw, "kernel"),
-        prefix_caching=prefix_caching,
-        chunked_prefill=chunked_prefill,
-        cuda_graph_mode=_candidate_text(candidate_raw, "cuda_graph_mode"),
-        scheduler=_candidate_text(candidate_raw, "scheduler"),
-    )
+    try:
+        return serving_candidate_from_json(raw)
+    except ValueError as exc:
+        raise LaplaceError(str(exc)) from exc
 
 
 def _agent_candidate(path: Path, prompt: str) -> dict[str, Any]:
@@ -921,7 +907,7 @@ def _parser() -> argparse.ArgumentParser:
         metavar="JSON",
         help="Normalize and persist an engineering task",
     )
-    parser.add_argument("--agent-domain", choices=("python", "systemverilog"))
+    parser.add_argument("--agent-domain", choices=("python", "c", "verilog", "systemverilog"))
     parser.add_argument("--agent-research", nargs=2, metavar=("TASK_ID", "QUERY"))
     parser.add_argument(
         "--python-quality", action="store_true", help="Run allowlisted Python quality gates"

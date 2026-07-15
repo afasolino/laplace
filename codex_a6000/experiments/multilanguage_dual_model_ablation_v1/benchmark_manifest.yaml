@@ -1,0 +1,434 @@
+schema_version: 1
+benchmark_id: multilanguage_dual_model_ablation_v1
+task_count: 32
+language_counts: {python: 8, c: 8, verilog: 8, systemverilog: 8}
+regression_task_ids:
+  - py_safe_async_job
+  - py_fastapi_strict_endpoint
+  - py_sqlite_transaction
+  - py_safe_path_cli
+  - sv_ready_valid_buffer
+  - sv_axi_lite_irq_regs
+
+defaults:
+  timeout_seconds: 900
+  correction_budget: 2
+  held_out_visible_to_models: false
+
+tasks:
+  - task_id: py_safe_async_job
+    language: python
+    category: repair
+    regression: true
+    fixture: benchmarks/a6000_agent_team/paired_public/py_safe_async_job
+    editable_sources: [benchmarks/a6000_agent_team/paired_public/py_safe_async_job/job_runner.py]
+    public_tests: [benchmarks/a6000_agent_team/paired_public/py_safe_async_job/test_public.py]
+    held_out_id: python/py_safe_async_job
+    objective: Repair timeout cancellation and cleanup while preserving the typed successful result.
+    requirements: [positive timeout validation, awaited cancellation cleanup, stable domain exception]
+    required_tools: [pytest, ruff, mypy, bandit]
+    routing: {worker_eligible: false, rtl_scope: not_rtl}
+
+  - task_id: py_fastapi_strict_endpoint
+    language: python
+    category: repair
+    regression: true
+    fixture: benchmarks/a6000_agent_team/paired_public/py_fastapi_strict_endpoint
+    editable_sources: [benchmarks/a6000_agent_team/paired_public/py_fastapi_strict_endpoint/endpoint.py]
+    public_tests: [benchmarks/a6000_agent_team/paired_public/py_fastapi_strict_endpoint/test_public.py]
+    held_out_id: python/py_fastapi_strict_endpoint
+    objective: Enforce strict Pydantic request validation without changing valid FastAPI responses.
+    requirements: [reject coercion, reject extra fields, preserve endpoint response compatibility]
+    required_tools: [pytest, ruff, mypy, bandit]
+    routing: {worker_eligible: false, rtl_scope: not_rtl}
+
+  - task_id: py_sqlite_transaction
+    language: python
+    category: repair
+    regression: true
+    fixture: benchmarks/a6000_agent_team/paired_public/py_sqlite_transaction
+    editable_sources: [benchmarks/a6000_agent_team/paired_public/py_sqlite_transaction/store.py]
+    public_tests: [benchmarks/a6000_agent_team/paired_public/py_sqlite_transaction/test_public.py]
+    held_out_id: python/py_sqlite_transaction
+    objective: Make the SQLite transition operation idempotent and rollback-safe on conflicts.
+    requirements: [identical duplicate returns false, conflicting provenance is rejected, failure rolls back]
+    required_tools: [pytest, ruff, mypy, bandit]
+    routing: {worker_eligible: false, rtl_scope: not_rtl}
+
+  - task_id: py_safe_path_cli
+    language: python
+    category: repair
+    regression: true
+    fixture: benchmarks/a6000_agent_team/paired_public/py_safe_path_cli
+    editable_sources: [benchmarks/a6000_agent_team/paired_public/py_safe_path_cli/path_cli.py]
+    public_tests: [benchmarks/a6000_agent_team/paired_public/py_safe_path_cli/test_public.py]
+    held_out_id: python/py_safe_path_cli
+    objective: Enforce confined output paths and same-directory atomic JSON replacement.
+    requirements: [reject absolute paths, reject traversal and symlink escape, preserve atomic output]
+    required_tools: [pytest, ruff, mypy, bandit]
+    routing: {worker_eligible: false, rtl_scope: not_rtl}
+
+  - task_id: py_typed_record_parser
+    language: python
+    category: implementation
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/py_typed_record_parser
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/py_typed_record_parser/record_parser.py]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/py_typed_record_parser/test_public.py]
+    held_out_id: python/py_typed_record_parser
+    objective: Implement a typed delimited-record parser with strict field and error contracts.
+    requirements: [reject missing and duplicate keys, preserve line numbers in errors, return immutable typed records]
+    required_tools: [pytest, ruff, mypy, bandit]
+    routing: {worker_eligible: false, rtl_scope: not_rtl}
+
+  - task_id: py_async_queue_shutdown
+    language: python
+    category: edge_case
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/py_async_queue_shutdown
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/py_async_queue_shutdown/worker_pool.py]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/py_async_queue_shutdown/test_public.py]
+    held_out_id: python/py_async_queue_shutdown
+    objective: Repair asynchronous worker shutdown so queued work resolves and cancellation cannot leak tasks.
+    requirements: [idempotent close, await worker termination, reject submission after close]
+    required_tools: [pytest, ruff, mypy, bandit]
+    routing: {worker_eligible: false, rtl_scope: not_rtl}
+
+  - task_id: py_sqlite_savepoint_batch
+    language: python
+    category: integration
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/py_sqlite_savepoint_batch
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/py_sqlite_savepoint_batch/batch_store.py]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/py_sqlite_savepoint_batch/test_public.py]
+    held_out_id: python/py_sqlite_savepoint_batch
+    objective: Add an idempotent batch operation that composes safely inside an existing SQLite transaction.
+    requirements: [use a savepoint when nested, rollback only the batch on conflict, preserve insertion order]
+    required_tools: [pytest, ruff, mypy, bandit]
+    routing: {worker_eligible: false, rtl_scope: not_rtl}
+
+  - task_id: py_numeric_state_machine
+    language: python
+    category: edge_case
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/py_numeric_state_machine
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/py_numeric_state_machine/state_machine.py]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/py_numeric_state_machine/test_public.py]
+    held_out_id: python/py_numeric_state_machine
+    objective: Implement a typed bounded accumulator state machine with deterministic transition errors.
+    requirements: [reject non-finite values, saturate at both bounds, make invalid transitions atomic]
+    required_tools: [pytest, ruff, mypy, bandit]
+    routing: {worker_eligible: false, rtl_scope: not_rtl}
+
+  - task_id: c_bounded_copy
+    language: c
+    category: implementation
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/c_bounded_copy
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/c_bounded_copy/bounded_copy.c]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/c_bounded_copy/test_public.c]
+    held_out_id: c/c_bounded_copy
+    objective: Implement overlap-safe bounded text copying with an explicit no-partial-write error contract.
+    requirements: [capacity includes terminator, reject null pointers, preserve destination on failure]
+    required_tools: [gcc, asan]
+    routing: {worker_eligible: false, rtl_scope: not_rtl}
+
+  - task_id: c_kv_parser
+    language: c
+    category: implementation
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/c_kv_parser
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/c_kv_parser/kv_parser.c]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/c_kv_parser/test_public.c]
+    held_out_id: c/c_kv_parser
+    objective: Parse one bounded key-value record without over-read, ambiguous separators or partial outputs.
+    requirements: [reject missing, empty, or multiple separators, preserve both output buffers on failure, enforce both destination capacities including terminators]
+    required_tools: [gcc]
+    routing: {worker_eligible: false, rtl_scope: not_rtl}
+
+  - task_id: c_owned_vector
+    language: c
+    category: repair
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/c_owned_vector
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/c_owned_vector/owned_vector.c]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/c_owned_vector/test_public.c]
+    held_out_id: c/c_owned_vector
+    objective: Repair dynamic-vector growth and cleanup under allocation failure and ownership transfer.
+    requirements: [return -3 before allocation on capacity or allocation-size overflow, leave vector unchanged on allocation failure, make repeated destroy harmless]
+    required_tools: [gcc, asan]
+    routing: {worker_eligible: false, rtl_scope: not_rtl}
+
+  - task_id: c_checked_counter
+    language: c
+    category: edge_case
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/c_checked_counter
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/c_checked_counter/checked_counter.c]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/c_checked_counter/test_public.c]
+    held_out_id: c/c_checked_counter
+    objective: Implement checked signed counter transitions without overflow or implementation-defined narrowing.
+    requirements: [detect both overflow directions, preserve state on error, handle exact integer boundaries]
+    required_tools: [gcc, ubsan]
+    routing: {worker_eligible: false, rtl_scope: not_rtl}
+
+  - task_id: c_stream_lines
+    language: c
+    category: edge_case
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/c_stream_lines
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/c_stream_lines/stream_lines.c]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/c_stream_lines/test_public.c]
+    held_out_id: c/c_stream_lines
+    objective: Process bounded stream lines while distinguishing EOF, overlong input and I/O failure.
+    requirements: [consume an overlong record deterministically, preserve final unterminated line, report ferror]
+    required_tools: [gcc]
+    routing: {worker_eligible: false, rtl_scope: not_rtl}
+
+  - task_id: c_protocol_fsm
+    language: c
+    category: implementation
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/c_protocol_fsm
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/c_protocol_fsm/protocol_fsm.c]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/c_protocol_fsm/test_public.c]
+    held_out_id: c/c_protocol_fsm
+    objective: Implement a small protocol state machine with explicit invalid-event and reset behavior.
+    requirements: [table-complete transitions, no state change on rejected events, deterministic reset from every valid state]
+    required_tools: [gcc]
+    routing: {worker_eligible: false, rtl_scope: not_rtl}
+
+  - task_id: c_cmake_library
+    language: c
+    category: integration
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/c_cmake_library
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/c_cmake_library/library.c]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/c_cmake_library/test_public.c]
+    held_out_id: c/c_cmake_library
+    objective: Integrate a portable C library operation with the existing public header and CMake test target.
+    requirements: [preserve ABI, avoid global mutable state, compile cleanly with GCC and Clang]
+    required_tools: [gcc, clang, cmake, ctest]
+    routing: {worker_eligible: false, rtl_scope: not_rtl}
+
+  - task_id: c_sanitizer_repair
+    language: c
+    category: repair
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/c_sanitizer_repair
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/c_sanitizer_repair/sanitizer_repair.c]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/c_sanitizer_repair/test_public.c]
+    held_out_id: c/c_sanitizer_repair
+    objective: Repair a sanitizer-detectable lifetime and bounds defect without changing successful output.
+    requirements: [no use after free, no one-past-end access, cleanup on every error]
+    required_tools: [gcc, asan, ubsan]
+    routing: {worker_eligible: false, rtl_scope: not_rtl}
+
+  - &v_counter
+    task_id: v_event_counter
+    language: verilog
+    category: implementation
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/v_event_counter
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/v_event_counter/v_event_counter.v]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/v_event_counter/tb_public.v]
+    held_out_id: verilog/v_event_counter
+    objective: Implement a parameterized event counter with synchronous clear and saturating overflow behavior.
+    requirements: [synchronous clear wins a simultaneous event, saturate at maximum, deterministic active-low reset]
+    required_tools: [iverilog, vvp, verilator, yosys]
+    routing: &eligible_v {worker_eligible: true, rtl_scope: bounded_module, module_count: 1, synthesizable: true, explicit_ports: true, cycle_behavior_specified: true, deterministic_verification: true, unresolved_architecture: false}
+
+  - task_id: v_parameterized_fifo
+    language: verilog
+    category: implementation
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/v_parameterized_fifo
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/v_parameterized_fifo/v_parameterized_fifo.v]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/v_parameterized_fifo/tb_public.v]
+    held_out_id: verilog/v_parameterized_fifo
+    objective: Implement a parameterized synchronous FIFO with exact full, empty and simultaneous push-pop behavior.
+    requirements: [no overflow or underflow mutation, pointer wrap, stable ordered output]
+    required_tools: [iverilog, vvp, verilator, yosys]
+    routing: *eligible_v
+
+  - task_id: v_ready_valid_buffer
+    language: verilog
+    category: repair
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/v_ready_valid_buffer
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/v_ready_valid_buffer/v_ready_valid_buffer.v]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/v_ready_valid_buffer/tb_public.v]
+    held_out_id: verilog/v_ready_valid_buffer
+    objective: Repair a one-entry ready-valid buffer for replacement, stalls and stable output data.
+    requirements: [replace on simultaneous transfer, hold data while stalled, clear valid on reset]
+    required_tools: [iverilog, vvp, verilator, yosys]
+    routing: *eligible_v
+
+  - task_id: v_round_robin_arbiter
+    language: verilog
+    category: implementation
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/v_round_robin_arbiter
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/v_round_robin_arbiter/v_round_robin_arbiter.v]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/v_round_robin_arbiter/tb_public.v]
+    held_out_id: verilog/v_round_robin_arbiter
+    objective: Implement a bounded round-robin arbiter with one-hot grant and accepted-grant rotation.
+    requirements: [one-hot or zero grant, rotate only on accept, deterministic reset priority]
+    required_tools: [iverilog, vvp, verilator, yosys]
+    routing: *eligible_v
+
+  - task_id: v_register_file
+    language: verilog
+    category: edge_case
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/v_register_file
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/v_register_file/v_register_file.v]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/v_register_file/tb_public.v]
+    held_out_id: verilog/v_register_file
+    objective: Implement a small parameterized register file with byte enables and defined read-during-write behavior.
+    requirements: [apply byte strobes, reset defined entries, exact same-address write-first behavior]
+    required_tools: [iverilog, vvp, verilator, yosys]
+    routing: *eligible_v
+
+  - task_id: v_saturating_datapath
+    language: verilog
+    category: repair
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/v_saturating_datapath
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/v_saturating_datapath/v_saturating_datapath.v]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/v_saturating_datapath/tb_public.v]
+    held_out_id: verilog/v_saturating_datapath
+    objective: Repair a bounded signed saturating datapath without width or signedness mismatches.
+    requirements: [saturate positive overflow, saturate negative overflow, preserve exact in-range result]
+    required_tools: [iverilog, vvp, verilator, yosys]
+    routing: *eligible_v
+
+  - task_id: v_dual_channel_fsm
+    language: verilog
+    category: integration
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/v_dual_channel_fsm
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/v_dual_channel_fsm/v_dual_channel_fsm.v, benchmarks/a6000_agent_team/multilanguage_v1/v_dual_channel_fsm/v_channel.v]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/v_dual_channel_fsm/tb_public.v]
+    held_out_id: verilog/v_dual_channel_fsm
+    objective: Integrate two independently stalled channels and pulse completion after both channels have handshaken.
+    requirements: [capture either channel in either arrival order, accept each channel once per completion, avoid combinational handshake loops]
+    required_tools: [iverilog, vvp, verilator, yosys]
+    routing: {worker_eligible: false, rtl_scope: multi_file_subsystem, module_count: 2, synthesizable: true, explicit_ports: true, cycle_behavior_specified: true, deterministic_verification: true, unresolved_architecture: false}
+
+  - task_id: v_register_bank_integration
+    language: verilog
+    category: integration
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/v_register_bank_integration
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/v_register_bank_integration/v_register_bank_integration.v]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/v_register_bank_integration/tb_public.v]
+    held_out_id: verilog/v_register_bank_integration
+    objective: Integrate a register bank with split request and response channels and byte write enables.
+    requirements: [independent request response stalls, apply byte enables, return errors for unmapped addresses]
+    required_tools: [iverilog, vvp, verilator, yosys]
+    routing: {worker_eligible: false, rtl_scope: protocol_integration, module_count: 1, synthesizable: true, explicit_ports: true, cycle_behavior_specified: true, deterministic_verification: true, unresolved_architecture: false}
+
+  - task_id: sv_ready_valid_buffer
+    language: systemverilog
+    category: repair
+    regression: true
+    fixture: benchmarks/a6000_agent_team/paired_public/sv_ready_valid_buffer
+    editable_sources: [benchmarks/a6000_agent_team/paired_public/sv_ready_valid_buffer/rv_buffer.sv]
+    public_tests: [benchmarks/a6000_agent_team/paired_public/sv_ready_valid_buffer/tb_rv_buffer.sv]
+    held_out_id: systemverilog/sv_ready_valid_buffer
+    objective: Repair the parameterized ready-valid buffer for simultaneous replacement and stable stalls.
+    requirements: [retain accepted data, replace on simultaneous dequeue-enqueue, stable output under backpressure]
+    required_tools: [iverilog, vvp, verilator, verilator_simulation, yosys]
+    routing: &eligible_sv {worker_eligible: true, rtl_scope: bounded_module, module_count: 1, synthesizable: true, explicit_ports: true, cycle_behavior_specified: true, deterministic_verification: true, unresolved_architecture: false}
+
+  - task_id: sv_axi_lite_irq_regs
+    language: systemverilog
+    category: integration
+    regression: true
+    fixture: benchmarks/a6000_agent_team/paired_public/sv_axi_lite_irq_regs
+    editable_sources: [benchmarks/a6000_agent_team/paired_public/sv_axi_lite_irq_regs/axi_lite_irq_regs.sv]
+    public_tests: [benchmarks/a6000_agent_team/paired_public/sv_axi_lite_irq_regs/tb_axi_lite_irq_regs.sv]
+    held_out_id: systemverilog/sv_axi_lite_irq_regs
+    objective: Repair AXI4-Lite independent channels, WSTRB, W1C event status and response behavior.
+    requirements: [capture AW and W independently, apply WSTRB, implement W1C and unmapped SLVERR]
+    required_tools: [iverilog, vvp, verilator, verilator_simulation, yosys]
+    routing: {worker_eligible: false, rtl_scope: protocol_integration, module_count: 1, synthesizable: true, explicit_ports: true, cycle_behavior_specified: true, deterministic_verification: true, unresolved_architecture: false}
+
+  - task_id: sv_elastic_buffer2
+    language: systemverilog
+    category: implementation
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/sv_elastic_buffer2
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/sv_elastic_buffer2/sv_elastic_buffer2.sv]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/sv_elastic_buffer2/tb_public.sv]
+    held_out_id: systemverilog/sv_elastic_buffer2
+    objective: Implement a two-entry elastic buffer with randomized backpressure and stable payload assertions.
+    requirements: [full throughput when unstalled, exact order under stalls, no loss on simultaneous events]
+    required_tools: [iverilog, vvp, verilator, verilator_simulation, yosys]
+    routing: *eligible_sv
+
+  - task_id: sv_w1c_event_bank
+    language: systemverilog
+    category: edge_case
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/sv_w1c_event_bank
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/sv_w1c_event_bank/sv_w1c_event_bank.sv]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/sv_w1c_event_bank/tb_public.sv]
+    held_out_id: systemverilog/sv_w1c_event_bank
+    objective: Implement a parameterized event bank with WSTRB-masked W1C and defined set-clear priority.
+    requirements: [byte strobe masking, a new event wins simultaneous W1C, IRQ equals enabled pending]
+    required_tools: [iverilog, vvp, verilator, verilator_simulation, yosys]
+    routing: *eligible_sv
+
+  - task_id: sv_parameterized_pipeline
+    language: systemverilog
+    category: implementation
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/sv_parameterized_pipeline
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/sv_parameterized_pipeline/sv_parameterized_pipeline.sv]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/sv_parameterized_pipeline/tb_public.sv]
+    held_out_id: systemverilog/sv_parameterized_pipeline
+    objective: Implement a bounded ready-valid pipeline with exact configured latency and global backpressure.
+    requirements: [exact latency without stalls, retain every stage under stall, clear all valid bits on reset]
+    required_tools: [iverilog, vvp, verilator, verilator_simulation, yosys]
+    routing: *eligible_sv
+
+  - task_id: sv_asserted_counter
+    language: systemverilog
+    category: repair
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/sv_asserted_counter
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/sv_asserted_counter/sv_asserted_counter.sv]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/sv_asserted_counter/tb_public.sv]
+    held_out_id: systemverilog/sv_asserted_counter
+    objective: Repair a saturating counter while preserving synthesizable protocol assertions and reset behavior.
+    requirements: [saturate without wrap, clear wins a simultaneous increment, assertions hold on boundary events]
+    required_tools: [iverilog, vvp, verilator, verilator_simulation, yosys]
+    routing: *eligible_sv
+
+  - task_id: sv_axi_lite_split_regs
+    language: systemverilog
+    category: integration
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/sv_axi_lite_split_regs
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/sv_axi_lite_split_regs/sv_axi_lite_split_regs.sv]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/sv_axi_lite_split_regs/tb_public.sv]
+    held_out_id: systemverilog/sv_axi_lite_split_regs
+    objective: Integrate an AXI4-Lite register slice with independent channels, WSTRB and bounded response buffering.
+    requirements: [independent AW and W capture, stable B and R responses under stall, unmapped address error]
+    required_tools: [iverilog, vvp, verilator, verilator_simulation, yosys]
+    routing: {worker_eligible: false, rtl_scope: protocol_integration, module_count: 1, synthesizable: true, explicit_ports: true, cycle_behavior_specified: true, deterministic_verification: true, unresolved_architecture: false}
+
+  - task_id: sv_interface_adapter
+    language: systemverilog
+    category: integration
+    regression: false
+    fixture: benchmarks/a6000_agent_team/multilanguage_v1/sv_interface_adapter
+    editable_sources: [benchmarks/a6000_agent_team/multilanguage_v1/sv_interface_adapter/sv_interface_adapter.sv, benchmarks/a6000_agent_team/multilanguage_v1/sv_interface_adapter/sv_adapter_pkg.sv]
+    public_tests: [benchmarks/a6000_agent_team/multilanguage_v1/sv_interface_adapter/tb_public.sv]
+    held_out_id: systemverilog/sv_interface_adapter
+    objective: Integrate two typed protocol channels through a package-defined adapter with independent stalls.
+    requirements: [preserve package types, allow independent channel progress, maintain response ordering]
+    required_tools: [iverilog, vvp, verilator, verilator_simulation, yosys]
+    routing: {worker_eligible: false, rtl_scope: multi_file_subsystem, module_count: 2, synthesizable: true, explicit_ports: true, cycle_behavior_specified: true, deterministic_verification: true, unresolved_architecture: false}

@@ -124,7 +124,17 @@ class OllamaProvider(Provider):
 class OpenAICompatibleProvider(Provider):
     """Client for a localhost OpenAI-compatible server (LM Studio/llama.cpp)."""
 
-    def __init__(self, endpoint: str, model: str, *, max_tokens: int = 2048):
+    def __init__(
+        self,
+        endpoint: str,
+        model: str,
+        *,
+        max_tokens: int = 2048,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        seed: int | None = None,
+        timeout_seconds: int = 120,
+    ):
         parsed = urlparse(endpoint)
         if parsed.scheme not in {"http", "https"} or parsed.hostname not in {
             "127.0.0.1",
@@ -134,17 +144,37 @@ class OpenAICompatibleProvider(Provider):
             raise ModelRequired("OpenAI-compatible endpoints must be loopback-only")
         if max_tokens < 1 or max_tokens > 8192:
             raise ModelRequired("OpenAI-compatible max_tokens must be between 1 and 8192")
-        self.endpoint, self.model, self.max_tokens = endpoint.rstrip("/"), model, max_tokens
+        if temperature < 0.0 or temperature > 2.0:
+            raise ModelRequired("OpenAI-compatible temperature must be between 0 and 2")
+        if top_p <= 0.0 or top_p > 1.0:
+            raise ModelRequired("OpenAI-compatible top_p must be greater than 0 and at most 1")
+        if timeout_seconds < 1 or timeout_seconds > 1800:
+            raise ModelRequired("OpenAI-compatible timeout must be between 1 and 1800 seconds")
+        self.endpoint = endpoint.rstrip("/")
+        self.model = model
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+        self.top_p = top_p
+        self.seed = seed
+        self.timeout_seconds = timeout_seconds
+
+    def _request_payload(self, prompt: str, *, stream: bool) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "max_tokens": self.max_tokens,
+            "stream": stream,
+        }
+        if self.seed is not None:
+            payload["seed"] = self.seed
+        if stream:
+            payload["stream_options"] = {"include_usage": True}
+        return payload
 
     def generate(self, prompt: str, *, context_tokens: int = 8192) -> GenerationResult:
-        payload = json.dumps(
-            {
-                "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0,
-                "max_tokens": self.max_tokens,
-            }
-        ).encode()
+        payload = json.dumps(self._request_payload(prompt, stream=False)).encode()
         request = urllib.request.Request(
             self.endpoint + "/v1/chat/completions",
             data=payload,
@@ -152,7 +182,7 @@ class OpenAICompatibleProvider(Provider):
         )
         started = time.perf_counter()
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                 value = json.loads(response.read())
         except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
             raise ModelRequired(f"Local OpenAI-compatible endpoint unavailable: {exc}") from exc
@@ -175,16 +205,7 @@ class OpenAICompatibleProvider(Provider):
 
     def _generate_streaming(self, prompt: str) -> GenerationResult:
         """Measure a loopback OpenAI stream using server-reported token counts."""
-        payload = json.dumps(
-            {
-                "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0,
-                "max_tokens": self.max_tokens,
-                "stream": True,
-                "stream_options": {"include_usage": True},
-            }
-        ).encode()
+        payload = json.dumps(self._request_payload(prompt, stream=True)).encode()
         request = urllib.request.Request(
             self.endpoint + "/v1/chat/completions",
             data=payload,
@@ -196,7 +217,7 @@ class OpenAICompatibleProvider(Provider):
         prompt_tokens: int | None = None
         completion_tokens: int | None = None
         try:
-            with urllib.request.urlopen(request, timeout=300) as response:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                 for raw_line in response:
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data: "):
@@ -272,13 +293,30 @@ class OpenAICompatibleProvider(Provider):
         request = urllib.request.Request(self.endpoint + "/v1/models", method="GET")
         try:
             with urllib.request.urlopen(request, timeout=10) as response:
-                json.loads(response.read())
+                value: object = json.loads(response.read())
         except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
             return {"status": "UNAVAILABLE", "backend": "openai_compatible", "error": str(exc)}
+        models: list[str] = []
+        if isinstance(value, dict):
+            data = value.get("data")
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict) and isinstance(item.get("id"), str):
+                        models.append(item["id"])
+        if self.model not in models:
+            return {
+                "status": "MODEL_MISMATCH",
+                "backend": "openai_compatible",
+                "endpoint": self.endpoint,
+                "configured_model": self.model,
+                "served_models": ",".join(models),
+            }
         return {
             "status": "AVAILABLE",
             "backend": "openai_compatible",
             "endpoint": self.endpoint,
+            "configured_model": self.model,
+            "served_models": ",".join(models),
         }
 
     def model_identity(self) -> dict[str, str]:

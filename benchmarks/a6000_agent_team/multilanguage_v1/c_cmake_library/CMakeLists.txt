@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.16)
+project(c_cmake_library C)
+enable_testing()
+add_library(portable_library STATIC library.c)
+add_executable(test_public test_public.c)
+target_link_libraries(test_public PRIVATE portable_library)
+add_test(NAME public COMMAND test_public)

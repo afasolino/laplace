@@ -66,7 +66,9 @@ def main() -> int:
         root / "codex_a6000" / "templates" / "paired_benchmark_manifest.schema.json",
         root / "codex_a6000" / "benchmarks" / "paired_task_catalog.yaml",
     ]
-    missing_overlay = [str(path.relative_to(root)) for path in required_overlay if not path.is_file()]
+    missing_overlay = [
+        str(path.relative_to(root)) for path in required_overlay if not path.is_file()
+    ]
     if missing_overlay:
         raise SystemExit(f"Overlay is incomplete. Missing: {missing_overlay}")
 
@@ -139,9 +141,7 @@ def main() -> int:
             "observed_modules": {name: (root / name).is_file() for name in observed_modules},
             "observed_tests": {name: (root / name).is_file() for name in observed_tests},
         },
-        "overlay": {
-            str(path.relative_to(root)): path.is_file() for path in required_overlay
-        },
+        "overlay": {str(path.relative_to(root)): path.is_file() for path in required_overlay},
         "imports": {},
         "cuda": {},
         "tools": {},
@@ -228,7 +228,9 @@ def main() -> int:
         if not present
     ]
     if missing_core:
-        raise SystemExit(f"Clone does not match the expected Laplace baseline. Missing: {missing_core}")
+        raise SystemExit(
+            f"Clone does not match the expected Laplace baseline. Missing: {missing_core}"
+        )
     if sys.version_info < (3, 11):
         raise SystemExit(f"Python 3.11+ is required; active version is {sys.version.split()[0]}.")
     if not report["python"]["using_repo_venv"]:
@@ -242,7 +244,9 @@ def main() -> int:
     device = str(report["cuda"].get("device_0", ""))
     vram = float(report["cuda"].get("vram_gib", 0.0))
     if "A6000" not in device or vram < 45.0:
-        raise SystemExit(f"Expected RTX A6000-class hardware; found {device!r} with {vram:.2f} GiB.")
+        raise SystemExit(
+            f"Expected RTX A6000-class hardware; found {device!r} with {vram:.2f} GiB."
+        )
     if not report["tools"]["codex"].get("path"):
         raise SystemExit("Codex CLI is not on PATH. Install and authenticate it before continuing.")
 

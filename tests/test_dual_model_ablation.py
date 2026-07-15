@@ -1,0 +1,719 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import urllib.request
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from research_workspace.engineering import (
+    AgentTaskStore,
+    LocalToolRunner,
+    ReferenceLibrary,
+    normalize_task_spec,
+    retrieve_engineering_evidence,
+)
+from research_workspace.governed_corpus import (
+    load_installed_external_manifest,
+    prepare_corpus_overlay,
+    validate_corpus_retrieval,
+)
+from research_workspace.inference import ServingCandidate
+from research_workspace.llm import GenerationResult
+from research_workspace.llm import VllmProvider
+from research_workspace.model_routing import (
+    AuditedModelCaller,
+    DualModelConfiguration,
+    RoleRouter,
+    RoutingTaskMetadata,
+    assess_rtl_worker_eligibility,
+    serving_candidate_from_json,
+)
+from research_workspace.model_artifacts import (
+    validate_local_artifacts,
+    validate_profile_alignment,
+)
+from research_workspace.multilanguage_ablation import (
+    _assert_phase_manifest_compatible,
+    _configuration_fingerprint,
+    _run_lane_subprocess,
+    _task_spec,
+    build_plan,
+    load_benchmark_manifest,
+    load_experiment_configuration,
+    merge_phase_results,
+    package_results,
+    phase_status,
+    validate_runtime,
+    validate_held_out_pack,
+)
+from research_workspace.repair_protocol import StructuredOutputError
+from research_workspace.rtl_contract import parse_rtl_worker_contract, rtl_worker_prompt
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+CONFIG_PATH = (
+    REPOSITORY_ROOT
+    / "codex_a6000"
+    / "experiments"
+    / "multilanguage_dual_model_ablation_v1"
+    / "experiment.json"
+)
+
+
+def _candidate(port: int, model: str) -> ServingCandidate:
+    return ServingCandidate(
+        engine="vllm",
+        endpoint=f"http://127.0.0.1:{port}",
+        model=model,
+        revision="fixture-revision",
+        quantization="INT4",
+        kernel="fixture",
+        prefix_caching=True,
+        chunked_prefill=True,
+        cuda_graph_mode="fixture",
+        scheduler="fixture",
+        context_tokens=4096,
+        max_output_tokens=512,
+    )
+
+
+def _eligible(arm: str = "C") -> RoutingTaskMetadata:
+    return RoutingTaskMetadata(
+        task_id="rtl-one",
+        experiment_arm=arm,
+        domain="verilog",
+        task_kind="implementation",
+        rtl_scope="bounded_module",
+        worker_eligible=True,
+        editable_sources=("rtl_one.v",),
+        module_count=1,
+        synthesizable=True,
+        explicit_ports=True,
+        cycle_behavior_specified=True,
+        deterministic_verification=True,
+    )
+
+
+def test_serving_profiles_are_loopback_only_and_decoding_is_configurable() -> None:
+    candidate = _candidate(8102, "main")
+    assert candidate.context_tokens == 4096
+    assert candidate.to_json()["max_output_tokens"] == 512
+    with pytest.raises(ValueError, match="loopback"):
+        ServingCandidate(
+            engine="vllm",
+            endpoint="http://192.0.2.1:8000",
+            model="forbidden",
+            revision="fixture",
+            quantization="INT4",
+            kernel="fixture",
+            prefix_caching=True,
+            chunked_prefill=True,
+            cuda_graph_mode="fixture",
+            scheduler="fixture",
+        )
+    invalid_profile = candidate.to_json()
+    invalid_profile["unexpected"] = True
+    with pytest.raises(ValueError, match="unexpected fields"):
+        serving_candidate_from_json(invalid_profile)
+
+
+def test_openai_compatible_health_requires_exact_served_model_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        def __init__(self, model: str) -> None:
+            self.model = model
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({"data": [{"id": self.model}]}).encode()
+
+    served = "exact-model"
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *args, **kwargs: Response(served))
+    provider = VllmProvider("http://127.0.0.1:8102", "exact-model")
+    assert provider.health()["status"] == "AVAILABLE"
+    served = "wrong-model"
+    assert provider.health()["status"] == "MODEL_MISMATCH"
+
+
+def test_role_router_uses_worker_only_for_eligible_bounded_rtl_roles() -> None:
+    main = _candidate(8102, "main")
+    worker = _candidate(8103, "worker")
+    router = RoleRouter(DualModelConfiguration(main=main, rtl_worker=worker))
+    metadata = _eligible()
+    assert assess_rtl_worker_eligibility(metadata).eligible is True
+    assert router.select("bounded_rtl_implementation", metadata).selected == "rtl_worker"
+    assert router.select("bounded_rtl_repair", metadata).selected == "rtl_worker"
+    for role in (
+        "planning_supervision",
+        "retrieval_interpretation",
+        "general_implementation",
+        "rtl_contract_generation",
+        "review",
+    ):
+        assert router.select(role, metadata).selected == "main"
+    integration = RoutingTaskMetadata(
+        **{
+            **metadata.__dict__,
+            "rtl_scope": "protocol_integration",
+            "worker_eligible": False,
+        }
+    )
+    decision = router.select("bounded_rtl_implementation", integration)
+    assert decision.selected == "main"
+    assert "protocol_integration" in decision.reason
+
+
+class _FixtureBackend:
+    def generate(self, prompt: str, *, context_tokens: int = 8192) -> GenerationResult:
+        assert prompt and context_tokens == 4096
+        return GenerationResult("valid", "worker", None, None, "mocked", 11, 3)
+
+    def health(self) -> dict[str, str]:
+        return {"status": "AVAILABLE", "backend": "fixture"}
+
+    def model_identity(self) -> dict[str, str]:
+        return {"backend": "fixture", "model": "worker"}
+
+
+def test_every_routed_call_writes_complete_audit_record(tmp_path: Path) -> None:
+    main = _candidate(8102, "main")
+    worker = _candidate(8103, "worker")
+    caller = AuditedModelCaller(
+        RoleRouter(DualModelConfiguration(main=main, rtl_worker=worker)),
+        tmp_path,
+        backend_factory=lambda candidate: _FixtureBackend(),
+    )
+    call = caller.generate(
+        "bounded prompt",
+        role="bounded_rtl_implementation",
+        metadata=_eligible(),
+        validator=lambda text: None if text == "valid" else (_ for _ in ()).throw(ValueError()),
+    )
+    assert call.response_valid is True
+    audit = json.loads(Path(call.audit_path).read_text(encoding="utf-8"))
+    assert audit["task_id"] == "rtl-one"
+    assert audit["experiment_arm"] == "C"
+    assert audit["routing"]["selected"] == "rtl_worker"
+    assert audit["prompt_tokens"] == 11
+    assert audit["completion_tokens"] == 3
+    assert audit["generation_seconds"] >= 0
+    assert audit["response_valid"] is True
+    assert audit["retry_index"] == 0
+    assert audit["fallback_used"] is False
+
+
+def _contract(source: Path) -> str:
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "task_id": "rtl-one",
+            "module_name": "rtl_one",
+            "language": "verilog",
+            "editable_path": source.name,
+            "current_source": {
+                "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "content": source.read_text(encoding="utf-8"),
+            },
+            "parameters": [],
+            "ports": [
+                {
+                    "name": "clk",
+                    "direction": "input",
+                    "width": "1",
+                    "signed": False,
+                    "description": "Rising-edge clock.",
+                },
+                {
+                    "name": "rst_n",
+                    "direction": "input",
+                    "width": "1",
+                    "signed": False,
+                    "description": "Asynchronous active-low reset.",
+                },
+            ],
+            "clock_reset": {
+                "clock": {"name": "clk", "edge": "posedge"},
+                "reset": {
+                    "name": "rst_n",
+                    "active_level": "low",
+                    "synchronous": False,
+                    "reset_values": {"state": "0"},
+                },
+            },
+            "functional_requirements": ["Increment on an accepted event."],
+            "cycle_requirements": ["Update on the rising edge only."],
+            "handshake_and_events": ["event_i is sampled for one cycle."],
+            "corner_cases": ["Reset and event together reset state."],
+            "synthesis_constraints": ["Synthesizable Verilog-2001."],
+            "forbidden_constructs": ["No delays or force/release."],
+            "verification": {
+                "commands": ["iverilog -g2001 and vvp", "yosys synth"],
+                "acceptance_criteria": ["Public simulation and synthesis pass."],
+            },
+            "diagnostics": [],
+        }
+    )
+
+
+def test_rtl_contract_is_complete_hash_bound_and_worker_prompt_has_no_tool_authority(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "rtl_one.v"
+    source.write_text("module rtl_one(input wire clk); endmodule\n", encoding="utf-8")
+    contract = parse_rtl_worker_contract(
+        _contract(source),
+        root=tmp_path,
+        task_id="rtl-one",
+        language="verilog",
+        editable_path="rtl_one.v",
+        require_diagnostics=False,
+    )
+    prompt = rtl_worker_prompt(contract)
+    assert "exactly the one module" in prompt
+    assert "Do not explore a repository" in prompt
+    assert "never execute tools" not in prompt
+    source.write_text("module rtl_one(input wire clk); wire changed; endmodule\n", encoding="utf-8")
+    with pytest.raises(StructuredOutputError, match="stale"):
+        parse_rtl_worker_contract(
+            _contract(tmp_path / "snapshot.v")
+            if (tmp_path / "snapshot.v").exists()
+            else _contract_text_with_stale(source),
+            root=tmp_path,
+            task_id="rtl-one",
+            language="verilog",
+            editable_path="rtl_one.v",
+            require_diagnostics=False,
+        )
+
+
+def _contract_text_with_stale(source: Path) -> str:
+    value = json.loads(_contract(source))
+    value["current_source"]["sha256"] = "0" * 64
+    return json.dumps(value)
+
+
+def test_manifest_validates_all_task_schemas_and_plan_does_not_probe_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configuration = load_experiment_configuration(REPOSITORY_ROOT, CONFIG_PATH)
+    tasks = load_benchmark_manifest(configuration.manifest_path)
+    assert len(tasks) == 32
+    assert sum(task.routing.worker_eligible for task in tasks) == 11
+    for task in tasks:
+        normalize_task_spec(REPOSITORY_ROOT, task.language, _task_spec(task))
+    monkeypatch.setattr(
+        "research_workspace.model_routing.AuditedModelCaller.health",
+        lambda self, include_worker: (_ for _ in ()).throw(AssertionError("endpoint probed")),
+    )
+    plan = build_plan(REPOSITORY_ROOT, configuration)
+    assert plan["task_count"] == 32
+    assert plan["endpoint_status"] == "NOT_PROBED_PLAN_ONLY"
+    assert len(plan["tasks"]) == 32
+    assert [phase.arm_ids for phase in configuration.phases] == [("A",), ("B", "C")]
+    assert configuration.base_revision is None
+    phase_one_plan = build_plan(REPOSITORY_ROOT, configuration, phase_id="phase1")
+    assert phase_one_plan["selected_phase"] == "phase1"
+    assert not any(
+        "phase2_main" in item or "phase2_rtl_worker" in item
+        for item in phase_one_plan["missing_prerequisites"]
+    )
+
+
+def test_task_lane_timeout_is_killable_and_retained_as_typed_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configuration = replace(
+        load_experiment_configuration(REPOSITORY_ROOT, CONFIG_PATH, base_revision="a" * 40),
+        output_root=tmp_path / "experiment-output",
+        default_timeout_seconds=17,
+    )
+    task = load_benchmark_manifest(configuration.manifest_path)[0]
+    arm = configuration.arms[0]
+    process = object()
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation.subprocess.Popen",
+        lambda *args, **kwargs: process,
+    )
+    monkeypatch.setattr(
+        "research_workspace.paired_benchmark._await_lane",
+        lambda received, *, timeout_seconds: (
+            {
+                "status": "TIMEOUT",
+                "returncode": 124,
+                "elapsed_seconds": float(timeout_seconds),
+            }
+            if received is process
+            else (_ for _ in ()).throw(AssertionError("wrong process"))
+        ),
+    )
+    result = _run_lane_subprocess(REPOSITORY_ROOT, configuration, task, arm)
+    assert result["status"] == "TIMEOUT"
+    assert result["returncode"] == 124
+    assert result["timeout_seconds"] == 17
+    assert result["bundle"] == {}
+    assert Path(str(result["command_log"])).is_file()
+
+
+def _base_reference_fixture(tmp_path: Path, domain: str, content: str) -> None:
+    source = tmp_path / f"{domain}-source"
+    source.mkdir()
+    licence = source / "LICENSE"
+    licence.write_text("Fixture licence\n", encoding="utf-8")
+    guide = source / ("guide.py" if domain == "python" else "guide.sv")
+    guide.write_text(content, encoding="utf-8")
+    library = ReferenceLibrary(tmp_path / "base", domain, shared=True)  # type: ignore[arg-type]
+    library.initialize(
+        REPOSITORY_ROOT / "codex_a6000" / "reference_sources" / f"{domain}_sources.yaml"
+    )
+    topic = "50_typing_validation/fixture" if domain == "python" else "20_interfaces/fixture"
+    library.register_local(
+        reference_id=f"fixture_{domain}",
+        repository="https://example.invalid/fixture.git",
+        commit=("a" if domain == "python" else "b") * 40,
+        licence_identifier="MIT",
+        licence_path=licence,
+        selected_files=[(guide, topic, tuple(content.lower().split()))],
+        permitted_use="reference_only_no_copy",
+        attribution="Fixture",
+    )
+
+
+def test_fresh_projects_retrieve_non_empty_language_separated_corpus(tmp_path: Path) -> None:
+    _base_reference_fixture(
+        tmp_path,
+        "python",
+        "strict Pydantic validation asyncio cancellation SQLite transaction",
+    )
+    _base_reference_fixture(
+        tmp_path,
+        "systemverilog",
+        "SystemVerilog AXI4-Lite WSTRB W1C ready valid assertions",
+    )
+    overlay = tmp_path / "overlay"
+    prepare_corpus_overlay(REPOSITORY_ROOT, tmp_path / "base", overlay, require_external=False)
+    validation = validate_corpus_retrieval(overlay, require_external=False)
+    assert validation["status"] == "VERIFIED_NON_EMPTY"
+    records = validation["domains"]
+    assert isinstance(records, list)
+    assert {record["domain"] for record in records} == {
+        "python",
+        "c",
+        "verilog",
+        "systemverilog",
+    }
+    assert all(record["retrieved_chunk_count"] > 0 for record in records)
+    expected_reference_fragment = {
+        "python": "python",
+        "c": "_c_",
+        "verilog": "verilog",
+        "systemverilog": "systemverilog",
+    }
+    for record in records:
+        assert all(
+            expected_reference_fragment[record["domain"]]
+            in str(item.get("reference_id", "")).lower()
+            for item in record["retrieved"]
+        )
+        assert all(
+            item.get("reference_id")
+            and item.get("chunk_id")
+            and item.get("rank")
+            and item.get("score") is not None
+            and item.get("revision")
+            and item.get("licence_identifier")
+            and item.get("sha256")
+            for item in record["retrieved"]
+        )
+
+
+def test_external_c_and_verilog_corpus_is_installed_and_hash_verified() -> None:
+    manifest = load_installed_external_manifest(REPOSITORY_ROOT)
+    sources = manifest["sources"]
+    assert isinstance(sources, list)
+    assert len(sources) == 6
+    assert all(
+        isinstance(source, dict)
+        and len(str(source.get("resolved_commit", ""))) == 40
+        and source.get("files")
+        for source in sources
+    )
+
+
+def test_pinned_model_profiles_align_and_unavailable_artifacts_fail_closed() -> None:
+    experiment = CONFIG_PATH.parent
+    alignment = validate_profile_alignment(experiment)
+    assert alignment["status"] == "VALID_MODEL_PROFILES"
+    local = validate_local_artifacts(experiment)
+    by_id = {
+        str(record["artifact_id"]): record
+        for record in local["artifacts"]
+        if isinstance(record, dict)
+    }
+    assert by_id["phase1_main"]["available"] is True
+    assert by_id["phase2_main"]["available"] is False
+    assert by_id["phase2_rtl_worker"]["available"] is False
+
+
+def test_c_quality_gate_uses_gcc_without_requiring_optional_cmake(tmp_path: Path) -> None:
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "value.c").write_text("int value(void) { return 7; }\n", encoding="utf-8")
+    (fixture / "test_public.c").write_text(
+        "int value(void); int main(void) { return value() == 7 ? 0 : 1; }\n",
+        encoding="utf-8",
+    )
+    result = LocalToolRunner(tmp_path, tmp_path / "logs").run_c_quality_gates(
+        "fixture", required_tools=("gcc",), sanitizers=False
+    )
+    assert result["passed"] is True
+    assert result["missing_tools"] == []
+
+
+def test_fresh_c_task_retrieval_does_not_return_verilog_chunks(tmp_path: Path) -> None:
+    _base_reference_fixture(tmp_path, "python", "strict validation transaction")
+    _base_reference_fixture(tmp_path, "systemverilog", "AXI WSTRB W1C assertions")
+    overlay = tmp_path / "overlay"
+    prepare_corpus_overlay(REPOSITORY_ROOT, tmp_path / "base", overlay, require_external=False)
+    task = next(
+        item
+        for item in load_benchmark_manifest(
+            load_experiment_configuration(REPOSITORY_ROOT, CONFIG_PATH).manifest_path
+        )
+        if item.task_id == "c_bounded_copy"
+    )
+    project = tmp_path / "fresh-project"
+    normalized = normalize_task_spec(REPOSITORY_ROOT, "c", _task_spec(task))
+    persisted = AgentTaskStore(project).create("c", normalized)
+    evidence = retrieve_engineering_evidence(
+        REPOSITORY_ROOT,
+        project,
+        persisted,
+        query=task.objective,
+        shared_reference_root=overlay,
+    )
+    governed = evidence["governed_references"]
+    assert isinstance(governed, list) and governed
+    assert all("/Verilog/" not in str(item.get("path")) for item in governed)
+
+
+def test_empty_result_packaging_is_explicit_and_does_not_invent_measurements(
+    tmp_path: Path,
+) -> None:
+    configuration = replace(
+        load_experiment_configuration(REPOSITORY_ROOT, CONFIG_PATH), output_root=tmp_path
+    )
+    reports = package_results(configuration)
+    payload = json.loads(Path(str(reports["json"])).read_text(encoding="utf-8"))
+    assert payload["task_arm_results"] == []
+    assert payload["statistical_generality_claim"] is False
+    assert Path(str(reports["csv"])).is_file()
+    assert Path(str(reports["markdown"])).is_file()
+
+
+def test_phase_resume_status_counts_only_matching_base_results(tmp_path: Path) -> None:
+    configuration = replace(
+        load_experiment_configuration(REPOSITORY_ROOT, CONFIG_PATH, base_revision="a" * 40),
+        output_root=tmp_path,
+    )
+    tasks = load_benchmark_manifest(configuration.manifest_path)
+    pairs = tmp_path / "pairs" / "A"
+    pairs.mkdir(parents=True)
+    for task in tasks:
+        (pairs / f"{task.task_id}.json").write_text(
+            json.dumps(
+                {
+                    "status": "COMPLETE_EVALUATED",
+                    "task_id": task.task_id,
+                    "arm_id": "A",
+                    "base_revision": "a" * 40,
+                    "execution_phase": "phase1",
+                    "held_out_manifest_sha256": "f" * 64,
+                }
+            ),
+            encoding="utf-8",
+        )
+    manifest = tmp_path / "phases" / "phase1" / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    fingerprint = _configuration_fingerprint(configuration, {}, "f" * 64)
+    manifest.write_text(
+        json.dumps(
+            {
+                "status": "COMPLETE",
+                "fingerprint": fingerprint,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert phase_status(configuration, "phase1")["status"] == "COMPLETE"
+    first = pairs / f"{tasks[0].task_id}.json"
+    value = json.loads(first.read_text(encoding="utf-8"))
+    value["base_revision"] = "b" * 40
+    first.write_text(json.dumps(value), encoding="utf-8")
+    status = phase_status(configuration, "phase1")
+    assert status["status"] == "INCOMPLETE"
+    assert status["remaining_pairs"] == 1
+    value["base_revision"] = "a" * 40
+    value["held_out_manifest_sha256"] = "e" * 64
+    first.write_text(json.dumps(value), encoding="utf-8")
+    status = phase_status(configuration, "phase1")
+    assert status["status"] == "INCOMPLETE"
+    assert status["remaining_pairs"] == 1
+
+
+def test_phase_fingerprint_rejects_changed_benchmark_or_corpus() -> None:
+    configuration = load_experiment_configuration(
+        REPOSITORY_ROOT, CONFIG_PATH, base_revision="a" * 40
+    )
+    expected = _configuration_fingerprint(configuration, {"c": "one"}, "f" * 64)
+    assert set(expected["model_configuration_hashes"]) == {"A", "B", "C"}
+    assert len(str(expected["model_artifacts_sha256"])) == 64
+    _assert_phase_manifest_compatible(
+        configuration, {"fingerprint": expected}, {"c": "one"}, "f" * 64
+    )
+    with pytest.raises(Exception, match="incompatible"):
+        _assert_phase_manifest_compatible(
+            configuration, {"fingerprint": expected}, {"c": "changed"}, "f" * 64
+        )
+
+
+def test_runtime_endpoint_probe_is_scoped_to_the_selected_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configuration = load_experiment_configuration(
+        REPOSITORY_ROOT, CONFIG_PATH, base_revision="a" * 40
+    )
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation.runtime_prerequisites",
+        lambda *args, **kwargs: {"passed": True, "missing": []},
+    )
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation.validate_held_out_pack",
+        lambda *args, **kwargs: {"status": "VALID_ISOLATED_HELD_OUT_PACK"},
+    )
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation.collect_cuda_evidence",
+        lambda *args, **kwargs: {"status": "CUDA_A6000_VERIFIED"},
+    )
+    monkeypatch.setenv(configuration.held_out_environment_variable, "/tmp/evaluator-pack")
+    worker_flags: list[bool] = []
+
+    def health(self: object, *, include_worker: bool) -> dict[str, object]:
+        worker_flags.append(include_worker)
+        return {"main": {"status": "AVAILABLE"}}
+
+    monkeypatch.setattr("research_workspace.model_routing.AuditedModelCaller.health", health)
+    assert validate_runtime(REPOSITORY_ROOT, configuration, "phase1")["status"] == "RUNTIME_READY"
+    assert worker_flags == [False]
+    worker_flags.clear()
+    assert validate_runtime(REPOSITORY_ROOT, configuration, "phase2")["status"] == "RUNTIME_READY"
+    assert worker_flags == [False, True]
+
+
+def test_merge_requires_and_packages_all_serialized_task_arm_pairs(tmp_path: Path) -> None:
+    configuration = replace(
+        load_experiment_configuration(REPOSITORY_ROOT, CONFIG_PATH, base_revision="a" * 40),
+        output_root=tmp_path / "results",
+        overlay_root=tmp_path / "corpus",
+    )
+    for domain in ("python", "c", "verilog", "systemverilog"):
+        ReferenceLibrary(configuration.overlay_root, domain, shared=True).initialize(  # type: ignore[arg-type]
+            REPOSITORY_ROOT / "codex_a6000" / "reference_sources" / f"{domain}_sources.yaml"
+        )
+    corpus_hashes = {
+        domain: ReferenceLibrary(
+            configuration.overlay_root,
+            domain,
+            shared=True,  # type: ignore[arg-type]
+        ).snapshot_hash()
+        or "UNINITIALIZED"
+        for domain in ("python", "c", "verilog", "systemverilog")
+    }
+    fingerprint = _configuration_fingerprint(configuration, corpus_hashes, "f" * 64)
+    tasks = load_benchmark_manifest(configuration.manifest_path)
+    for arm in ("A", "B", "C"):
+        pair_root = configuration.output_root / "pairs" / arm
+        pair_root.mkdir(parents=True, exist_ok=True)
+        for task in tasks:
+            (pair_root / f"{task.task_id}.json").write_text(
+                json.dumps(
+                    {
+                        "status": "COMPLETE_EVALUATED",
+                        "task_id": task.task_id,
+                        "arm_id": arm,
+                        "base_revision": configuration.base_revision,
+                        "execution_phase": "phase1" if arm == "A" else "phase2",
+                        "held_out_manifest_sha256": "f" * 64,
+                        "language": task.language,
+                        "category": task.category,
+                        "held_out": {"score": 100},
+                    }
+                ),
+                encoding="utf-8",
+            )
+    for phase_id, expected_pairs in (("phase1", 32), ("phase2", 64)):
+        path = configuration.output_root / "phases" / phase_id / "manifest.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "status": "COMPLETE",
+                    "phase_id": phase_id,
+                    "expected_pairs": expected_pairs,
+                    "fingerprint": fingerprint,
+                }
+            ),
+            encoding="utf-8",
+        )
+    merged = merge_phase_results(configuration)
+    assert merged["status"] == "MERGED_COMPLETE"
+    assert merged["task_arm_pairs"] == 96
+
+
+def test_held_out_pack_is_hash_checked_and_must_be_external(tmp_path: Path) -> None:
+    configuration = load_experiment_configuration(REPOSITORY_ROOT, CONFIG_PATH)
+    tasks = load_benchmark_manifest(configuration.manifest_path)
+    pack = tmp_path / "evaluator-pack"
+    manifest_tasks: dict[str, object] = {}
+    for task in tasks:
+        directory = pack / task.task_id
+        directory.mkdir(parents=True)
+        if task.language == "python":
+            names = ["test_heldout.py"]
+        elif task.language == "c":
+            names = ["CMakeLists.txt", "test_heldout.c"]
+        elif task.language == "verilog":
+            names = ["tb_heldout.v"]
+        else:
+            names = ["tb_heldout.sv"]
+        hashes: dict[str, str] = {}
+        for name in names:
+            content = f"// evaluator fixture for {task.task_id}\n"
+            (directory / name).write_text(content, encoding="utf-8")
+            hashes[name] = hashlib.sha256(content.encode()).hexdigest()
+        manifest_tasks[task.task_id] = {
+            "directory": task.task_id,
+            "files": hashes,
+        }
+    (pack / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "experiment_id": "multilanguage_dual_model_ablation_v1",
+                "tasks": manifest_tasks,
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = validate_held_out_pack(REPOSITORY_ROOT, configuration, pack)
+    assert result["status"] == "VALID_ISOLATED_HELD_OUT_PACK"
+    with pytest.raises(Exception, match="outside the repository"):
+        validate_held_out_pack(tmp_path, configuration, pack)

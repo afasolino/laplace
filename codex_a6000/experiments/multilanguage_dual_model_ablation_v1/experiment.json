@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "experiment_id": "multilanguage_dual_model_ablation_v1",
+  "base_revision_environment_variable": "LAPLACE_ABLATION_BASE_REVISION",
+  "manifest": "codex_a6000/experiments/multilanguage_dual_model_ablation_v1/benchmark_manifest.yaml",
+  "model_artifacts": "codex_a6000/experiments/multilanguage_dual_model_ablation_v1/model_artifacts.json",
+  "arms": [
+    {
+      "arm_id": "A",
+      "label": "current_baseline",
+      "models": "codex_a6000/experiments/multilanguage_dual_model_ablation_v1/arm_a_models.json",
+      "worker_enabled": false
+    },
+    {
+      "arm_id": "B",
+      "label": "main_model_upgrade",
+      "models": "codex_a6000/experiments/multilanguage_dual_model_ablation_v1/arm_b_models.json",
+      "worker_enabled": false
+    },
+    {
+      "arm_id": "C",
+      "label": "dual_model",
+      "models": "codex_a6000/experiments/multilanguage_dual_model_ablation_v1/arm_c_models.json",
+      "worker_enabled": true
+    }
+  ],
+  "phases": [
+    {
+      "phase_id": "phase1",
+      "label": "legacy_configuration",
+      "arms": ["A"],
+      "requires_completed_phase": null
+    },
+    {
+      "phase_id": "phase2",
+      "label": "new_configuration",
+      "arms": ["B", "C"],
+      "requires_completed_phase": "phase1"
+    }
+  ],
+  "arm_order_strategy": "serialized_phase_then_deterministic_rotation",
+  "corpus": {
+    "base_reference_root": "/home/giando/FormalScience/Library",
+    "overlay_root": "outputs/a6000_agent_team/experiments/multilanguage_dual_model_ablation_v1/corpus",
+    "bundled_manifest": "codex_a6000/governed_corpus/manifest.json",
+    "require_non_empty_domains": ["python", "c", "verilog", "systemverilog"]
+  },
+  "held_out": {
+    "root_environment_variable": "LAPLACE_ABLATION_HELD_OUT_ROOT",
+    "copy_into_implementation_worktrees": false,
+    "evaluate_only_after_lane_completion": true,
+    "require_manifest_hashes": true
+  },
+  "execution": {
+    "output_root": "outputs/a6000_agent_team/experiments/multilanguage_dual_model_ablation_v1",
+    "resume_completed_pairs": true,
+    "default_timeout_seconds": 900,
+    "correction_budget": 2,
+    "require_cuda_a6000": true,
+    "require_clean_base_revision": true
+  },
+  "reporting": {
+    "bootstrap_samples": 10000,
+    "bootstrap_seed": 20260715,
+    "confidence_level": 0.95,
+    "statistical_generality_claim": false
+  }
+}

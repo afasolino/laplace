@@ -25,6 +25,12 @@ from .engineering import (
     retrieve_engineering_evidence,
 )
 from .inference import Engine, ServingCandidate, benchmark_local_candidate
+from .model_routing import (
+    DualModelConfiguration,
+    RoutingTaskMetadata,
+    assess_rtl_worker_eligibility,
+    serving_candidate_from_json,
+)
 from .team_runner import LocalTeamRunner
 
 
@@ -41,11 +47,9 @@ def _text(value: object, *, label: str) -> str:
 
 
 def _domain(value: object) -> Domain:
-    if value not in {"python", "systemverilog"}:
-        raise EngineeringError("domain must be python or systemverilog")
-    if value == "python":
-        return "python"
-    return "systemverilog"
+    if value not in {"python", "c", "verilog", "systemverilog"}:
+        raise EngineeringError("domain must be python, c, verilog or systemverilog")
+    return value
 
 
 def _engine(value: object) -> Engine:
@@ -63,25 +67,82 @@ def _boolean(value: object, *, label: str) -> bool:
 
 
 def _candidate(value: object) -> ServingCandidate:
-    candidate_value = _object(value, label="candidate")
-    return ServingCandidate(
-        engine=_engine(candidate_value.get("engine")),
-        endpoint=_text(candidate_value.get("endpoint"), label="candidate.endpoint"),
-        model=_text(candidate_value.get("model"), label="candidate.model"),
-        revision=_text(candidate_value.get("revision"), label="candidate.revision"),
-        quantization=_text(candidate_value.get("quantization"), label="candidate.quantization"),
-        kernel=_text(candidate_value.get("kernel"), label="candidate.kernel"),
-        prefix_caching=_boolean(
-            candidate_value.get("prefix_caching"), label="candidate.prefix_caching"
-        ),
-        chunked_prefill=_boolean(
-            candidate_value.get("chunked_prefill"), label="candidate.chunked_prefill"
-        ),
-        cuda_graph_mode=_text(
-            candidate_value.get("cuda_graph_mode"), label="candidate.cuda_graph_mode"
-        ),
-        scheduler=_text(candidate_value.get("scheduler"), label="candidate.scheduler"),
+    try:
+        return serving_candidate_from_json(value)
+    except ValueError as exc:
+        raise EngineeringError(str(exc)) from exc
+
+
+def _routing(value: object, *, task_id: str, domain: Domain) -> RoutingTaskMetadata:
+    raw = _object(value, label="routing_metadata")
+    required = {
+        "experiment_arm",
+        "task_kind",
+        "rtl_scope",
+        "worker_eligible",
+        "editable_sources",
+        "module_count",
+        "synthesizable",
+        "explicit_ports",
+        "cycle_behavior_specified",
+        "deterministic_verification",
+        "unresolved_architecture",
+    }
+    if set(raw) != required:
+        raise EngineeringError("routing_metadata keys are incomplete or unexpected")
+    task_kind = raw.get("task_kind")
+    if task_kind not in {"implementation", "repair", "integration"}:
+        raise EngineeringError("routing_metadata.task_kind is invalid")
+    rtl_scope = raw.get("rtl_scope")
+    if rtl_scope not in {
+        "bounded_module",
+        "multi_file_subsystem",
+        "protocol_integration",
+        "software_rtl_codesign",
+        "cdc_architecture",
+        "uvm",
+        "unresolved_architecture",
+        "not_rtl",
+    }:
+        raise EngineeringError("routing_metadata.rtl_scope is invalid")
+    editable = raw.get("editable_sources")
+    if not isinstance(editable, list) or not all(isinstance(item, str) for item in editable):
+        raise EngineeringError("routing_metadata.editable_sources must be strings")
+    module_count = raw.get("module_count")
+    if not isinstance(module_count, int) or isinstance(module_count, bool) or module_count < 0:
+        raise EngineeringError("routing_metadata.module_count must be non-negative")
+    flags: dict[str, bool] = {}
+    for key in (
+        "worker_eligible",
+        "synthesizable",
+        "explicit_ports",
+        "cycle_behavior_specified",
+        "deterministic_verification",
+        "unresolved_architecture",
+    ):
+        item = raw.get(key)
+        if not isinstance(item, bool):
+            raise EngineeringError(f"routing_metadata.{key} must be boolean")
+        flags[key] = item
+    metadata = RoutingTaskMetadata(
+        task_id=task_id,
+        experiment_arm=_text(raw.get("experiment_arm"), label="experiment_arm"),
+        domain=domain,
+        task_kind=task_kind,
+        rtl_scope=rtl_scope,
+        worker_eligible=flags["worker_eligible"],
+        editable_sources=tuple(editable),
+        module_count=module_count,
+        synthesizable=flags["synthesizable"],
+        explicit_ports=flags["explicit_ports"],
+        cycle_behavior_specified=flags["cycle_behavior_specified"],
+        deterministic_verification=flags["deterministic_verification"],
+        unresolved_architecture=flags["unresolved_architecture"],
     )
+    eligibility = assess_rtl_worker_eligibility(metadata)
+    if metadata.worker_eligible != eligibility.eligible:
+        raise EngineeringError(f"routing_metadata violates policy: {eligibility.reason}")
+    return metadata
 
 
 def tool_definitions() -> list[JsonObject]:
@@ -89,6 +150,8 @@ def tool_definitions() -> list[JsonObject]:
         "normalize_software_task",
         "normalize_python_task",
         "normalize_systemverilog_task",
+        "normalize_c_task",
+        "normalize_verilog_task",
         "research_task",
         "implement_task",
         "verify_patch",
@@ -96,6 +159,7 @@ def tool_definitions() -> list[JsonObject]:
         "run_tests",
         "run_python_quality_gates",
         "run_eda_flow",
+        "run_c_quality_gates",
         "reference_status",
         "benchmark_local_models",
         "run_paired_quality_benchmark",
@@ -131,12 +195,18 @@ class McpService:
             "normalize_software_task",
             "normalize_python_task",
             "normalize_systemverilog_task",
+            "normalize_c_task",
+            "normalize_verilog_task",
         }:
             default_domain = (
                 "python"
                 if name == "normalize_python_task"
                 else "systemverilog"
                 if name == "normalize_systemverilog_task"
+                else "c"
+                if name == "normalize_c_task"
+                else "verilog"
+                if name == "normalize_verilog_task"
                 else None
             )
             domain = _domain(arguments.get("domain", default_domain))
@@ -190,8 +260,34 @@ class McpService:
             candidate_value = arguments.get("candidate")
             query_value = arguments.get("query")
             if candidate_value is not None and isinstance(query_value, str) and query_value:
+                main_candidate = _candidate(candidate_value)
+                worker_value = arguments.get("rtl_worker_candidate")
+                routing_value = arguments.get("routing_metadata")
+                worker = _candidate(worker_value) if worker_value is not None else None
+                if worker is not None and routing_value is None:
+                    raise EngineeringError(
+                        "rtl_worker_candidate requires deterministic routing_metadata"
+                    )
+                metadata = (
+                    _routing(
+                        routing_value,
+                        task_id=task.task_id,
+                        domain=task.domain,
+                    )
+                    if routing_value is not None
+                    else None
+                )
+                model_configuration = DualModelConfiguration(main=main_candidate, rtl_worker=worker)
                 return LocalTeamRunner(
-                    self.repository_root, self.project_root, _candidate(candidate_value)
+                    self.repository_root,
+                    self.project_root,
+                    main_candidate,
+                    rtl_worker_candidate=worker,
+                    dual_model_configuration=model_configuration,
+                    routing_metadata=metadata,
+                    experiment_arm=metadata.experiment_arm
+                    if metadata is not None
+                    else "single_model",
                 ).run(task.task_id, query=query_value)
             return {
                 "status": "MODEL_REQUIRED",
@@ -214,7 +310,22 @@ class McpService:
                 raise EngineeringError("top_module must be a string")
             if testbench is not None and not isinstance(testbench, str):
                 raise EngineeringError("testbench must be a string")
-            return self.runner.run_eda_flow(list(files), top_module=top_module, testbench=testbench)
+            language = arguments.get("language", "systemverilog")
+            if language not in {"verilog", "systemverilog"}:
+                raise EngineeringError("language must be verilog or systemverilog")
+            require_verilator_simulation = arguments.get("require_verilator_simulation", False)
+            if not isinstance(require_verilator_simulation, bool):
+                raise EngineeringError("require_verilator_simulation must be boolean")
+            return self.runner.run_eda_flow(
+                list(files),
+                top_module=top_module,
+                testbench=testbench,
+                language=language,
+                require_verilator_simulation=require_verilator_simulation,
+            )
+        if name == "run_c_quality_gates":
+            fixture = _text(arguments.get("fixture"), label="fixture")
+            return self.runner.run_c_quality_gates(fixture)
         if name == "review_patch":
             task_id = _text(arguments.get("task_id"), label="task_id")
             task = AgentTaskStore(self.project_root).load(task_id)

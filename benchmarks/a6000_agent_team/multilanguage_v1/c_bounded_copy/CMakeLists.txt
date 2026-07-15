@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.16)
+project(c_bounded_copy C)
+enable_testing()
+add_executable(test_public bounded_copy.c test_public.c)
+add_test(NAME public COMMAND test_public)

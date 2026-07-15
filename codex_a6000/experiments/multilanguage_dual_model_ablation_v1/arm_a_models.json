@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "main": {
+    "engine": "vllm",
+    "endpoint": "http://127.0.0.1:8101",
+    "model": "/home/giando/work/laplace/.models/Qwen2.5-Coder-32B-Instruct-AWQ",
+    "model_path": "/home/giando/work/laplace/.models/Qwen2.5-Coder-32B-Instruct-AWQ",
+    "revision": "1ed0a6145da0ce550c628e8e8b678f51e695995d",
+    "quantization": "AWQ W4A16 group_size=128 zero_point=true",
+    "kernel": "vLLM AWQ-Marlin",
+    "prefix_caching": true,
+    "chunked_prefill": true,
+    "cuda_graph_mode": "configured_by_server",
+    "scheduler": "continuous_batching",
+    "context_tokens": 32768,
+    "max_output_tokens": 4096,
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "seed": 0,
+    "request_timeout_seconds": 600
+  },
+  "rtl_worker": null,
+  "worker_contract_retries": 1,
+  "worker_response_retries": 1,
+  "fallback_to_main": true
+}

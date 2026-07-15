@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.16)
+project(c_protocol_fsm C)
+enable_testing()
+add_executable(test_public protocol_fsm.c test_public.c)
+add_test(NAME public COMMAND test_public)

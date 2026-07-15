@@ -16,7 +16,7 @@ import uuid
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 from .engineering import (
     AgentTask,
@@ -33,8 +33,17 @@ from .engineering import (
     resolve_shared_reference_root,
     retrieve_engineering_evidence,
 )
-from .inference import ServingCandidate, backend_for
-from .llm import LocalGenerationBackend, ModelRequired
+from .inference import ServingCandidate
+from .llm import ModelRequired
+from .model_routing import (
+    AuditedModelCaller,
+    DualModelConfiguration,
+    ModelRole,
+    RoleRouter,
+    RoutedCall,
+    RoutingTaskMetadata,
+    assess_rtl_worker_eligibility,
+)
 from .repair_protocol import (
     StructuredOutputError,
     build_local_patch,
@@ -42,6 +51,12 @@ from .repair_protocol import (
     parse_replacement_plan,
     parse_reviewer_verdict,
     source_state,
+)
+from .rtl_contract import (
+    RtlWorkerContract,
+    parse_rtl_worker_contract,
+    rtl_contract_prompt,
+    rtl_worker_prompt,
 )
 
 
@@ -70,6 +85,7 @@ class TeamWorkflowOptions:
     role_mode: Literal["five_role", "direct"] = "five_role"
     adversarial_verification: bool = True
     reviewer_invariants: bool = True
+    required_tools: tuple[str, ...] = ()
 
 
 def _run_git(
@@ -133,7 +149,7 @@ class WorktreeManager:
 
 
 def _allowed_paths(task: AgentTask) -> list[str]:
-    key = "allowed_paths" if task.domain == "python" else "files_allowed_to_change"
+    key = "allowed_paths" if task.domain in {"python", "c"} else "files_allowed_to_change"
     raw = task.specification.get(key)
     if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
         raise EngineeringError(f"Task has no valid {key}")
@@ -226,6 +242,10 @@ class LocalTeamRunner:
         project_root: Path,
         candidate: ServingCandidate,
         *,
+        rtl_worker_candidate: ServingCandidate | None = None,
+        dual_model_configuration: DualModelConfiguration | None = None,
+        routing_metadata: RoutingTaskMetadata | None = None,
+        experiment_arm: str = "single_model",
         options: TeamWorkflowOptions | None = None,
         shared_reference_root: Path | None = None,
     ) -> None:
@@ -233,6 +253,20 @@ class LocalTeamRunner:
         self.project_root = project_root.resolve()
         self.store = AgentTaskStore(self.project_root)
         self.candidate = candidate
+        if dual_model_configuration is not None and dual_model_configuration.main != candidate:
+            raise EngineeringError("Dual-model main profile must match the runner candidate")
+        if (
+            dual_model_configuration is not None
+            and rtl_worker_candidate is not None
+            and dual_model_configuration.rtl_worker != rtl_worker_candidate
+        ):
+            raise EngineeringError("Dual-model worker profiles disagree")
+        self.model_configuration = dual_model_configuration or DualModelConfiguration(
+            main=candidate, rtl_worker=rtl_worker_candidate
+        )
+        self.rtl_worker_candidate = self.model_configuration.rtl_worker
+        self.routing_metadata = routing_metadata
+        self.experiment_arm = experiment_arm
         self.options = options or TeamWorkflowOptions()
         self.log_root = self.project_root / "Outputs" / "AgentTeam" / "team_logs"
         self.shared_reference_root = resolve_shared_reference_root(shared_reference_root)
@@ -240,9 +274,17 @@ class LocalTeamRunner:
     def _transition(self, task: AgentTask, target: TaskState, note: str) -> AgentTask:
         return self.store.transition(task.task_id, target, role="supervisor", note=note)
 
-    def _role_generation(self, backend: LocalGenerationBackend, prompt: str) -> JsonObject:
+    def _role_generation(
+        self,
+        caller: AuditedModelCaller,
+        task_metadata: RoutingTaskMetadata,
+        role: ModelRole,
+        prompt: str,
+        validator: Callable[[str], object] | None = None,
+    ) -> JsonObject:
         """Record a real local-model role contribution without granting it tool authority."""
-        result = backend.generate(prompt, context_tokens=8192)
+        call = caller.generate(prompt, role=role, metadata=task_metadata, validator=validator)
+        result = call.result
         return {
             "model": result.model,
             "status": result.status,
@@ -250,6 +292,11 @@ class LocalTeamRunner:
             "ttft_seconds": result.ttft_seconds,
             "prompt_tokens": result.prompt_tokens,
             "completion_tokens": result.completion_tokens,
+            "generation_seconds": call.generation_seconds,
+            "response_valid": call.response_valid,
+            "validation_error": call.validation_error,
+            "routing": call.decision.to_json(),
+            "audit_path": call.audit_path,
         }
 
     @staticmethod
@@ -272,6 +319,15 @@ class LocalTeamRunner:
                 "coverage_pytest",
                 "bandit",
             ]
+        elif task.domain == "c":
+            checks = [
+                "self_checking_public_unit_tests",
+                "gcc_or_clang_warnings",
+                "cmake_build",
+                "ctest",
+                "address_sanitizer",
+                "undefined_behavior_sanitizer",
+            ]
         else:
             checks = [
                 "public_self_checking_simulation",
@@ -285,7 +341,9 @@ class LocalTeamRunner:
 
     @staticmethod
     def _current_source_context(
-        worktree: Worktree, allowed_paths: list[str], domain: Literal["python", "systemverilog"]
+        worktree: Worktree,
+        allowed_paths: list[str],
+        domain: Literal["python", "c", "verilog", "systemverilog"],
     ) -> JsonObject:
         sources = source_state(worktree.root, allowed_paths, domain)
         fingerprint = hashlib.sha256(
@@ -528,6 +586,24 @@ with sqlite3.connect(':memory:') as connection:
             worktree.root,
             worktree.root / _safe_relative(_allowed_paths(task)[0], label="RTL source"),
         )
+        suffix = ".v" if task.domain == "verilog" else ".sv"
+        generic = source.parent / f"tb_adversarial{suffix}"
+        if generic.is_file():
+            report = runner.run_eda_flow(
+                [str(source.relative_to(worktree.root))],
+                top_module="tb_adversarial",
+                testbench=str(generic.relative_to(worktree.root)),
+                language="verilog" if task.domain == "verilog" else "systemverilog",
+                require_verilator_simulation=task.domain == "systemverilog",
+                required_tools=self.options.required_tools,
+                timeout_seconds=60,
+            )
+            return {
+                "tool": f"adversarial_{task.domain}",
+                "status": "PASS" if report.get("passed") is True else "FAILED",
+                "flow": report,
+                "invariants": self._acceptance_matrix(task),
+            }
         testbench_root = self.log_root / "adversarial"
         testbench_root.mkdir(parents=True, exist_ok=True)
         testbench = testbench_root / f"{task.task_id}_{uuid.uuid4().hex}.sv"
@@ -629,7 +705,13 @@ end endmodule
             "invariants": self._acceptance_matrix(task),
         }
 
-    def _prepare(self, task: AgentTask, query: str, backend: LocalGenerationBackend) -> AgentTask:
+    def _prepare(
+        self,
+        task: AgentTask,
+        query: str,
+        caller: AuditedModelCaller,
+        task_metadata: RoutingTaskMetadata,
+    ) -> AgentTask:
         if task.state == "request":
             task = self._transition(task, "requirements", "Task schema accepted")
         if task.state == "requirements":
@@ -639,7 +721,9 @@ end endmodule
             }
             if self.options.role_mode == "five_role":
                 supervisor_plan = self._role_generation(
-                    backend,
+                    caller,
+                    task_metadata,
+                    "planning_supervision",
                     "You are the Laplace supervisor. Produce an interface-first implementation plan, "
                     "risk list, explicit acceptance matrix, and negative-path test strategy. Cover "
                     "invariants, errors, async lifecycle/transactions for Python, or microarchitecture, "
@@ -673,7 +757,9 @@ end endmodule
             )
             if self.options.role_mode == "five_role":
                 test_strategy = self._role_generation(
-                    backend,
+                    caller,
+                    task_metadata,
+                    "planning_supervision",
                     "You are the Laplace implementer before editing production code. Produce an "
                     "executable-test strategy covering every acceptance criterion, negative path and "
                     "boundary. For SystemVerilog include reset, stalls/backpressure, simultaneous events "
@@ -707,7 +793,9 @@ end endmodule
             }
             if self.options.role_mode == "five_role":
                 researcher_summary = self._role_generation(
-                    backend,
+                    caller,
+                    task_metadata,
+                    "retrieval_interpretation",
                     "You are the Laplace researcher. Summarize the following precedence-ordered "
                     "evidence. Project-local conventions outrank references. Identify only information "
                     "relevant to interface invariants, error cases, lifecycle/transactions, or RTL "
@@ -729,14 +817,23 @@ end endmodule
         defect_report: JsonObject | None,
         current_sources: JsonObject,
     ) -> str:
-        domain_requirements = (
-            "For Python, preserve public interfaces, use current Pydantic v2 APIs, reject forbidden "
-            "coercion and extra fields, preserve specified domain exceptions, and maintain strict types."
-            if task.domain == "python"
-            else "For SystemVerilog, preserve interfaces, support simultaneous handshakes, independent "
-            "AXI channels, WSTRB and W1C semantics where specified, stable stalled payloads, reset behavior, "
-            "synthesis, simulation, and warning-clean lint."
-        )
+        if task.domain == "python":
+            domain_requirements = (
+                "For Python, preserve public interfaces, use current Pydantic v2 APIs, reject forbidden "
+                "coercion and extra fields, preserve specified domain exceptions, and maintain strict types."
+            )
+        elif task.domain == "c":
+            domain_requirements = (
+                "For C11, preserve public headers and ownership contracts, validate sizes before arithmetic, "
+                "avoid undefined behavior, release every acquired resource on every path, and remain warning- "
+                "and sanitizer-clean with the committed CMake tests."
+            )
+        else:
+            domain_requirements = (
+                f"For {task.domain}, preserve ports, implement the explicit microarchitecture and cycle "
+                "contract, support simultaneous handshakes and stable stalled payloads, and remain portable "
+                "across lint, executable simulation, and synthesis."
+            )
         repair = (
             "No prior defect report exists."
             if defect_report is None
@@ -748,7 +845,7 @@ end endmodule
             "replacements": [
                 {
                     "path": "exact allowed path",
-                    "language": "python or systemverilog",
+                    "language": "python, c, verilog, or systemverilog",
                     "kind": "source or testbench",
                     "expected_sha256": "64 lowercase hex from current source state",
                     "content": "complete replacement file text",
@@ -841,6 +938,239 @@ end endmodule
             "worktree": str(worktree.root),
         }
 
+    def _effective_routing_metadata(self, task: AgentTask) -> RoutingTaskMetadata:
+        metadata = self.routing_metadata
+        if metadata is None:
+            return RoutingTaskMetadata.single_model(
+                task_id=task.task_id,
+                experiment_arm=self.experiment_arm,
+                domain=task.domain,
+            )
+        if metadata.task_id != task.task_id or metadata.domain != task.domain:
+            raise EngineeringError("Routing metadata does not match the persisted task")
+        if metadata.experiment_arm != self.experiment_arm:
+            raise EngineeringError("Routing metadata experiment arm does not match the run")
+        return metadata
+
+    @staticmethod
+    def _replacement_validator(
+        *,
+        worktree: Worktree,
+        allowed_paths: list[str],
+        domain: Literal["python", "c", "verilog", "systemverilog"],
+    ) -> Callable[[str], None]:
+        def validate(model_text: str) -> None:
+            parse_replacement_plan(
+                model_text,
+                root=worktree.root,
+                allowed_paths=allowed_paths,
+                domain=domain,
+            )
+
+        return validate
+
+    def _worker_contract(
+        self,
+        caller: AuditedModelCaller,
+        task: AgentTask,
+        metadata: RoutingTaskMetadata,
+        worktree: Worktree,
+        current_sources: JsonObject,
+        latest_defect: JsonObject | None,
+    ) -> tuple[RtlWorkerContract | None, str | None]:
+        editable_path = metadata.editable_sources[0]
+        states = current_sources.get("current_worktree_sources")
+        source_record = (
+            next(
+                (
+                    item
+                    for item in states
+                    if isinstance(item, dict) and item.get("path") == editable_path
+                ),
+                None,
+            )
+            if isinstance(states, list)
+            else None
+        )
+        if not isinstance(source_record, dict):
+            return None, "worker editable source is absent from the current source state"
+
+        parsed: RtlWorkerContract | None = None
+
+        def validate_contract(model_text: str) -> None:
+            nonlocal parsed
+            parsed = parse_rtl_worker_contract(
+                model_text,
+                root=worktree.root,
+                task_id=task.task_id,
+                language=task.domain,
+                editable_path=editable_path,
+                require_diagnostics=latest_defect is not None,
+            )
+
+        failures: list[str] = []
+        for retry in range(caller.router.configuration.worker_contract_retries + 1):
+            call = caller.generate(
+                rtl_contract_prompt(
+                    task_specification=task.specification,
+                    current_source=dict(source_record),
+                    editable_path=editable_path,
+                    language="verilog" if task.domain == "verilog" else "systemverilog",
+                    defect_report=latest_defect,
+                ),
+                role="rtl_contract_generation",
+                metadata=metadata,
+                retry_index=retry,
+                validator=validate_contract,
+            )
+            if call.response_valid and parsed is not None:
+                self._append_artifact_history(
+                    task.task_id,
+                    role="implementer",
+                    name="implementation_report",
+                    entry={
+                        "status": "RTL_WORKER_CONTRACT_ACCEPTED",
+                        "contract": parsed.to_json(),
+                        "routing": call.decision.to_json(),
+                        "audit_path": call.audit_path,
+                        "retry_index": retry,
+                    },
+                )
+                return parsed, None
+            failures.append(call.validation_error or "invalid RTL contract")
+        reason = "; ".join(failures)
+        self._append_artifact_history(
+            task.task_id,
+            role="implementer",
+            name="implementation_report",
+            entry={
+                "status": "RTL_WORKER_CONTRACT_REJECTED",
+                "error": reason,
+                "fallback": "main_model",
+            },
+        )
+        return None, reason
+
+    def _generate_implementation_call(
+        self,
+        caller: AuditedModelCaller,
+        task: AgentTask,
+        metadata: RoutingTaskMetadata,
+        worktree: Worktree,
+        evidence: JsonObject,
+        current_sources: JsonObject,
+        latest_defect: JsonObject | None,
+        response_retry: int,
+    ) -> RoutedCall:
+        allowed = _allowed_paths(task)
+        eligibility = assess_rtl_worker_eligibility(metadata)
+        can_use_worker = eligibility.eligible and self.rtl_worker_candidate is not None
+        if not can_use_worker:
+            return caller.generate(
+                self._prompt(
+                    task,
+                    evidence,
+                    defect_report=latest_defect,
+                    current_sources=current_sources,
+                ),
+                role="general_implementation",
+                metadata=metadata,
+                retry_index=response_retry,
+                validator=self._replacement_validator(
+                    worktree=worktree, allowed_paths=allowed, domain=task.domain
+                ),
+            )
+
+        contract, contract_error = self._worker_contract(
+            caller,
+            task,
+            metadata,
+            worktree,
+            current_sources,
+            latest_defect,
+        )
+        worker_error = contract_error
+        if contract is not None:
+            role: ModelRole = (
+                "bounded_rtl_repair" if latest_defect is not None else "bounded_rtl_implementation"
+            )
+            for retry in range(caller.router.configuration.worker_response_retries + 1):
+                try:
+                    worker_call = caller.generate(
+                        rtl_worker_prompt(contract),
+                        role=role,
+                        metadata=metadata,
+                        retry_index=retry,
+                        validator=self._replacement_validator(
+                            worktree=worktree,
+                            allowed_paths=[contract.editable_path],
+                            domain=task.domain,
+                        ),
+                    )
+                except ModelRequired as exc:
+                    worker_error = f"worker endpoint failed during generation: {exc}"
+                    break
+                if worker_call.response_valid:
+                    return worker_call
+                worker_error = worker_call.validation_error or "invalid worker replacement"
+        return caller.generate(
+            self._prompt(
+                task,
+                evidence,
+                defect_report=latest_defect,
+                current_sources=current_sources,
+            ),
+            role="bounded_rtl_repair"
+            if latest_defect is not None
+            else "bounded_rtl_implementation",
+            metadata=metadata,
+            retry_index=response_retry,
+            fallback_reason=worker_error or "worker contract unavailable",
+            validator=self._replacement_validator(
+                worktree=worktree, allowed_paths=allowed, domain=task.domain
+            ),
+        )
+
+    @staticmethod
+    def _public_rtl_testbench(
+        worktree: Worktree, task: AgentTask, allowed_paths: list[str]
+    ) -> str | None:
+        verification = task.specification.get("verification")
+        if isinstance(verification, dict):
+            raw_tests = verification.get("tests")
+            if isinstance(raw_tests, list):
+                for raw in raw_tests:
+                    if not isinstance(raw, str) or Path(raw).suffix.lower() not in {".v", ".sv"}:
+                        continue
+                    candidate = _inside(
+                        worktree.root,
+                        worktree.root / _safe_relative(raw, label="public RTL testbench"),
+                    )
+                    if candidate.is_file():
+                        return raw
+        allowed_testbench = next(
+            (
+                path
+                for path in allowed_paths
+                if Path(path).name.startswith("tb_") and "adversarial" not in Path(path).stem
+            ),
+            None,
+        )
+        if allowed_testbench is not None:
+            return allowed_testbench
+        source = _inside(
+            worktree.root,
+            worktree.root / _safe_relative(allowed_paths[0], label="RTL source"),
+        )
+        candidates = sorted(source.parent.glob("tb_public.*"))
+        if not candidates:
+            candidates = sorted(
+                path
+                for path in source.parent.glob("tb_*.*")
+                if "adversarial" not in path.stem and "held" not in path.stem
+            )
+        return str(candidates[0].relative_to(worktree.root)) if candidates else None
+
     def run(self, task_id: str, *, query: str) -> JsonObject:
         task = self.store.load(task_id)
         cuda = collect_cuda_evidence(LocalToolRunner(self.repository_root, self.log_root))
@@ -849,9 +1179,24 @@ end endmodule
                 task, "blocked", "BLOCKED_GPU: local A6000 CUDA inference is unavailable"
             )
             return {"status": "BLOCKED_GPU", "task": task.to_json(), "cuda_evidence": cuda}
-        backend = backend_for(self.candidate)
-        health = backend.health()
-        if health.get("status") != "AVAILABLE":
+        task_metadata = self._effective_routing_metadata(task)
+        configuration = self.model_configuration
+        caller = AuditedModelCaller(RoleRouter(configuration), self.log_root / "model_calls")
+        worker_needed = (
+            assess_rtl_worker_eligibility(task_metadata).eligible
+            and self.rtl_worker_candidate is not None
+        )
+        health = caller.health(include_worker=worker_needed)
+        main_health = health.get("main")
+        worker_health = health.get("rtl_worker")
+        healthy = isinstance(main_health, dict) and main_health.get("status") == "AVAILABLE"
+        if worker_needed:
+            healthy = (
+                healthy
+                and isinstance(worker_health, dict)
+                and worker_health.get("status") == "AVAILABLE"
+            )
+        if not healthy:
             task = self._transition(
                 task, "blocked", "MODEL_REQUIRED: local serving endpoint is unavailable"
             )
@@ -862,7 +1207,7 @@ end endmodule
                 "cuda_evidence": cuda,
             }
         try:
-            task = self._prepare(task, query, backend)
+            task = self._prepare(task, query, caller, task_metadata)
         except ReferenceEvidenceError as exc:
             task = self.store.load(task.task_id)
             task = self._transition(task, "blocked", str(exc))
@@ -903,15 +1248,17 @@ end endmodule
             current_sources = self._current_source_context(worktree, allowed, task.domain)
             patch_applied = False
             for response_retry in range(invalid_response_limit):
-                generated = backend.generate(
-                    self._prompt(
-                        task,
-                        evidence_raw,
-                        defect_report=latest_defect,
-                        current_sources=current_sources,
-                    ),
-                    context_tokens=8192,
+                generated_call = self._generate_implementation_call(
+                    caller,
+                    task,
+                    task_metadata,
+                    worktree,
+                    evidence_raw,
+                    current_sources,
+                    latest_defect,
+                    response_retry,
                 )
+                generated = generated_call.result
                 response_entry: JsonObject = {
                     "status": "MODEL_OUTPUT_RECEIVED",
                     "meaningful_attempt": meaningful_attempt,
@@ -920,6 +1267,11 @@ end endmodule
                     "ttft_seconds": generated.ttft_seconds,
                     "prompt_tokens": generated.prompt_tokens,
                     "completion_tokens": generated.completion_tokens,
+                    "generation_seconds": generated_call.generation_seconds,
+                    "response_valid": generated_call.response_valid,
+                    "validation_error": generated_call.validation_error,
+                    "routing": generated_call.decision.to_json(),
+                    "model_call_audit": generated_call.audit_path,
                     "source_state_fingerprint": current_sources.get("source_state_fingerprint"),
                     "model_output": generated.text,
                 }
@@ -999,15 +1351,26 @@ end endmodule
                     if self.options.adversarial_verification
                     else {"tool": "adversarial_python", "status": "SKIPPED_BY_ABLATION"}
                 )
-            else:
-                testbench = next(
-                    (path for path in allowed if Path(path).stem.startswith("tb_")), None
+            elif task.domain == "c":
+                fixture = str(Path(allowed[0]).parent)
+                verification = runner.run_c_quality_gates(
+                    fixture, required_tools=self.options.required_tools
                 )
+                adversarial = {
+                    "tool": "c_negative_paths_and_sanitizers",
+                    "status": "PASS" if verification.get("passed") is True else "FAILED",
+                    "evidence": verification.get("report_path"),
+                }
+            else:
+                testbench = self._public_rtl_testbench(worktree, task, allowed)
                 source_files = [path for path in allowed if path != testbench]
                 verification = runner.run_eda_flow(
                     source_files,
                     top_module=Path(source_files[0]).stem,
                     testbench=testbench,
+                    language="verilog" if task.domain == "verilog" else "systemverilog",
+                    require_verilator_simulation=task.domain == "systemverilog",
+                    required_tools=self.options.required_tools,
                 )
                 adversarial = (
                     self._run_systemverilog_adversarial_checks(runner, task, worktree)
@@ -1050,7 +1413,11 @@ end endmodule
                 reviewer_errors: list[str] = []
                 for reviewer_retry in range(2):
                     reviewer_contribution = self._role_generation(
-                        backend, self._review_prompt(task, evidence_raw, verification)
+                        caller,
+                        task_metadata,
+                        "review",
+                        self._review_prompt(task, evidence_raw, verification),
+                        validator=lambda text: parse_reviewer_verdict(text),
                     )
                     try:
                         parsed_verdict = parse_reviewer_verdict(

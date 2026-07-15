@@ -1,7 +1,9 @@
 .venv/
 .venv-vllm/
 .venv-vllm-cu124/
+.venv-quantization/
 .models/
+.tools/
 __pycache__/
 *.py[cod]
 .pytest_cache/

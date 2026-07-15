@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://laplace.local/schemas/verilog_task_spec.schema.json",
+  "title": "Synthesizable Verilog-2001 task specification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_id",
+    "objective",
+    "target",
+    "interfaces",
+    "clock_reset",
+    "functional_requirements",
+    "files_allowed_to_change",
+    "verification",
+    "deliverables",
+    "out_of_scope",
+    "blocking_questions"
+  ],
+  "properties": {
+    "task_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+    "objective": {"type": "string", "minLength": 10},
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class", "language", "toolchain"],
+      "properties": {
+        "class": {"enum": ["portable_rtl", "fpga", "asic"]},
+        "language": {"const": "Verilog-2001"},
+        "toolchain": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "technology_or_device": {"type": ["string", "null"]},
+        "frequency_mhz": {"type": ["number", "null"], "exclusiveMinimum": 0}
+      }
+    },
+    "parameters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "type", "default", "constraints"],
+        "properties": {
+          "name": {"type": "string"},
+          "type": {"type": "string"},
+          "default": {},
+          "constraints": {"type": "string"}
+        }
+      }
+    },
+    "interfaces": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "protocol", "direction", "signals", "ordering", "backpressure"],
+        "properties": {
+          "name": {"type": "string"},
+          "protocol": {"type": "string"},
+          "direction": {"enum": ["input", "output", "master", "slave", "bidirectional"]},
+          "signals": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+          "ordering": {"type": "string"},
+          "backpressure": {"type": "string"}
+        }
+      }
+    },
+    "clock_reset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["clock_domains", "reset_semantics", "cdc_rdc_assumptions"],
+      "properties": {
+        "clock_domains": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "reset_semantics": {"type": "string", "minLength": 1},
+        "cdc_rdc_assumptions": {"type": "string", "minLength": 1}
+      }
+    },
+    "functional_requirements": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "performance_requirements": {"type": "object"},
+    "error_and_corner_behavior": {"type": "array", "items": {"type": "string"}},
+    "coding_constraints": {"type": "array", "items": {"type": "string"}},
+    "files_allowed_to_change": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "references": {"type": "array", "items": {"type": "object"}},
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["self_checking", "tests", "assertions", "commands", "acceptance_criteria"],
+      "properties": {
+        "self_checking": {"const": true},
+        "tests": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "assertions": {"type": "array", "items": {"type": "string"}},
+        "commands": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "acceptance_criteria": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+      }
+    },
+    "deliverables": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "out_of_scope": {"type": "array", "items": {"type": "string"}},
+    "assumptions": {"type": "array", "items": {"type": "string"}},
+    "blocking_questions": {"type": "array", "items": {"type": "string"}}
+  }
+}

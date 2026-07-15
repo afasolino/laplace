@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 from .engineering import JsonObject, LocalToolRunner, collect_cuda_evidence
 from .llm import LocalGenerationBackend, ModelRequired, SglangProvider, VllmProvider
@@ -30,12 +31,37 @@ class ServingCandidate:
     chunked_prefill: bool
     cuda_graph_mode: str
     scheduler: str
+    model_path: str | None = None
+    context_tokens: int = 8192
+    max_output_tokens: int = 2048
+    temperature: float = 0.0
+    top_p: float = 1.0
+    seed: int | None = 0
+    request_timeout_seconds: int = 120
+
+    def __post_init__(self) -> None:
+        parsed = urlparse(self.endpoint)
+        if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("Serving endpoints must use loopback-only HTTP")
+        if self.model_path is not None and not self.model_path.strip():
+            raise ValueError("Serving model_path must be non-empty text or null")
+        if self.context_tokens < 1024 or self.context_tokens > 262_144:
+            raise ValueError("Serving context_tokens must be between 1024 and 262144")
+        if self.max_output_tokens < 1 or self.max_output_tokens > 8192:
+            raise ValueError("Serving max_output_tokens must be between 1 and 8192")
+        if self.temperature < 0.0 or self.temperature > 2.0:
+            raise ValueError("Serving temperature must be between 0 and 2")
+        if self.top_p <= 0.0 or self.top_p > 1.0:
+            raise ValueError("Serving top_p must be greater than 0 and at most 1")
+        if self.request_timeout_seconds < 1 or self.request_timeout_seconds > 1800:
+            raise ValueError("Serving request timeout must be between 1 and 1800 seconds")
 
     def to_json(self) -> JsonObject:
         return {
             "engine": self.engine,
             "endpoint": self.endpoint,
             "model": self.model,
+            "model_path": self.model_path,
             "revision": self.revision,
             "quantization": self.quantization,
             "kernel": self.kernel,
@@ -43,13 +69,35 @@ class ServingCandidate:
             "chunked_prefill": self.chunked_prefill,
             "cuda_graph_mode": self.cuda_graph_mode,
             "scheduler": self.scheduler,
+            "context_tokens": self.context_tokens,
+            "max_output_tokens": self.max_output_tokens,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "seed": self.seed,
+            "request_timeout_seconds": self.request_timeout_seconds,
         }
 
 
 def backend_for(candidate: ServingCandidate) -> LocalGenerationBackend:
     if candidate.engine == "vllm":
-        return VllmProvider(candidate.endpoint, candidate.model)
-    return SglangProvider(candidate.endpoint, candidate.model)
+        return VllmProvider(
+            candidate.endpoint,
+            candidate.model,
+            max_tokens=candidate.max_output_tokens,
+            temperature=candidate.temperature,
+            top_p=candidate.top_p,
+            seed=candidate.seed,
+            timeout_seconds=candidate.request_timeout_seconds,
+        )
+    return SglangProvider(
+        candidate.endpoint,
+        candidate.model,
+        max_tokens=candidate.max_output_tokens,
+        temperature=candidate.temperature,
+        top_p=candidate.top_p,
+        seed=candidate.seed,
+        timeout_seconds=candidate.request_timeout_seconds,
+    )
 
 
 def _measure_once(backend: LocalGenerationBackend, prompt: str, context_tokens: int) -> JsonObject:
@@ -102,7 +150,7 @@ def _context_prompt(
     return best, best_count
 
 
-def _gpu_memory_snapshot(runner: LocalToolRunner) -> JsonObject:
+def gpu_memory_snapshot(runner: LocalToolRunner) -> JsonObject:
     """Capture an observed host GPU memory point without estimating peak VRAM."""
     result = runner.run(
         "cuda_probe",
@@ -225,7 +273,15 @@ def benchmark_local_candidate(
     if not prompt.strip():
         raise ValueError("Benchmark prompt must not be empty")
     if isinstance(backend, VllmProvider):
-        backend = VllmProvider(candidate.endpoint, candidate.model, max_tokens=256)
+        backend = VllmProvider(
+            candidate.endpoint,
+            candidate.model,
+            max_tokens=256,
+            temperature=candidate.temperature,
+            top_p=candidate.top_p,
+            seed=candidate.seed,
+            timeout_seconds=candidate.request_timeout_seconds,
+        )
     measurements: list[JsonObject] = []
     for context_tokens in contexts:
         if context_tokens < 8192 or context_tokens > 32768:
@@ -234,7 +290,7 @@ def benchmark_local_candidate(
         for workers in concurrency:
             if workers not in {1, 2, 4}:
                 raise ValueError("Concurrency must be one of 1, 2 or 4")
-            gpu_before = _gpu_memory_snapshot(runner)
+            gpu_before = gpu_memory_snapshot(runner)
             started = time.monotonic()
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = [
@@ -243,7 +299,7 @@ def benchmark_local_candidate(
                 ]
                 runs = [future.result(timeout=timeout_seconds) for future in futures]
             wall = time.monotonic() - started
-            gpu_after = _gpu_memory_snapshot(runner)
+            gpu_after = gpu_memory_snapshot(runner)
             output_rates = [item["output_tokens_per_second"] for item in runs]
             numeric_rates = [float(item) for item in output_rates if isinstance(item, (int, float))]
             ttfts = [item["ttft_seconds"] for item in runs]

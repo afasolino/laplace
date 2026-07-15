@@ -1,0 +1,3 @@
+# Direct input for the isolated, user-authorized CUDA serving environment.
+# Resolve and retain the hashed transitive lock before creating .venv-vllm.
+vllm==0.25.0

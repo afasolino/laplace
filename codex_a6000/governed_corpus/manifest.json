@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "release": "multilanguage-corpus-v1",
+  "repository": "local://laplace/codex_a6000/governed_corpus",
+  "licence_identifier": "MIT",
+  "licence_path": "codex_a6000/governed_corpus/LICENSE",
+  "licence_sha256": "ebf127df8468d0f60b3efa5d6eb5944502a5153d2fe9f7cad5f990b5450e3b9a",
+  "permitted_use": "reference_and_permissive_reuse_with_attribution",
+  "attribution": "Laplace contributors, multilanguage-corpus-v1",
+  "references": [
+    {
+      "reference_id": "laplace_c_engineering_cards_v1",
+      "domain": "c",
+      "files": [
+        {
+          "path": "codex_a6000/governed_corpus/c/c_portability_safety.md",
+          "selected_topic": "20_memory_integer_safety/laplace_cards",
+          "sha256": "acddd3bdc2404322002ee37e9d9b3cf47022ad1d9491bfb8d40dde0762dbe786",
+          "topics": [
+            "c11",
+            "ownership",
+            "lifetime",
+            "integer_conversions",
+            "undefined_behavior",
+            "error_handling",
+            "file_interfaces",
+            "sanitizers"
+          ]
+        },
+        {
+          "path": "codex_a6000/governed_corpus/c/c_checked_examples.c",
+          "selected_topic": "20_memory_integer_safety/laplace_examples",
+          "sha256": "d21fa2c6eff3ea15d7c18f0f6ae73506e3c1125518602c2b4c186931bef7ccd3",
+          "topics": [
+            "checked_arithmetic",
+            "bounded_buffers",
+            "allocation",
+            "cleanup",
+            "portable_c11"
+          ]
+        }
+      ]
+    },
+    {
+      "reference_id": "laplace_verilog2001_cards_v1",
+      "domain": "verilog",
+      "files": [
+        {
+          "path": "codex_a6000/governed_corpus/verilog/verilog2001_patterns.md",
+          "selected_topic": "10_rtl_patterns/laplace_cards",
+          "sha256": "1b10082567341e13248a549ff0e07b2afb4a8bcd5448464315e12de6a777d892",
+          "topics": [
+            "verilog_2001",
+            "sequential_logic",
+            "combinational_completeness",
+            "fifo",
+            "ready_valid",
+            "reset",
+            "iverilog",
+            "yosys"
+          ]
+        },
+        {
+          "path": "codex_a6000/governed_corpus/verilog/verilog2001_ready_valid.v",
+          "selected_topic": "20_handshake_storage/laplace_examples",
+          "sha256": "8b3f75a18618237de7c4ce26fe5ce2ecc521bc80ed2fec6c11a70e93f37023f2",
+          "topics": [
+            "verilog_2001",
+            "parameterized_module",
+            "ready_valid",
+            "elastic_buffer",
+            "synthesis"
+          ]
+        }
+      ]
+    }
+  ]
+}

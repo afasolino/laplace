@@ -1,0 +1,251 @@
+{
+  "release": "external-multilanguage-v1",
+  "schema_version": 1,
+  "sources": [
+    {
+      "attribution": "musl libc contributors, v1.2.5",
+      "domain": "c",
+      "files": [
+        {
+          "path": "codex_a6000/governed_corpus/external/musl_portable_c_v1_2_5/v1.2.5/selected/src/string/memmove.c",
+          "selected_topic": "20_memory_integer_safety/musl",
+          "sha256": "1304f9ddfc18594f5d9a84691892b9fdaf3be8ecc6d7f365c691abb138eaf74e",
+          "topics": [
+            "c11",
+            "bounded_memory",
+            "overlap",
+            "portable_library"
+          ]
+        },
+        {
+          "path": "codex_a6000/governed_corpus/external/musl_portable_c_v1_2_5/v1.2.5/selected/src/string/strnlen.c",
+          "selected_topic": "20_memory_integer_safety/musl",
+          "sha256": "3a72ef5250b314ca0d8ff0fed2f6aa10c8b2b26605806c759faf0d1a9b835a9e",
+          "topics": [
+            "c11",
+            "bounded_string",
+            "size_t",
+            "portable_library"
+          ]
+        },
+        {
+          "path": "codex_a6000/governed_corpus/external/musl_portable_c_v1_2_5/v1.2.5/selected/src/errno/strerror.c",
+          "selected_topic": "30_file_process_interfaces/musl",
+          "sha256": "b8f04516efae18ed1d474523e0c019229a957c791012ffe9283a5e11315e2a8d",
+          "topics": [
+            "c11",
+            "errno",
+            "error_handling",
+            "portable_library"
+          ]
+        }
+      ],
+      "licence_identifier": "MIT",
+      "licence_path": "codex_a6000/governed_corpus/external/musl_portable_c_v1_2_5/v1.2.5/LICENSE",
+      "licence_sha256": "f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af",
+      "permitted_use": "reference_and_permissive_reuse_with_attribution",
+      "reference_id": "musl_portable_c_v1_2_5",
+      "repository": "https://git.musl-libc.org/git/musl",
+      "resolved_commit": "0784374d561435f7c787a555aeab8ede699ed298",
+      "revision": "v1.2.5",
+      "revision_kind": "release"
+    },
+    {
+      "attribution": "LLVM Project, llvmorg-18.1.8",
+      "domain": "c",
+      "files": [
+        {
+          "path": "codex_a6000/governed_corpus/external/llvm_clang_safety_docs_18_1_8/llvmorg-18.1.8/selected/clang/docs/UsersManual.rst",
+          "selected_topic": "50_tooling_builds/clang",
+          "sha256": "70d93f9ef45f5d06ac7d135c325726dcc302c5573a9b1e6f1c26defdfca3ea70",
+          "topics": [
+            "c",
+            "clang",
+            "diagnostics",
+            "warnings"
+          ]
+        },
+        {
+          "path": "codex_a6000/governed_corpus/external/llvm_clang_safety_docs_18_1_8/llvmorg-18.1.8/selected/clang/docs/AddressSanitizer.rst",
+          "selected_topic": "50_tooling_builds/clang",
+          "sha256": "135fb15fd57864f2e4dcd84386fbdf1f0b0ac1d7daa1250930861c7c1a1ceb16",
+          "topics": [
+            "c",
+            "address_sanitizer",
+            "memory_lifetime",
+            "testing"
+          ]
+        },
+        {
+          "path": "codex_a6000/governed_corpus/external/llvm_clang_safety_docs_18_1_8/llvmorg-18.1.8/selected/clang/docs/UndefinedBehaviorSanitizer.rst",
+          "selected_topic": "50_tooling_builds/clang",
+          "sha256": "25cb70111d1614c01747ed6ba8b5252517298bcd9c69fafb8970b2c2988d7cd9",
+          "topics": [
+            "c",
+            "undefined_behavior",
+            "integer_overflow",
+            "testing"
+          ]
+        }
+      ],
+      "licence_identifier": "Apache-2.0 WITH LLVM-exception",
+      "licence_path": "codex_a6000/governed_corpus/external/llvm_clang_safety_docs_18_1_8/llvmorg-18.1.8/LICENSE",
+      "licence_sha256": "8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee",
+      "permitted_use": "tooling_documentation_reference",
+      "reference_id": "llvm_clang_safety_docs_18_1_8",
+      "repository": "https://github.com/llvm/llvm-project.git",
+      "resolved_commit": "3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff",
+      "revision": "llvmorg-18.1.8",
+      "revision_kind": "release"
+    },
+    {
+      "attribution": "Kitware and CMake contributors, v3.30.5",
+      "domain": "c",
+      "files": [
+        {
+          "path": "codex_a6000/governed_corpus/external/cmake_c_test_docs_v3_30_5/v3.30.5/selected/Help/guide/tutorial/index.rst",
+          "selected_topic": "50_tooling_builds/cmake",
+          "sha256": "454ed25bae4d1af6f46498ef3896c3f2fca6b947d2c13e055d7841caaf85676d",
+          "topics": [
+            "c",
+            "cmake",
+            "portable_build",
+            "targets"
+          ]
+        },
+        {
+          "path": "codex_a6000/governed_corpus/external/cmake_c_test_docs_v3_30_5/v3.30.5/selected/Help/manual/ctest.1.rst",
+          "selected_topic": "50_tooling_builds/cmake",
+          "sha256": "464fce9031627f0dad36abd4a9f270c6464c12f4a3a3c0233dda3f9f26c9cde0",
+          "topics": [
+            "c",
+            "ctest",
+            "unit_testing",
+            "portable_build"
+          ]
+        },
+        {
+          "path": "codex_a6000/governed_corpus/external/cmake_c_test_docs_v3_30_5/v3.30.5/selected/Help/command/add_executable.rst",
+          "selected_topic": "50_tooling_builds/cmake",
+          "sha256": "fd0c8d9d80d4c976fce3f53fe6df7454a1a4242208cc9f5b96c06c962710c8e3",
+          "topics": [
+            "c",
+            "cmake",
+            "executable",
+            "build"
+          ]
+        }
+      ],
+      "licence_identifier": "BSD-3-Clause",
+      "licence_path": "codex_a6000/governed_corpus/external/cmake_c_test_docs_v3_30_5/v3.30.5/LICENSE",
+      "licence_sha256": "0676e30827684487aa0ea8f72f01e9460a6320fa34a2888df0ad1dd3e8a06eb8",
+      "permitted_use": "tooling_documentation_reference",
+      "reference_id": "cmake_c_test_docs_v3_30_5",
+      "repository": "https://gitlab.kitware.com/cmake/cmake.git",
+      "resolved_commit": "9c4a0a9ff09735b847bbbc38caf6da7f6c7238f2",
+      "revision": "v3.30.5",
+      "revision_kind": "release"
+    },
+    {
+      "attribution": "lowRISC contributors, commit 9c15ff5dce23eef969e00ab3715153967419eadd",
+      "domain": "verilog",
+      "files": [
+        {
+          "path": "codex_a6000/governed_corpus/external/lowrisc_verilog_style_9c15ff5d/9c15ff5dce23eef969e00ab3715153967419eadd/selected/VerilogCodingStyle.md",
+          "selected_topic": "10_rtl_patterns/lowrisc_style",
+          "sha256": "f16c75f95ddca539c179057f9e6ea732574478d7000d8ddcf7787ecec1c79833",
+          "topics": [
+            "verilog",
+            "sequential_logic",
+            "combinational_completeness",
+            "reset",
+            "synthesis"
+          ]
+        }
+      ],
+      "licence_identifier": "CC-BY-4.0",
+      "licence_path": "codex_a6000/governed_corpus/external/lowrisc_verilog_style_9c15ff5d/9c15ff5dce23eef969e00ab3715153967419eadd/LICENSE",
+      "licence_sha256": "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411",
+      "permitted_use": "guidance_with_attribution",
+      "reference_id": "lowrisc_verilog_style_9c15ff5d",
+      "repository": "https://github.com/lowRISC/style-guides.git",
+      "resolved_commit": "9c15ff5dce23eef969e00ab3715153967419eadd",
+      "revision": "9c15ff5dce23eef969e00ab3715153967419eadd",
+      "revision_kind": "commit"
+    },
+    {
+      "attribution": "Icarus Verilog contributors, v12_0",
+      "domain": "verilog",
+      "files": [
+        {
+          "path": "codex_a6000/governed_corpus/external/iverilog_usage_docs_v12_0/v12_0/selected/Documentation/usage/index.rst",
+          "selected_topic": "40_tooling/iverilog",
+          "sha256": "422022bccaf2ce54dfb17e0f27fc21e436021a31261ae1180a40be939ede10d3",
+          "topics": [
+            "verilog_2001",
+            "iverilog",
+            "compile",
+            "simulation"
+          ]
+        },
+        {
+          "path": "codex_a6000/governed_corpus/external/iverilog_usage_docs_v12_0/v12_0/selected/Documentation/usage/command_line_flags.rst",
+          "selected_topic": "40_tooling/iverilog",
+          "sha256": "54a34ab3f2b9a7b7141694e3183c1a5e09ab192622cdc3c60c002a91facfd4f4",
+          "topics": [
+            "verilog_2001",
+            "iverilog",
+            "warnings",
+            "language_generation"
+          ]
+        }
+      ],
+      "licence_identifier": "GPL-2.0-or-later",
+      "licence_path": "codex_a6000/governed_corpus/external/iverilog_usage_docs_v12_0/v12_0/LICENSE",
+      "licence_sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643",
+      "permitted_use": "tooling_documentation_reference_only",
+      "reference_id": "iverilog_usage_docs_v12_0",
+      "repository": "https://github.com/steveicarus/iverilog.git",
+      "resolved_commit": "4fd5291632232fbe1ba49b2c26bb6b2bf1c6c9cf",
+      "revision": "v12_0",
+      "revision_kind": "release"
+    },
+    {
+      "attribution": "Yosys contributors, yosys-0.40",
+      "domain": "verilog",
+      "files": [
+        {
+          "path": "codex_a6000/governed_corpus/external/yosys_verilog_docs_v0_40/yosys-0.40/selected/docs/source/appendix/primer.rst",
+          "selected_topic": "40_tooling/yosys",
+          "sha256": "ff160ae5d0b7f89347b369fd38950e366804040df16b931944fd38f242ed5fe6",
+          "topics": [
+            "verilog_2001",
+            "synthesis",
+            "sequential_logic",
+            "memory_inference"
+          ]
+        },
+        {
+          "path": "codex_a6000/governed_corpus/external/yosys_verilog_docs_v0_40/yosys-0.40/selected/docs/source/yosys_internals/flow/verilog_frontend.rst",
+          "selected_topic": "40_tooling/yosys",
+          "sha256": "67bca11450bfba6ec4d0c2517c265fbf82c5a93f40412179cd6307de2bdd6d75",
+          "topics": [
+            "verilog_2001",
+            "yosys",
+            "frontend",
+            "synthesis_consistency"
+          ]
+        }
+      ],
+      "licence_identifier": "ISC",
+      "licence_path": "codex_a6000/governed_corpus/external/yosys_verilog_docs_v0_40/yosys-0.40/LICENSE",
+      "licence_sha256": "db2bf26b3486517bb1ee2fb90b253491238b442520a6f87bfb26c275e1c1ff88",
+      "permitted_use": "tooling_documentation_reference",
+      "reference_id": "yosys_verilog_docs_v0_40",
+      "repository": "https://github.com/YosysHQ/yosys.git",
+      "resolved_commit": "a1bb0255d654ffd0d8503577274f24b349a42995",
+      "revision": "yosys-0.40",
+      "revision_kind": "release"
+    }
+  ]
+}

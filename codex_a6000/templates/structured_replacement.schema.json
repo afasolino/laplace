@@ -16,7 +16,7 @@
         "required": ["path", "language", "kind", "expected_sha256", "content"],
         "properties": {
           "path": {"type": "string", "minLength": 1},
-          "language": {"enum": ["python", "systemverilog"]},
+          "language": {"enum": ["python", "c", "verilog", "systemverilog"]},
           "kind": {"enum": ["source", "testbench"]},
           "expected_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
           "content": {"type": "string", "minLength": 1}

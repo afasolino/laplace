@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://laplace.local/schemas/dual_model_configuration.schema.json",
+  "title": "Laplace local dual-model configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "main",
+    "rtl_worker",
+    "worker_contract_retries",
+    "worker_response_retries",
+    "fallback_to_main"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "main": {"$ref": "#/$defs/servingProfile"},
+    "rtl_worker": {"anyOf": [{"$ref": "#/$defs/servingProfile"}, {"type": "null"}]},
+    "worker_contract_retries": {"type": "integer", "minimum": 0, "maximum": 2},
+    "worker_response_retries": {"type": "integer", "minimum": 0, "maximum": 2},
+    "fallback_to_main": {"const": true}
+  },
+  "$defs": {
+    "servingProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "engine",
+        "endpoint",
+        "model",
+        "model_path",
+        "revision",
+        "quantization",
+        "kernel",
+        "prefix_caching",
+        "chunked_prefill",
+        "cuda_graph_mode",
+        "scheduler",
+        "context_tokens",
+        "max_output_tokens",
+        "temperature",
+        "top_p",
+        "seed",
+        "request_timeout_seconds"
+      ],
+      "properties": {
+        "engine": {"enum": ["vllm", "sglang"]},
+        "endpoint": {"type": "string", "pattern": "^http://(127\\.0\\.0\\.1|localhost|\\[::1\\]):[0-9]+$"},
+        "model": {"type": "string", "minLength": 1},
+        "model_path": {"type": "string", "minLength": 1},
+        "revision": {"type": "string", "minLength": 1},
+        "quantization": {"type": "string", "minLength": 1},
+        "kernel": {"type": "string", "minLength": 1},
+        "prefix_caching": {"type": "boolean"},
+        "chunked_prefill": {"type": "boolean"},
+        "cuda_graph_mode": {"type": "string", "minLength": 1},
+        "scheduler": {"type": "string", "minLength": 1},
+        "context_tokens": {"type": "integer", "minimum": 1024},
+        "max_output_tokens": {"type": "integer", "minimum": 1, "maximum": 8192},
+        "temperature": {"type": "number", "minimum": 0, "maximum": 2},
+        "top_p": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "seed": {"type": ["integer", "null"]},
+        "request_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 1800}
+      }
+    }
+  }
+}

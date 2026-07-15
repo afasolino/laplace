@@ -33,7 +33,7 @@ from .retrieval import embed
 
 JsonValue: TypeAlias = object
 JsonObject: TypeAlias = dict[str, object]
-Domain = Literal["python", "systemverilog"]
+Domain = Literal["python", "c", "verilog", "systemverilog"]
 Role = Literal["supervisor", "researcher", "implementer", "verifier", "reviewer"]
 TaskState = Literal[
     "request",
@@ -69,11 +69,35 @@ SYSTEMVERILOG_FOLDERS = (
     "50_vendor_flows",
     "90_manifests",
 )
+C_FOLDERS = (
+    "00_policies",
+    "10_language_library",
+    "20_memory_integer_safety",
+    "30_file_process_interfaces",
+    "40_testing_sanitizers",
+    "50_tooling_builds",
+    "90_manifests",
+)
+VERILOG_FOLDERS = (
+    "00_policies",
+    "10_rtl_patterns",
+    "20_handshake_storage",
+    "30_verification",
+    "40_tooling",
+    "90_manifests",
+)
 _DOMAIN_FOLDERS: dict[Domain, tuple[str, ...]] = {
     "python": PYTHON_FOLDERS,
+    "c": C_FOLDERS,
+    "verilog": VERILOG_FOLDERS,
     "systemverilog": SYSTEMVERILOG_FOLDERS,
 }
-_DOMAIN_LIBRARY: dict[Domain, str] = {"python": "Python", "systemverilog": "SystemVerilog"}
+_DOMAIN_LIBRARY: dict[Domain, str] = {
+    "python": "Python",
+    "c": "C",
+    "verilog": "Verilog",
+    "systemverilog": "SystemVerilog",
+}
 _TASK_TRANSITIONS: dict[TaskState, set[TaskState]] = {
     "request": {"requirements", "blocked"},
     "requirements": {"plan", "blocked"},
@@ -91,6 +115,7 @@ _TASK_TRANSITIONS: dict[TaskState, set[TaskState]] = {
 }
 _TASK_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_RELEASE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 _SAFE_RELATIVE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+-]*$")
 
 
@@ -270,11 +295,13 @@ def validate_task_spec(specification: JsonObject, schema_path: Path) -> None:
 
 
 def domain_schema_path(repository_root: Path, domain: Domain) -> Path:
-    filename = (
-        "python_task_spec.schema.json"
-        if domain == "python"
-        else "systemverilog_task_spec.schema.json"
-    )
+    filenames: dict[Domain, str] = {
+        "python": "python_task_spec.schema.json",
+        "c": "c_task_spec.schema.json",
+        "verilog": "verilog_task_spec.schema.json",
+        "systemverilog": "systemverilog_task_spec.schema.json",
+    }
+    filename = filenames[domain]
     return repository_root / "codex_a6000" / "templates" / filename
 
 
@@ -317,6 +344,22 @@ def normalize_task_spec(repository_root: Path, domain: Domain, raw: JsonObject) 
             "async lifecycle and transaction boundaries where applicable",
             "type constraints and negative-path behavior",
         ]
+    elif domain == "c":
+        gates = [
+            "self_checking_public_unit_tests",
+            "gcc_or_clang_warnings",
+            "cmake_build",
+            "ctest",
+            "address_sanitizer",
+            "undefined_behavior_sanitizer",
+            "static_analysis_when_available",
+        ]
+        focus = [
+            "public interfaces and ABI compatibility",
+            "memory ownership, lifetime and cleanup",
+            "integer conversions, overflow and undefined behavior",
+            "error paths, partial I/O and deterministic resource release",
+        ]
     else:
         gates = [
             "self_checking_public_simulation",
@@ -327,7 +370,7 @@ def normalize_task_spec(repository_root: Path, domain: Domain, raw: JsonObject) 
             "yosys_synthesis",
         ]
         focus = [
-            "explicit microarchitecture before RTL",
+            f"explicit {domain} microarchitecture before RTL",
             "clock/reset and CDC assumptions",
             "ready/valid or bus stability under backpressure",
             "simultaneous events and boundary conditions",
@@ -366,13 +409,15 @@ class ReferenceManifest:
     registered_at: str
     files: tuple[ReferenceFile, ...]
     read_only: bool = True
+    revision_kind: Literal["git_commit", "release"] = "git_commit"
 
     def to_json(self) -> JsonObject:
-        return {
+        value: JsonObject = {
             "reference_id": self.reference_id,
             "domain": self.domain,
             "repository": self.repository,
-            "commit": self.commit,
+            "revision": self.commit,
+            "revision_kind": self.revision_kind,
             "licence_identifier": self.licence_identifier,
             "licence_text_sha256": self.licence_text_sha256,
             "permitted_use": self.permitted_use,
@@ -390,6 +435,9 @@ class ReferenceManifest:
                 for item in self.files
             ],
         }
+        if self.revision_kind == "git_commit":
+            value["commit"] = self.commit
+        return value
 
 
 class ReferenceLibrary:
@@ -415,11 +463,17 @@ class ReferenceLibrary:
         return self.root / "indexes" / "reference_index.db"
 
     def snapshot_hash(self) -> str | None:
-        """Return a stable hash of every exact registered manifest."""
+        """Return a stable hash of immutable provenance and selected content."""
         manifests = self.manifests_list()
         if not manifests:
             return None
-        payload = [item.to_json() for item in manifests]
+        payload = []
+        for item in manifests:
+            record = item.to_json()
+            # Registration time is operational metadata, not corpus identity.
+            # Rebuilding an identical overlay must produce the same fingerprint.
+            record.pop("registered_at", None)
+            payload.append(record)
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
@@ -491,7 +545,6 @@ class ReferenceLibrary:
             files.append(ReferenceFile(source_path, selected_path, digest, tuple(topics)))
         required_strings = (
             "repository",
-            "commit",
             "licence_identifier",
             "licence_text_sha256",
             "permitted_use",
@@ -502,11 +555,19 @@ class ReferenceLibrary:
         values = {key: value.get(key) for key in required_strings}
         if not all(isinstance(item, str) for item in values.values()):
             raise ReferencePolicyError(f"Reference manifest {reference_id} has malformed metadata")
+        revision = value.get("revision", value.get("commit"))
+        revision_kind = value.get(
+            "revision_kind", "git_commit" if value.get("commit") is not None else None
+        )
+        if not isinstance(revision, str) or revision_kind not in {"git_commit", "release"}:
+            raise ReferencePolicyError(
+                f"Reference manifest {reference_id} has malformed revision metadata"
+            )
         return ReferenceManifest(
             reference_id=reference_id,
             domain=self.domain,
             repository=str(values["repository"]),
-            commit=str(values["commit"]),
+            commit=revision,
             licence_identifier=str(values["licence_identifier"]),
             licence_text_sha256=str(values["licence_text_sha256"]),
             permitted_use=str(values["permitted_use"]),
@@ -515,6 +576,7 @@ class ReferenceLibrary:
             registered_at=str(values["registered_at"]),
             files=tuple(files),
             read_only=bool(value.get("read_only", False)),
+            revision_kind=revision_kind,
         )
 
     def register_local(
@@ -536,6 +598,58 @@ class ReferenceLibrary:
         """
         if not _TASK_ID.fullmatch(reference_id) or not _COMMIT.fullmatch(commit):
             raise ReferencePolicyError("reference_id or commit is invalid")
+        return self._register_local_revision(
+            reference_id=reference_id,
+            repository=repository,
+            revision=commit,
+            revision_kind="git_commit",
+            licence_identifier=licence_identifier,
+            licence_path=licence_path,
+            selected_files=selected_files,
+            permitted_use=permitted_use,
+            attribution=attribution,
+        )
+
+    def register_local_release(
+        self,
+        *,
+        reference_id: str,
+        repository: str,
+        release: str,
+        licence_identifier: str,
+        licence_path: Path,
+        selected_files: list[tuple[Path, str, tuple[str, ...]]],
+        permitted_use: str,
+        attribution: str,
+    ) -> JsonObject:
+        """Register a content-hashed exact release without inventing a Git commit."""
+        if not _TASK_ID.fullmatch(reference_id) or not _RELEASE.fullmatch(release):
+            raise ReferencePolicyError("reference_id or release is invalid")
+        return self._register_local_revision(
+            reference_id=reference_id,
+            repository=repository,
+            revision=release,
+            revision_kind="release",
+            licence_identifier=licence_identifier,
+            licence_path=licence_path,
+            selected_files=selected_files,
+            permitted_use=permitted_use,
+            attribution=attribution,
+        )
+
+    def _register_local_revision(
+        self,
+        *,
+        reference_id: str,
+        repository: str,
+        revision: str,
+        revision_kind: Literal["git_commit", "release"],
+        licence_identifier: str,
+        licence_path: Path,
+        selected_files: list[tuple[Path, str, tuple[str, ...]]],
+        permitted_use: str,
+        attribution: str,
+    ) -> JsonObject:
         if not repository or not licence_identifier or not permitted_use or not attribution:
             raise ReferencePolicyError(
                 "repository, licence, permitted use and attribution are required"
@@ -545,7 +659,7 @@ class ReferenceLibrary:
             raise ReferencePolicyError("Licence file is missing")
         if not selected_files:
             raise ReferencePolicyError("At least one focused reference file is required")
-        source_root = self.root / "sources" / reference_id / commit
+        source_root = self.root / "sources" / reference_id / revision
         records: list[ReferenceFile] = []
         for source, topic, topics in selected_files:
             selected_source = source.resolve()
@@ -592,7 +706,7 @@ class ReferenceLibrary:
             reference_id=reference_id,
             domain=self.domain,
             repository=repository,
-            commit=commit,
+            commit=revision,
             licence_identifier=licence_identifier,
             licence_text_sha256=_sha256(licence),
             permitted_use=permitted_use,
@@ -600,6 +714,7 @@ class ReferenceLibrary:
             source_kind="local_fixture_or_approved_local_snapshot",
             registered_at=_now(),
             files=tuple(records),
+            revision_kind=revision_kind,
         )
         manifest_path = self._manifest_path(reference_id)
         if manifest_path.exists():
@@ -695,6 +810,8 @@ class ReferenceLibrary:
                         ".rst",
                         ".txt",
                         ".py",
+                        ".c",
+                        ".h",
                         ".sv",
                         ".v",
                         ".json",
@@ -713,7 +830,11 @@ class ReferenceLibrary:
                         "source_class": "technical_documentation",
                         "source_kind": "governed_reference",
                         "reference_id": manifest.reference_id,
-                        "commit": manifest.commit,
+                        "commit": manifest.commit
+                        if manifest.revision_kind == "git_commit"
+                        else None,
+                        "revision": manifest.commit,
+                        "revision_kind": manifest.revision_kind,
                         "licence_identifier": manifest.licence_identifier,
                         "permitted_use": manifest.permitted_use,
                         "repository": manifest.repository,
@@ -870,6 +991,8 @@ class ReferenceLibrary:
                     "reference_id": metadata.get("reference_id"),
                     "repository": metadata.get("repository"),
                     "commit": metadata.get("commit"),
+                    "revision": metadata.get("revision", metadata.get("commit")),
+                    "revision_kind": metadata.get("revision_kind", "git_commit"),
                     "licence_identifier": metadata.get("licence_identifier"),
                     "permitted_use": metadata.get("permitted_use"),
                     "attribution": metadata.get("attribution"),
@@ -898,8 +1021,11 @@ class ReferenceLibrary:
         errors: list[str] = []
         verified = 0
         for manifest in manifests:
-            if not _COMMIT.fullmatch(manifest.commit):
-                errors.append(f"{manifest.reference_id}: invalid commit")
+            if manifest.revision_kind == "git_commit":
+                if not _COMMIT.fullmatch(manifest.commit):
+                    errors.append(f"{manifest.reference_id}: invalid commit")
+            elif not _RELEASE.fullmatch(manifest.commit):
+                errors.append(f"{manifest.reference_id}: invalid release")
             licence = self.root / "sources" / manifest.reference_id / manifest.commit / "LICENSE"
             if not licence.is_file() or _sha256(licence) != manifest.licence_text_sha256:
                 errors.append(f"{manifest.reference_id}: licence hash mismatch")
@@ -961,6 +1087,26 @@ class ToolResult:
         }
 
 
+def verilator_simulation_available() -> bool:
+    """Return whether the installed Verilator supports timed ``--binary`` testbenches."""
+    executable = shutil.which("verilator")
+    if executable is None:
+        return False
+    try:
+        completed = subprocess.run(  # nosec B603
+            [executable, "--version"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    match = re.search(r"\bVerilator\s+(\d+)(?:\.|\b)", completed.stdout)
+    return completed.returncode == 0 and match is not None and int(match.group(1)) >= 5
+
+
 class LocalToolRunner:
     """Small, timeout-bound command allowlist with immutable captured logs."""
 
@@ -990,9 +1136,19 @@ class LocalToolRunner:
             "coverage",
             "bandit",
             "verilator",
+            "verilator_simulation",
             "iverilog",
             "vvp",
             "yosys",
+            "cmake",
+            "ctest",
+            "gcc",
+            "clang",
+            "clang_tidy",
+            "c_public_test",
+            "sanitizer_probe",
+            "sanitizer_compile",
+            "sanitizer_test",
             "cuda_probe",
         }:
             raise ToolExecutionError(f"Tool is not allowlisted: {tool}")
@@ -1120,6 +1276,9 @@ class LocalToolRunner:
         *,
         top_module: str | None = None,
         testbench: str | None = None,
+        language: Literal["verilog", "systemverilog"] = "systemverilog",
+        require_verilator_simulation: bool = False,
+        required_tools: tuple[str, ...] = (),
         timeout_seconds: int = 300,
     ) -> JsonObject:
         if not source_files:
@@ -1127,7 +1286,14 @@ class LocalToolRunner:
         sources = self._target_paths(source_files)
         if not all(Path(value).suffix.lower() in {".sv", ".v"} for value in sources):
             raise ToolExecutionError("EDA sources must be .sv or .v files")
-        simulation_sources = list(sources)
+        ordered_sources = sorted(
+            sources,
+            key=lambda value: (
+                0 if language == "systemverilog" and Path(value).stem.endswith("_pkg") else 1,
+                sources.index(value),
+            ),
+        )
+        simulation_sources = list(ordered_sources)
         if testbench is not None:
             testbench_path = self._target_paths([testbench])[0]
             if Path(testbench_path).suffix.lower() not in {".sv", ".v"}:
@@ -1136,19 +1302,81 @@ class LocalToolRunner:
         if top_module is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", top_module):
             raise ToolExecutionError("Top module name is unsafe")
         results: list[JsonObject] = []
+        missing_tools: list[str] = []
+        for tool in required_tools:
+            executable = "verilator" if tool == "verilator_simulation" else tool
+            if tool == "verilator_simulation":
+                available = verilator_simulation_available()
+            else:
+                available = shutil.which(executable) is not None
+            if not available:
+                missing_tools.append(tool)
+        if require_verilator_simulation and language == "systemverilog" and testbench is not None:
+            if not verilator_simulation_available():
+                missing_tools.append("verilator_simulation")
+        missing_tools = sorted(set(missing_tools))
         if shutil.which("verilator"):
+            language_flag = "1364-2001" if language == "verilog" else "1800-2017"
             results.append(
                 self.run(
                     "verilator",
-                    ["verilator", "--lint-only", "--Wall", "--sv", *sources],
+                    [
+                        "verilator",
+                        "--lint-only",
+                        "--Wall",
+                        "--language",
+                        language_flag,
+                        *sources,
+                    ],
                     timeout_seconds=timeout_seconds,
                 ).to_json()
             )
+            if (
+                language == "systemverilog"
+                and testbench is not None
+                and require_verilator_simulation
+                and "verilator_simulation" not in missing_tools
+            ):
+                verilator_top = Path(testbench).stem
+                verilator_root = self.log_root / f"verilator_sim_{uuid.uuid4().hex}"
+                results.append(
+                    self.run(
+                        "verilator",
+                        [
+                            "verilator",
+                            "--binary",
+                            "--timing",
+                            "--Wall",
+                            "-Wno-fatal",
+                            "--language",
+                            language_flag,
+                            "--top-module",
+                            verilator_top,
+                            "--Mdir",
+                            str(verilator_root),
+                            "-o",
+                            "simv",
+                            *simulation_sources,
+                        ],
+                        timeout_seconds=timeout_seconds,
+                    ).to_json()
+                )
+                verilator_executable = verilator_root / "simv"
+                if results[-1]["status"] == "PASS" and verilator_executable.is_file():
+                    results.append(
+                        self.run(
+                            "verilator_simulation",
+                            [str(verilator_executable)],
+                            timeout_seconds=timeout_seconds,
+                        ).to_json()
+                    )
         output = self.log_root / f"eda_{uuid.uuid4().hex}.vvp"
         if shutil.which("iverilog"):
-            compile_command = ["iverilog", "-g2012", "-o", str(output)]
-            if top_module:
-                compile_command.extend(["-s", top_module])
+            generation = "-g2001" if language == "verilog" else "-g2012"
+            compile_command = ["iverilog", generation, "-o", str(output)]
+            simulation_top = Path(testbench).stem if testbench is not None else top_module
+            if simulation_top:
+                compile_command.extend(["-s", simulation_top])
             compile_command.extend(simulation_sources)
             results.append(
                 self.run("iverilog", compile_command, timeout_seconds=timeout_seconds).to_json()
@@ -1163,7 +1391,8 @@ class LocalToolRunner:
                 script.with_suffix(".json"), {"sources": sources, "top_module": top_module}
             )
             script.write_text(
-                f"read_verilog -sv {' '.join(sources)}\nhierarchy -top {top_module}\nsynth -top {top_module}\n",
+                f"read_verilog {'-sv ' if language == 'systemverilog' else ''}{' '.join(ordered_sources)}\n"
+                f"hierarchy -check -top {top_module}\nsynth -top {top_module}\n",
                 encoding="utf-8",
             )
             results.append(
@@ -1173,12 +1402,191 @@ class LocalToolRunner:
             )
         return {
             "operation": "run_eda_flow",
+            "language": language,
+            "require_verilator_simulation": require_verilator_simulation,
+            "required_tools": list(required_tools),
             "sources": sources,
             "top_module": top_module,
             "results": results,
-            "passed": bool(results) and all(item["status"] == "PASS" for item in results),
+            "missing_tools": missing_tools,
+            "passed": not missing_tools
+            and bool(results)
+            and all(item["status"] == "PASS" for item in results),
             "created_at": _now(),
         }
+
+    def run_c_quality_gates(
+        self,
+        fixture: str,
+        *,
+        timeout_seconds: int = 300,
+        sanitizers: bool = True,
+        required_tools: tuple[str, ...] = (),
+    ) -> JsonObject:
+        """Run GCC minimum gates plus declared or available strengthening tools."""
+        source_directory = self._target_paths([fixture])[0]
+        source_root = self.repository_root / source_directory
+        self.log_root.mkdir(parents=True, exist_ok=True)
+        sources = sorted(source_root.glob("*.c"))
+        if not sources:
+            raise ToolExecutionError("C fixture must contain at least one .c source")
+        compiler = shutil.which("gcc")
+        missing_tools: list[str] = []
+        if compiler is None:
+            missing_tools.append("gcc")
+        for tool in required_tools:
+            if tool not in {"asan", "ubsan"} and shutil.which(tool) is None:
+                missing_tools.append(tool)
+        results: list[JsonObject] = []
+        strengthening_results: list[JsonObject] = []
+        relative_sources = [str(path.relative_to(self.repository_root)) for path in sources]
+        if compiler is not None:
+            direct_executable = self.log_root / f"c_direct_{uuid.uuid4().hex}"
+            results.append(
+                self.run(
+                    "gcc",
+                    [
+                        compiler,
+                        "-std=c11",
+                        "-Wall",
+                        "-Wextra",
+                        "-Wpedantic",
+                        "-Werror",
+                        *relative_sources,
+                        "-o",
+                        str(direct_executable),
+                    ],
+                    timeout_seconds=timeout_seconds,
+                ).to_json()
+            )
+            if results[-1]["status"] == "PASS":
+                results.append(
+                    self.run(
+                        "c_public_test", [str(direct_executable)], timeout_seconds=timeout_seconds
+                    ).to_json()
+                )
+        cmake_available = shutil.which("cmake") is not None and shutil.which("ctest") is not None
+        if cmake_available and (source_root / "CMakeLists.txt").is_file():
+            build_root = self.log_root / f"c_build_{uuid.uuid4().hex}"
+            configure = [
+                "cmake",
+                "-S",
+                source_directory,
+                "-B",
+                str(build_root),
+                "-DCMAKE_BUILD_TYPE=Debug",
+                "-DCMAKE_C_STANDARD=11",
+                "-DCMAKE_C_EXTENSIONS=OFF",
+                "-DCMAKE_C_FLAGS=-Wall -Wextra -Wpedantic -Werror",
+            ]
+            results.append(self.run("cmake", configure, timeout_seconds=timeout_seconds).to_json())
+            if results[-1]["status"] == "PASS":
+                results.append(
+                    self.run(
+                        "cmake",
+                        ["cmake", "--build", str(build_root), "--parallel", "2"],
+                        timeout_seconds=timeout_seconds,
+                    ).to_json()
+                )
+            if results[-1]["status"] == "PASS":
+                results.append(
+                    self.run(
+                        "ctest",
+                        ["ctest", "--test-dir", str(build_root), "--output-on-failure"],
+                        timeout_seconds=timeout_seconds,
+                    ).to_json()
+                )
+        if sanitizers:
+            required_sanitizers = [item for item in ("asan", "ubsan") if item in required_tools]
+            sanitizer_names = required_sanitizers or ["asan", "ubsan"]
+            sanitizer_map = {"asan": "address", "ubsan": "undefined"}
+            sanitizer_flag = "-fsanitize=" + ",".join(
+                sanitizer_map[item] for item in sanitizer_names
+            )
+            probe_source = self.log_root / f"c_sanitizer_probe_{uuid.uuid4().hex}.c"
+            probe_source.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+            probe_executable = probe_source.with_suffix("")
+            sanitizer_compiler: str | None = None
+            for candidate_name in ("gcc", "clang"):
+                candidate = shutil.which(candidate_name)
+                if candidate is None:
+                    continue
+                probe = self.run(
+                    "sanitizer_probe",
+                    [candidate, str(probe_source), sanitizer_flag, "-o", str(probe_executable)],
+                    timeout_seconds=timeout_seconds,
+                ).to_json()
+                probe["compiler"] = candidate
+                strengthening_results.append(probe)
+                if probe["status"] == "PASS":
+                    sanitizer_compiler = candidate
+                    break
+            if sanitizer_compiler is not None:
+                sanitized_executable = self.log_root / f"c_sanitized_{uuid.uuid4().hex}"
+                sanitized = self.run(
+                    "sanitizer_compile",
+                    [
+                        sanitizer_compiler,
+                        "-std=c11",
+                        "-Wall",
+                        "-Wextra",
+                        "-Wpedantic",
+                        "-Werror",
+                        "-fno-omit-frame-pointer",
+                        sanitizer_flag,
+                        *relative_sources,
+                        "-o",
+                        str(sanitized_executable),
+                    ],
+                    timeout_seconds=timeout_seconds,
+                ).to_json()
+                results.append(sanitized)
+                if sanitized["status"] == "PASS":
+                    results.append(
+                        self.run(
+                            "sanitizer_test",
+                            [str(sanitized_executable)],
+                            timeout_seconds=timeout_seconds,
+                        ).to_json()
+                    )
+            elif required_sanitizers:
+                missing_tools.extend(required_sanitizers)
+        clang = shutil.which("clang")
+        if clang is not None:
+            results.append(
+                self.run(
+                    "clang",
+                    [
+                        clang,
+                        "-std=c11",
+                        "-Wall",
+                        "-Wextra",
+                        "-Wpedantic",
+                        "-Werror",
+                        "-fsyntax-only",
+                        *relative_sources,
+                    ],
+                    timeout_seconds=timeout_seconds,
+                ).to_json()
+            )
+        missing_tools = sorted(set(missing_tools))
+        report: JsonObject = {
+            "operation": "run_c_quality_gates",
+            "fixture": source_directory,
+            "sanitizers": sanitizers,
+            "required_tools": list(required_tools),
+            "missing_tools": missing_tools,
+            "results": results,
+            "strengthening_results": strengthening_results,
+            "passed": not missing_tools
+            and bool(results)
+            and all(item["status"] == "PASS" for item in results),
+            "created_at": _now(),
+        }
+        report_path = self.log_root / f"c_quality_{uuid.uuid4().hex}.json"
+        _write_json_atomic(report_path, report, readonly=True)
+        report["report_path"] = str(report_path)
+        return report
 
 
 @dataclass(frozen=True)
@@ -1245,7 +1653,7 @@ class AgentTaskStore:
         artifacts = value.get("artifacts")
         transitions = value.get("transitions")
         if (
-            domain not in {"python", "systemverilog"}
+            domain not in {"python", "c", "verilog", "systemverilog"}
             or state not in _TASK_TRANSITIONS
             or not isinstance(specification, dict)
         ):
@@ -1357,6 +1765,28 @@ def expand_engineering_query(task: AgentTask, query: str) -> tuple[str, list[str
                     "deadline timeout preserve successful result",
                 ]
             )
+    elif task.domain == "c":
+        if any(token in searchable for token in ("buffer", "length", "parse", "string")):
+            expansions.extend(
+                [
+                    "C bounded buffer size_t length termination partial parse",
+                    "checked allocation ownership cleanup single exit path",
+                ]
+            )
+        if any(token in searchable for token in ("integer", "overflow", "conversion", "shift")):
+            expansions.extend(
+                [
+                    "C integer conversion overflow undefined behavior checked arithmetic",
+                    "unsigned bounds before narrowing conversion",
+                ]
+            )
+        if any(token in searchable for token in ("file", "stream", "process", "errno")):
+            expansions.extend(
+                [
+                    "C stdio partial read write errno cleanup",
+                    "portable process and file error handling",
+                ]
+            )
     else:
         if any(
             token in searchable
@@ -1401,17 +1831,56 @@ def expand_engineering_query(task: AgentTask, query: str) -> tuple[str, list[str
 def _project_knowledge_cards(repository_root: Path, domain: Domain, query: str) -> list[JsonObject]:
     """Retrieve small project-authored invariant cards with exact hashes."""
     card_root = repository_root / "codex_a6000" / "knowledge_cards"
-    candidates = (
-        [card_root / "python_strict_validation_transactions.md"]
-        if domain == "python"
-        else [card_root / "systemverilog_handshake_axi_w1c.md"]
-    )
+    candidates_by_domain: dict[Domain, list[Path]] = {
+        "python": [card_root / "python_strict_validation_transactions.md"],
+        "c": [card_root / "c_safety_portability.md"],
+        "verilog": [card_root / "verilog2001_synthesis.md"],
+        "systemverilog": [card_root / "systemverilog_handshake_axi_w1c.md"],
+    }
+    candidates = candidates_by_domain[domain]
     query_tokens = set(re.findall(r"[\w.-]+", query.lower()))
-    anchors = (
-        {"pydantic", "strict", "coercion", "sqlite", "transaction", "rollback", "conflict"}
-        if domain == "python"
-        else {"ready", "valid", "buffer", "slot", "axi", "wstrb", "w1c", "irq", "pending"}
-    )
+    anchors_by_domain: dict[Domain, set[str]] = {
+        "python": {
+            "pydantic",
+            "strict",
+            "coercion",
+            "sqlite",
+            "transaction",
+            "rollback",
+            "conflict",
+        },
+        "c": {
+            "buffer",
+            "ownership",
+            "lifetime",
+            "overflow",
+            "conversion",
+            "errno",
+            "sanitizer",
+        },
+        "verilog": {
+            "verilog",
+            "counter",
+            "fifo",
+            "ready",
+            "valid",
+            "arbiter",
+            "reset",
+            "synthesis",
+        },
+        "systemverilog": {
+            "ready",
+            "valid",
+            "buffer",
+            "slot",
+            "axi",
+            "wstrb",
+            "w1c",
+            "irq",
+            "pending",
+        },
+    }
+    anchors = anchors_by_domain[domain]
     if not query_tokens.intersection(anchors):
         return []
     records: list[JsonObject] = []
@@ -1448,7 +1917,9 @@ def retrieve_engineering_evidence(
     """Return precedence-ordered project and governed evidence with provenance."""
     root = repository_root.resolve()
     project = project_root.resolve()
-    task_paths_key = "allowed_paths" if task.domain == "python" else "files_allowed_to_change"
+    task_paths_key = (
+        "allowed_paths" if task.domain in {"python", "c"} else "files_allowed_to_change"
+    )
     raw_paths = task.specification.get(task_paths_key, [])
     paths = _as_str_list(raw_paths if isinstance(raw_paths, list) else [], label=task_paths_key)
     expanded_query, expansion_terms = expand_engineering_query(task, query)

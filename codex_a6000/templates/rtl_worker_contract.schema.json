@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://laplace.local/schemas/rtl_worker_contract.schema.json",
+  "title": "Bounded RTL worker handoff",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "module_name",
+    "language",
+    "editable_path",
+    "current_source",
+    "parameters",
+    "ports",
+    "clock_reset",
+    "functional_requirements",
+    "cycle_requirements",
+    "handshake_and_events",
+    "corner_cases",
+    "synthesis_constraints",
+    "forbidden_constructs",
+    "verification",
+    "diagnostics"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "task_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+    "module_name": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_$]*$"},
+    "language": {"enum": ["verilog", "systemverilog"]},
+    "editable_path": {"type": "string", "minLength": 1},
+    "current_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "content"],
+      "properties": {
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "content": {"type": "string", "minLength": 1}
+      }
+    },
+    "parameters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "type", "default", "constraints"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "type": {"type": "string", "minLength": 1},
+          "default": {},
+          "constraints": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "ports": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "direction", "width", "signed", "description"],
+        "properties": {
+          "name": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_$]*$"},
+          "direction": {"enum": ["input", "output", "inout"]},
+          "width": {"type": "string", "minLength": 1},
+          "signed": {"type": "boolean"},
+          "description": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "clock_reset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["clock", "reset"],
+      "properties": {
+        "clock": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "edge"],
+          "properties": {
+            "name": {"type": ["string", "null"]},
+            "edge": {"enum": ["posedge", "negedge", "none"]}
+          }
+        },
+        "reset": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "active_level", "synchronous", "reset_values"],
+          "properties": {
+            "name": {"type": ["string", "null"]},
+            "active_level": {"enum": ["high", "low", "none"]},
+            "synchronous": {"type": "boolean"},
+            "reset_values": {"type": "object"}
+          }
+        }
+      }
+    },
+    "functional_requirements": {"$ref": "#/$defs/nonEmptyStrings"},
+    "cycle_requirements": {"$ref": "#/$defs/nonEmptyStrings"},
+    "handshake_and_events": {"$ref": "#/$defs/nonEmptyStrings"},
+    "corner_cases": {"$ref": "#/$defs/nonEmptyStrings"},
+    "synthesis_constraints": {"$ref": "#/$defs/nonEmptyStrings"},
+    "forbidden_constructs": {"$ref": "#/$defs/nonEmptyStrings"},
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commands", "acceptance_criteria"],
+      "properties": {
+        "commands": {"$ref": "#/$defs/nonEmptyStrings"},
+        "acceptance_criteria": {"$ref": "#/$defs/nonEmptyStrings"}
+      }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["attempt", "tool", "observed", "expected", "source_locations"],
+        "properties": {
+          "attempt": {"type": "integer", "minimum": 1},
+          "tool": {"type": "string", "minLength": 1},
+          "observed": {"type": "string", "minLength": 1},
+          "expected": {"type": "string", "minLength": 1},
+          "source_locations": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "nonEmptyStrings": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    }
+  }
+}

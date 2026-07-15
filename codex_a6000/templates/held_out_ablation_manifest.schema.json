@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://laplace.local/schemas/held_out_ablation_manifest.schema.json",
+  "title": "Evaluator-only held-out pack manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "experiment_id", "tasks"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "experiment_id": {"const": "multilanguage_dual_model_ablation_v1"},
+    "tasks": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["directory", "files"],
+        "properties": {
+          "directory": {"type": "string", "minLength": 1},
+          "files": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        }
+      }
+    }
+  }
+}

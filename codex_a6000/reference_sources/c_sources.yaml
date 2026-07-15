@@ -1,0 +1,58 @@
+schema_version: 1
+policy:
+  default_use: reference_only_no_copy_until_verified
+  require_exact_revision_or_release: true
+  require_license_file_hash: true
+  require_selected_file_hashes: true
+  require_attribution: true
+  network_requires_approval: true
+  license_acceptance_requires_approval: true
+  do_not_ingest_entire_repositories: true
+  preserve_source_files: true
+  references_read_only: true
+
+sources:
+  - id: llvm_c_diagnostics_selected
+    repository: https://github.com/llvm/llvm-project.git
+    exact_release: llvmorg-18.1.8
+    destination_topic: 50_tooling_builds/llvm_clang_selected
+    selection_policy: select Clang diagnostics, warning reference, AddressSanitizer, UndefinedBehaviorSanitizer and portable driver documentation only
+    topics: [clang, diagnostics, warnings, address_sanitizer, undefined_behavior_sanitizer]
+    license_hint: Apache-2.0 WITH LLVM-exception; verify selected files at the exact release
+    allowed_use_after_verification: tooling_documentation_reference
+
+  - id: gcc_c_diagnostics_selected
+    repository: https://gcc.gnu.org/git/gcc.git
+    exact_release: releases/gcc-14.2.0
+    destination_topic: 50_tooling_builds/gcc_selected
+    selection_policy: select C implementation-defined behavior, warning options, optimization/undefined-behavior cautions and sanitizer option documentation only
+    topics: [gcc, diagnostics, warnings, integer_conversions, undefined_behavior, sanitizers]
+    license_hint: GPL and GFDL material; keep reference-only and verify each selected file
+    allowed_use_after_verification: reference_only_no_copy
+
+  - id: musl_portable_c_selected
+    repository: https://git.musl-libc.org/cgit/musl
+    exact_release: v1.2.5
+    destination_topic: 10_language_library/musl_selected
+    selection_policy: select compact C11-compatible allocation, string, stdio and cleanup examples only after per-file review; exclude architecture-specific assembly
+    topics: [c11, memory_ownership, strings, stdio, errno, portable_library]
+    license_hint: MIT; verify COPYRIGHT and selected files at v1.2.5
+    allowed_use_after_verification: reference_and_permissive_reuse_with_attribution
+
+  - id: cmake_c_testing_selected
+    repository: https://gitlab.kitware.com/cmake/cmake.git
+    exact_release: v3.30.5
+    destination_topic: 50_tooling_builds/cmake_selected
+    selection_policy: select C project, target warnings, CTest and sanitizer build examples rather than implementation sources
+    topics: [cmake, ctest, portable_build, warnings, sanitizers]
+    license_hint: BSD-3-Clause; verify at the exact release
+    allowed_use_after_verification: tooling_documentation_reference
+
+  - id: laplace_c_engineering_cards
+    repository: local://laplace/codex_a6000/governed_corpus
+    exact_release: multilanguage-corpus-v1
+    destination_topic: 20_memory_integer_safety/laplace_c_engineering_cards
+    expected_material: [c_portability_safety.md, c_checked_examples.c, LICENSE]
+    topics: [ownership, lifetime, checked_arithmetic, bounded_buffers, cleanup, sanitizers]
+    license_hint: MIT
+    allowed_use_after_verification: reference_and_permissive_reuse_with_attribution

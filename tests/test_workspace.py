@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
+import httpx
 import pytest
 
 from research_workspace.analysis import compare_runs, parse_log
@@ -100,13 +102,16 @@ def test_drafting_and_mock_benchmark() -> None:
 
 
 def test_api_local_and_upload_validation(tmp_path: Path) -> None:
-    from fastapi.testclient import TestClient
+    async def exercise_api() -> None:
+        transport = httpx.ASGITransport(app=create_app(tmp_path, tmp_path / "db.sqlite"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            dashboard = await client.get("/dashboard")
+            assert dashboard.status_code == 200
+            assert dashboard.headers["content-type"].startswith("text/html")
+            response = await client.post("/ingest", files={"file": ("bad.exe", b"x")})
+            assert response.status_code == 415
 
-    client = TestClient(create_app(tmp_path, tmp_path / "db.sqlite"))
-    assert client.get("/dashboard").status_code == 200
-    assert client.get("/dashboard").headers["content-type"].startswith("text/html")
-    response = client.post("/ingest", files={"file": ("bad.exe", b"x")})
-    assert response.status_code == 415
+    asyncio.run(asyncio.wait_for(exercise_api(), timeout=10.0))
     assert npu_status().status in {"NPU_OPTIONAL_NOT_BENEFICIAL", "AVAILABLE_UNVALIDATED"}
 
 

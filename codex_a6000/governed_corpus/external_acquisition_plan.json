@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "installed_manifest": "codex_a6000/governed_corpus/installed_external_references.json",
+  "sources": [
+    {
+      "reference_id": "musl_portable_c_v1_2_5",
+      "domain": "c",
+      "repository": "https://git.musl-libc.org/git/musl",
+      "revision_kind": "release",
+      "revision": "v1.2.5",
+      "licence_identifier": "MIT",
+      "licence_source": "COPYRIGHT",
+      "permitted_use": "reference_and_permissive_reuse_with_attribution",
+      "attribution": "musl libc contributors, v1.2.5",
+      "files": [
+        {"source": "src/string/memmove.c", "selected_topic": "20_memory_integer_safety/musl", "topics": ["c11", "bounded_memory", "overlap", "portable_library"]},
+        {"source": "src/string/strnlen.c", "selected_topic": "20_memory_integer_safety/musl", "topics": ["c11", "bounded_string", "size_t", "portable_library"]},
+        {"source": "src/errno/strerror.c", "selected_topic": "30_file_process_interfaces/musl", "topics": ["c11", "errno", "error_handling", "portable_library"]}
+      ]
+    },
+    {
+      "reference_id": "llvm_clang_safety_docs_18_1_8",
+      "domain": "c",
+      "repository": "https://github.com/llvm/llvm-project.git",
+      "revision_kind": "release",
+      "revision": "llvmorg-18.1.8",
+      "licence_identifier": "Apache-2.0 WITH LLVM-exception",
+      "licence_source": "llvm/LICENSE.TXT",
+      "permitted_use": "tooling_documentation_reference",
+      "attribution": "LLVM Project, llvmorg-18.1.8",
+      "files": [
+        {"source": "clang/docs/UsersManual.rst", "selected_topic": "50_tooling_builds/clang", "topics": ["c", "clang", "diagnostics", "warnings"]},
+        {"source": "clang/docs/AddressSanitizer.rst", "selected_topic": "50_tooling_builds/clang", "topics": ["c", "address_sanitizer", "memory_lifetime", "testing"]},
+        {"source": "clang/docs/UndefinedBehaviorSanitizer.rst", "selected_topic": "50_tooling_builds/clang", "topics": ["c", "undefined_behavior", "integer_overflow", "testing"]}
+      ]
+    },
+    {
+      "reference_id": "cmake_c_test_docs_v3_30_5",
+      "domain": "c",
+      "repository": "https://gitlab.kitware.com/cmake/cmake.git",
+      "revision_kind": "release",
+      "revision": "v3.30.5",
+      "licence_identifier": "BSD-3-Clause",
+      "licence_source": "Copyright.txt",
+      "permitted_use": "tooling_documentation_reference",
+      "attribution": "Kitware and CMake contributors, v3.30.5",
+      "files": [
+        {"source": "Help/guide/tutorial/index.rst", "selected_topic": "50_tooling_builds/cmake", "topics": ["c", "cmake", "portable_build", "targets"]},
+        {"source": "Help/manual/ctest.1.rst", "selected_topic": "50_tooling_builds/cmake", "topics": ["c", "ctest", "unit_testing", "portable_build"]},
+        {"source": "Help/command/add_executable.rst", "selected_topic": "50_tooling_builds/cmake", "topics": ["c", "cmake", "executable", "build"]}
+      ]
+    },
+    {
+      "reference_id": "lowrisc_verilog_style_9c15ff5d",
+      "domain": "verilog",
+      "repository": "https://github.com/lowRISC/style-guides.git",
+      "revision_kind": "commit",
+      "revision": "9c15ff5dce23eef969e00ab3715153967419eadd",
+      "licence_identifier": "CC-BY-4.0",
+      "licence_source": "LICENSE",
+      "permitted_use": "guidance_with_attribution",
+      "attribution": "lowRISC contributors, commit 9c15ff5dce23eef969e00ab3715153967419eadd",
+      "files": [
+        {"source": "VerilogCodingStyle.md", "selected_topic": "10_rtl_patterns/lowrisc_style", "topics": ["verilog", "sequential_logic", "combinational_completeness", "reset", "synthesis"]}
+      ]
+    },
+    {
+      "reference_id": "iverilog_usage_docs_v12_0",
+      "domain": "verilog",
+      "repository": "https://github.com/steveicarus/iverilog.git",
+      "revision_kind": "release",
+      "revision": "v12_0",
+      "licence_identifier": "GPL-2.0-or-later",
+      "licence_source": "COPYING",
+      "permitted_use": "tooling_documentation_reference_only",
+      "attribution": "Icarus Verilog contributors, v12_0",
+      "files": [
+        {"source": "Documentation/usage/index.rst", "selected_topic": "40_tooling/iverilog", "topics": ["verilog_2001", "iverilog", "compile", "simulation"]},
+        {"source": "Documentation/usage/command_line_flags.rst", "selected_topic": "40_tooling/iverilog", "topics": ["verilog_2001", "iverilog", "warnings", "language_generation"]}
+      ]
+    },
+    {
+      "reference_id": "yosys_verilog_docs_v0_40",
+      "domain": "verilog",
+      "repository": "https://github.com/YosysHQ/yosys.git",
+      "revision_kind": "release",
+      "revision": "yosys-0.40",
+      "licence_identifier": "ISC",
+      "licence_source": "COPYING",
+      "permitted_use": "tooling_documentation_reference",
+      "attribution": "Yosys contributors, yosys-0.40",
+      "files": [
+        {"source": "docs/source/appendix/primer.rst", "selected_topic": "40_tooling/yosys", "topics": ["verilog_2001", "synthesis", "sequential_logic", "memory_inference"]},
+        {"source": "docs/source/yosys_internals/flow/verilog_frontend.rst", "selected_topic": "40_tooling/yosys", "topics": ["verilog_2001", "yosys", "frontend", "synthesis_consistency"]}
+      ]
+    }
+  ]
+}
