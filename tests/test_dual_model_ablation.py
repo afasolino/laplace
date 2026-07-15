@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 import urllib.request
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -34,6 +37,7 @@ from research_workspace.model_routing import (
 from research_workspace.model_artifacts import (
     validate_local_artifacts,
     validate_profile_alignment,
+    validate_serving_environments,
 )
 from research_workspace.multilanguage_ablation import (
     _assert_phase_manifest_compatible,
@@ -46,6 +50,8 @@ from research_workspace.multilanguage_ablation import (
     merge_phase_results,
     package_results,
     phase_status,
+    preflight_report,
+    validate_phase_setup,
     validate_runtime,
     validate_held_out_pack,
 )
@@ -326,6 +332,113 @@ def test_manifest_validates_all_task_schemas_and_plan_does_not_probe_endpoints(
         "phase2_main" in item or "phase2_rtl_worker" in item
         for item in phase_one_plan["missing_prerequisites"]
     )
+
+
+def test_preflight_is_scoped_to_requested_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+    configuration = load_experiment_configuration(REPOSITORY_ROOT, CONFIG_PATH)
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation.runtime_prerequisites",
+        lambda *args, **kwargs: {"passed": True, "missing": []},
+    )
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation._tool_version",
+        lambda name: {"available": True, "command": [name], "version": "test"},
+    )
+    report = preflight_report(REPOSITORY_ROOT, configuration, phase_id="phase1")
+    assert report["selected_phase"] == "phase1"
+    assert set(report["phases"]) == {"phase1"}
+    assert report["phases"]["phase1"]["runtime"]["status"] == "NOT_PROBED"
+
+
+def test_phase_setup_validation_does_not_require_other_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configuration = load_experiment_configuration(REPOSITORY_ROOT, CONFIG_PATH)
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation.runtime_prerequisites",
+        lambda *args, **kwargs: {"passed": True, "missing": []},
+    )
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation.validate_local_artifacts",
+        lambda *args, **kwargs: {"status": "ALL_MODEL_ARTIFACTS_AVAILABLE"},
+    )
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation.validate_held_out_pack",
+        lambda *args, **kwargs: {"status": "VALID_ISOLATED_HELD_OUT_PACK"},
+    )
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation.prepare_corpus_overlay",
+        lambda *args, **kwargs: {"status": "PREPARED"},
+    )
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation.validate_corpus_retrieval",
+        lambda *args, **kwargs: {"status": "VERIFIED_NON_EMPTY"},
+    )
+    monkeypatch.setenv(configuration.held_out_environment_variable, str(tmp_path))
+    result = validate_phase_setup(REPOSITORY_ROOT, configuration, "phase1")
+    assert result["status"] == "PHASE_CONFIGURATION_READY"
+    assert result["phase_id"] == "phase1"
+    assert result["runtime"]["status"] == "NOT_PROBED"
+
+
+def test_serving_environment_validation_checks_version_and_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environment = tmp_path / "vllm"
+    binary = environment / "bin"
+    binary.mkdir(parents=True)
+    (binary / "python").symlink_to(sys.executable)
+    executable = binary / "vllm"
+    executable.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = "--version" ]; then echo 1.2.3; exit 0; fi\n'
+        "echo --host --port --served-model-name --tensor-parallel-size "
+        "--max-model-len --max-num-seqs --gpu-memory-utilization "
+        "--enable-prefix-caching --enable-chunked-prefill --quantization\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    monkeypatch.setattr(
+        "research_workspace.model_artifacts.load_model_artifacts",
+        lambda path: {
+            "phase1_main": {
+                "serving": {
+                    "environment_path": str(environment),
+                    "executable": str(executable),
+                    "backend_version": "1.2.3",
+                    "extra_args": ["--quantization", "awq_marlin"],
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "research_workspace.model_artifacts.subprocess.run",
+        _serving_environment_subprocess(executable),
+    )
+    result = validate_serving_environments(tmp_path, {"phase1_main"})
+    environment_result = result["environments"][0]
+    assert result["status"] == "SERVING_ENVIRONMENTS_READY"
+    assert environment_result["available"] is True
+    assert environment_result["arguments_supported"] is True
+    assert environment_result["missing_arguments"] == []
+
+
+def _serving_environment_subprocess(
+    executable: Path,
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[0] == str(executable) and command[1:] == ["--version"]:
+            return subprocess.CompletedProcess(command, 0, stdout="1.2.3\n", stderr="")
+        if command[0] == str(executable) and command[1:] == ["serve", "--help"]:
+            arguments = (
+                "--host --port --served-model-name --tensor-parallel-size --max-model-len "
+                "--max-num-seqs --gpu-memory-utilization --enable-prefix-caching "
+                "--enable-chunked-prefill --quantization"
+            )
+            return subprocess.CompletedProcess(command, 0, stdout=arguments, stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="1.2.3\n", stderr="")
+
+    return run
 
 
 def test_task_lane_timeout_is_killable_and_retained_as_typed_evidence(

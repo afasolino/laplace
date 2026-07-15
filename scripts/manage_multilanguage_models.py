@@ -17,6 +17,7 @@ from research_workspace.model_artifacts import (
     load_model_artifacts,
     validate_local_artifacts,
     validate_profile_alignment,
+    validate_serving_environments,
     write_artifact_manifest,
 )
 
@@ -87,6 +88,7 @@ def main() -> int:
             "endpoint",
             "gpu",
             "server-profile",
+            "environment",
             "ready",
         ),
     )
@@ -147,6 +149,7 @@ def main() -> int:
         ):
             parser.error("serving extra_args must be a string list")
         values = [
+            str(serving["executable"]),
             str(record["output_path"]),
             str(record["served_model_name"]),
             str(endpoint.port),
@@ -159,6 +162,19 @@ def main() -> int:
             parser.error("serving profile values must be single-line")
         print("\n".join(values))
         return 0
+    elif arguments.command == "environment":
+        if arguments.artifact is None:
+            parser.error("environment requires --artifact")
+        result = validate_serving_environments(experiment, {arguments.artifact})
+        print(json.dumps(result, indent=2, sort_keys=True))
+        environments = result.get("environments")
+        ready = (
+            isinstance(environments, list)
+            and len(environments) == 1
+            and isinstance(environments[0], dict)
+            and environments[0].get("available") is True
+        )
+        return 0 if ready else 2
     elif arguments.command == "endpoint":
         if arguments.artifact is None:
             parser.error("endpoint requires --artifact")

@@ -57,6 +57,7 @@ From the repository root:
 
 ```bash
 .venv/bin/python -m research_workspace.multilanguage_ablation validate-config
+.venv/bin/python -m research_workspace.multilanguage_ablation validate-phase1
 .venv/bin/python -m research_workspace.multilanguage_ablation validate-manifest
 .venv/bin/python -m research_workspace.multilanguage_ablation validate-corpus
 .venv/bin/python -m research_workspace.multilanguage_ablation preflight
@@ -64,6 +65,7 @@ From the repository root:
 .venv/bin/python scripts/manage_multilanguage_models.py validate-metadata
 .venv/bin/python scripts/manage_multilanguage_models.py check
 scripts/bootstrap_multilanguage_tools.sh report
+scripts/bootstrap_multilanguage_tools.sh probe
 ```
 
 The deterministic tool bootstrap is a separate, potentially substantial user
@@ -82,7 +84,10 @@ executing them by:
 ```
 
 That output also includes the hashed lock and sync commands for the isolated
-`.venv-vllm` serving environment expected by the server lifecycle script.
+Phase-2 `.venv-vllm` serving environment. Phase 1 deliberately reuses the
+validated CUDA 12.4 environment at `.venv-vllm-cu124` with vLLM
+`0.8.5.post1`; the server lifecycle script resolves the phase-specific
+executable from the governed model-artifact profile.
 
 After the model profiles, held-out pack, exact post-implementation base commit,
 CUDA device and separately started loopback servers pass validation:
@@ -90,6 +95,8 @@ CUDA device and separately started loopback servers pass validation:
 ```bash
 export LAPLACE_ABLATION_BASE_REVISION=<reviewed-40-character-commit>
 export LAPLACE_ABLATION_HELD_OUT_ROOT=/absolute/evaluator-owned/heldout-pack
+.venv/bin/python -m research_workspace.multilanguage_ablation validate-phase1
+.venv/bin/python -m research_workspace.multilanguage_ablation preflight --phase phase1
 scripts/manage_multilanguage_model_servers.sh start-phase1
 .venv/bin/python -m research_workspace.multilanguage_ablation validate-runtime --phase phase1
 .venv/bin/python -m research_workspace.multilanguage_ablation run-phase1

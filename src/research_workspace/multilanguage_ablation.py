@@ -50,7 +50,11 @@ from .governed_corpus import (
     validate_corpus_retrieval,
 )
 from .inference import gpu_memory_snapshot
-from .model_artifacts import validate_local_artifacts, validate_profile_alignment
+from .model_artifacts import (
+    validate_local_artifacts,
+    validate_profile_alignment,
+    validate_serving_environments,
+)
 from .model_routing import (
     DualModelConfiguration,
     RtlScope,
@@ -72,6 +76,18 @@ _TASK_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 Category = Literal["implementation", "repair", "edge_case", "integration"]
 PhaseId = Literal["phase1", "phase2"]
+
+
+def _activate_isolated_tools(repository_root: Path) -> None:
+    """Prepend the repository-owned profile without discarding the caller's PATH."""
+    tool_bin = repository_root.resolve() / ".tools" / "multilanguage" / "bin"
+    if not tool_bin.is_dir():
+        return
+    current = os.environ.get("PATH", "")
+    entries = current.split(os.pathsep) if current else []
+    value = str(tool_bin)
+    if value not in entries:
+        os.environ["PATH"] = os.pathsep.join((value, *entries))
 
 
 def _now() -> str:
@@ -935,20 +951,23 @@ def _configuration_fingerprint(
 
 
 def _tool_version(name: str) -> JsonObject:
+    def executable(command: str) -> str:
+        return shutil.which(command) or command
+
     commands: dict[str, list[str]] = {
         "pytest": [sys.executable, "-m", "pytest", "--version"],
         "ruff": [sys.executable, "-m", "ruff", "--version"],
         "mypy": [sys.executable, "-m", "mypy", "--version"],
         "bandit": [sys.executable, "-m", "bandit", "--version"],
-        "verilator_simulation": ["verilator", "--version"],
-        "iverilog": ["iverilog", "-V"],
-        "vvp": ["vvp", "-V"],
+        "verilator_simulation": [executable("verilator"), "--version"],
+        "iverilog": [executable("iverilog"), "-V"],
+        "vvp": [executable("vvp"), "-V"],
     }
     sanitizer_compiler = _sanitizer_compiler(name) if name in {"asan", "ubsan"} else None
     command = (
         [sanitizer_compiler or "gcc", "--version"]
         if name in {"asan", "ubsan"}
-        else commands.get(name, [name, "--version"])
+        else commands.get(name, [executable(name), "--version"])
     )
     if not _tool_available(name):
         return {
@@ -1081,10 +1100,15 @@ def build_plan(
 ) -> JsonObject:
     """Describe all work without endpoint calls, model calls, or verification."""
     root = repository_root.resolve()
+    _activate_isolated_tools(root)
     tasks = load_benchmark_manifest(configuration.manifest_path)
     selected_arms = (
         _phase_arms(configuration, phase_id) if phase_id is not None else configuration.arms
     )
+    tool_availability = {
+        name: _tool_available(name)
+        for name in sorted({tool for task in tasks for tool in task.required_tools})
+    }
     records: list[JsonObject] = []
     global_missing: set[str] = set()
     base_revision = configuration.base_revision
@@ -1148,7 +1172,6 @@ def build_plan(
         global_missing.add(
             "model_profiles:" + ",".join(cast(list[str], profile_alignment["errors"]))
         )
-    local_artifacts = validate_local_artifacts(configuration.model_artifacts_path.parent)
     selected_artifact_ids = (
         {"phase1_main"}
         if phase_id == "phase1"
@@ -1156,12 +1179,35 @@ def build_plan(
         if phase_id == "phase2"
         else {"phase1_main", "phase2_main", "phase2_rtl_worker"}
     )
+    local_artifacts = validate_local_artifacts(
+        configuration.model_artifacts_path.parent,
+        selected_artifact_ids,
+        verify_hashes=False,
+    )
+    available_artifact_ids: set[str] = set()
     for raw_artifact in cast(list[object], local_artifacts["artifacts"]):
         if not isinstance(raw_artifact, dict):
             continue
         artifact_id = str(raw_artifact.get("artifact_id"))
-        if artifact_id in selected_artifact_ids and raw_artifact.get("available") is not True:
+        if artifact_id not in selected_artifact_ids:
+            continue
+        if raw_artifact.get("available") is True:
+            available_artifact_ids.add(artifact_id)
+        else:
             global_missing.add(f"model_artifact:{artifact_id}:{raw_artifact.get('output_path')}")
+    if available_artifact_ids:
+        serving_environments = validate_serving_environments(
+            configuration.model_artifacts_path.parent,
+            available_artifact_ids,
+            probe_cli=False,
+        )
+        for raw_environment in cast(list[object], serving_environments["environments"]):
+            if not isinstance(raw_environment, dict) or raw_environment.get("available") is True:
+                continue
+            global_missing.add(
+                "serving_environment:"
+                f"{raw_environment.get('artifact_id')}:{raw_environment.get('environment_path')}"
+            )
     for index, task in enumerate(tasks):
         missing: list[str] = []
         for path in (*task.editable_sources, *task.public_tests):
@@ -1170,7 +1216,7 @@ def build_plan(
             if base_revision is not None and not _git_object_exists(root, base_revision, path):
                 missing.append(f"base_revision_missing:{path}")
         for tool in task.required_tools:
-            if not _tool_available(tool):
+            if not tool_availability[tool]:
                 missing.append(f"tool:{tool}")
         global_missing.update(missing)
         arm_by_id = {arm.arm_id: arm for arm in configuration.arms}
@@ -1555,8 +1601,10 @@ def preflight_report(
     repository_root: Path,
     configuration: ExperimentConfiguration,
     *,
+    phase_id: PhaseId | None = None,
     probe_runtime: bool = False,
 ) -> JsonObject:
+    _activate_isolated_tools(repository_root)
     tasks = load_benchmark_manifest(configuration.manifest_path)
     tool_names = sorted({tool for task in tasks for tool in task.required_tools})
     tools = {name: _tool_version(name) for name in tool_names}
@@ -1580,12 +1628,22 @@ def preflight_report(
     ]
     affected = [item for item in affected if item["missing_required_tools"]]
     phases: JsonObject = {}
-    for phase_id in ("phase1", "phase2"):
-        prerequisites = runtime_prerequisites(repository_root, configuration, phase_id=phase_id)
+    selected_phases: tuple[PhaseId, ...] = (
+        (phase_id,)
+        if phase_id is not None
+        else (
+            "phase1",
+            "phase2",
+        )
+    )
+    for selected_phase in selected_phases:
+        prerequisites = runtime_prerequisites(
+            repository_root, configuration, phase_id=selected_phase
+        )
         runtime: JsonObject = {"status": "NOT_PROBED"}
         if probe_runtime and prerequisites.get("passed") is True:
-            runtime = validate_runtime(repository_root, configuration, phase_id)
-        phases[phase_id] = {
+            runtime = validate_runtime(repository_root, configuration, selected_phase)
+        phases[selected_phase] = {
             "prerequisites": prerequisites,
             "runtime": runtime,
             "can_start": runtime.get("status") == "RUNTIME_READY" if probe_runtime else False,
@@ -1601,11 +1659,62 @@ def preflight_report(
         "status": "PREFLIGHT_REPORTED",
         "model_calls": False,
         "runtime_probed": probe_runtime,
+        "selected_phase": phase_id,
         "tools": tools,
         "optional_strengthening_tools": optional_tools,
         "gate_policy": "A missing task-declared required tool blocks that task; missing optional strengthening tools are recorded and never silently treated as passes.",
         "tasks_affected_by_missing_required_tools": affected,
         "phases": phases,
+    }
+
+
+def validate_phase_setup(
+    repository_root: Path,
+    configuration: ExperimentConfiguration,
+    phase_id: PhaseId,
+    *,
+    probe_runtime: bool = False,
+) -> JsonObject:
+    """Validate one phase without requiring artifacts or endpoints from the other phase."""
+    _activate_isolated_tools(repository_root)
+    selected_artifact_ids = (
+        {"phase1_main"} if phase_id == "phase1" else {"phase2_main", "phase2_rtl_worker"}
+    )
+    artifact_validation = validate_local_artifacts(
+        configuration.model_artifacts_path.parent, selected_artifact_ids
+    )
+    prerequisites = runtime_prerequisites(repository_root, configuration, phase_id=phase_id)
+    held_value = os.getenv(configuration.held_out_environment_variable)
+    held_out: JsonObject = {"status": "MISSING"}
+    if held_value:
+        held_out = validate_held_out_pack(repository_root, configuration, Path(held_value))
+    with tempfile.TemporaryDirectory(prefix=f"laplace-{phase_id}-corpus-") as temporary:
+        overlay = Path(temporary) / "Library"
+        preparation = prepare_corpus_overlay(
+            repository_root, configuration.base_reference_root, overlay
+        )
+        corpus = validate_corpus_retrieval(overlay)
+    runtime: JsonObject = {"status": "NOT_PROBED"}
+    if probe_runtime and prerequisites.get("passed") is True:
+        runtime = validate_runtime(repository_root, configuration, phase_id)
+    ready = (
+        prerequisites.get("passed") is True
+        and artifact_validation.get("status") == "ALL_MODEL_ARTIFACTS_AVAILABLE"
+        and held_out.get("status") == "VALID_ISOLATED_HELD_OUT_PACK"
+        and corpus.get("status") == "VERIFIED_NON_EMPTY"
+        and (not probe_runtime or runtime.get("status") == "RUNTIME_READY")
+    )
+    return {
+        "status": "PHASE_CONFIGURATION_READY" if ready else "FAILED",
+        "phase_id": phase_id,
+        "model_calls": False,
+        "runtime_probed": probe_runtime,
+        "prerequisites": prerequisites,
+        "artifact_validation": artifact_validation,
+        "held_out": held_out,
+        "corpus_preparation": preparation,
+        "corpus_validation": corpus,
+        "runtime": runtime,
     }
 
 
@@ -2750,6 +2859,8 @@ def main(argv: list[str] | None = None) -> int:
         choices=(
             "validate-config",
             "validate-complete",
+            "validate-phase1",
+            "validate-phase2",
             "validate-manifest",
             "validate-corpus",
             "validate-heldout",
@@ -2778,6 +2889,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--request", type=Path, help=argparse.SUPPRESS)
     arguments = parser.parse_args(argv)
     root = Path.cwd().resolve()
+    _activate_isolated_tools(root)
     config_path = (arguments.config or _default_config(root)).resolve()
     try:
         configuration = load_experiment_configuration(
@@ -2833,6 +2945,16 @@ def main(argv: list[str] | None = None) -> int:
                 "held_out": held_out,
                 "missing_prerequisites": sorted(set(str(item) for item in missing)),
             }
+        elif arguments.command in {"validate-phase1", "validate-phase2"}:
+            phase_to_validate: PhaseId = (
+                "phase1" if arguments.command == "validate-phase1" else "phase2"
+            )
+            result = validate_phase_setup(
+                root,
+                configuration,
+                phase_to_validate,
+                probe_runtime=arguments.probe_runtime,
+            )
         elif arguments.command == "validate-manifest":
             tasks = load_benchmark_manifest(configuration.manifest_path)
             result = {
@@ -2899,7 +3021,13 @@ def main(argv: list[str] | None = None) -> int:
                 )
             result = validate_held_out_pack(root, configuration, Path(held_value))
         elif arguments.command == "preflight":
-            result = preflight_report(root, configuration, probe_runtime=arguments.probe_runtime)
+            selected_phase = cast(PhaseId, arguments.phase) if arguments.phase is not None else None
+            result = preflight_report(
+                root,
+                configuration,
+                phase_id=selected_phase,
+                probe_runtime=arguments.probe_runtime,
+            )
         elif arguments.command == "validate-runtime":
             if arguments.phase is None:
                 raise EngineeringError("validate-runtime requires --phase phase1 or phase2")

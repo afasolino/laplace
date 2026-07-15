@@ -49,11 +49,11 @@ if [[ -z "${LAPLACE_ABLATION_HELD_OUT_ROOT:-}" ]]; then
   exit 2
 fi
 
-"${PYTHON}" -m research_workspace.multilanguage_ablation validate-config --config "${CONFIG}"
+"${PYTHON}" -m research_workspace.multilanguage_ablation "validate-${ACTION}" --config "${CONFIG}"
 "${PYTHON}" -m research_workspace.multilanguage_ablation validate-manifest --config "${CONFIG}"
 "${PYTHON}" -m research_workspace.multilanguage_ablation validate-corpus --config "${CONFIG}" --corpus-overlay "${CORPUS_ROOT}"
 "${PYTHON}" -m research_workspace.multilanguage_ablation validate-heldout --config "${CONFIG}"
-"${PYTHON}" -m research_workspace.multilanguage_ablation plan-only --config "${CONFIG}"
+"${PYTHON}" -m research_workspace.multilanguage_ablation plan-only --phase "${ACTION}" --config "${CONFIG}"
 "${PYTHON}" -m research_workspace.multilanguage_ablation validate-runtime --phase "${ACTION}" --config "${CONFIG}"
 "${PYTHON}" -m research_workspace.multilanguage_ablation "run-${ACTION}" --config "${CONFIG}"
 

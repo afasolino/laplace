@@ -41,7 +41,9 @@
       },
       "serving": {
         "backend": "vllm",
-        "backend_version": "0.25.0",
+        "backend_version": "0.8.5.post1",
+        "environment_path": "/home/giando/work/laplace/.venv-vllm-cu124",
+        "executable": "/home/giando/work/laplace/.venv-vllm-cu124/bin/vllm",
         "endpoint": "http://127.0.0.1:8101",
         "context_tokens": 32768,
         "max_output_tokens": 4096,
@@ -85,6 +87,8 @@
       "serving": {
         "backend": "vllm",
         "backend_version": "0.25.0",
+        "environment_path": "/home/giando/work/laplace/.venv-vllm",
+        "executable": "/home/giando/work/laplace/.venv-vllm/bin/vllm",
         "endpoint": "http://127.0.0.1:8102",
         "context_tokens": 32768,
         "max_output_tokens": 4096,
@@ -129,6 +133,8 @@
       "serving": {
         "backend": "vllm",
         "backend_version": "0.25.0",
+        "environment_path": "/home/giando/work/laplace/.venv-vllm",
+        "executable": "/home/giando/work/laplace/.venv-vllm/bin/vllm",
         "endpoint": "http://127.0.0.1:8103",
         "context_tokens": 16384,
         "max_output_tokens": 4096,

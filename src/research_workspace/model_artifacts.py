@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess  # nosec B404
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -118,6 +119,8 @@ def load_model_artifacts(path: Path) -> dict[str, JsonObject]:
         required_serving = {
             "backend",
             "backend_version",
+            "environment_path",
+            "executable",
             "endpoint",
             "context_tokens",
             "max_output_tokens",
@@ -130,6 +133,8 @@ def load_model_artifacts(path: Path) -> dict[str, JsonObject]:
         if not required_serving.issubset(serving) or not set(serving).issubset(allowed_serving):
             raise EngineeringError(f"Model artifact {artifact_id} serving keys are invalid")
         parsed_endpoint = urlsplit(str(serving.get("endpoint", "")))
+        environment_path = Path(str(serving.get("environment_path", "")))
+        executable_path = Path(str(serving.get("executable", "")))
         if (
             parsed_endpoint.scheme != "http"
             or parsed_endpoint.hostname != "127.0.0.1"
@@ -137,6 +142,14 @@ def load_model_artifacts(path: Path) -> dict[str, JsonObject]:
             or parsed_endpoint.path not in {"", "/"}
         ):
             raise EngineeringError(f"Model artifact {artifact_id} endpoint must be loopback-only")
+        if (
+            not environment_path.is_absolute()
+            or not executable_path.is_absolute()
+            or executable_path.parent.parent != environment_path
+        ):
+            raise EngineeringError(
+                f"Model artifact {artifact_id} serving environment paths are invalid"
+            )
         gpu_fraction = serving.get("gpu_memory_utilization")
         extra_args = serving.get("extra_args")
         if (
@@ -165,6 +178,125 @@ def load_model_artifacts(path: Path) -> dict[str, JsonObject]:
     if set(records) != _ARTIFACT_IDS:
         raise EngineeringError("Model artifact ids are incomplete")
     return records
+
+
+def validate_serving_environments(
+    experiment_root: Path,
+    artifact_ids: set[str] | None = None,
+    *,
+    probe_cli: bool = True,
+) -> JsonObject:
+    """Validate pinned vLLM environments without importing CUDA or loading a model."""
+    records = load_model_artifacts(experiment_root / "model_artifacts.json")
+    selected = artifact_ids or set(records)
+    unknown = selected - set(records)
+    if unknown:
+        raise EngineeringError(f"Unknown model artifact ids: {sorted(unknown)}")
+    results: list[JsonObject] = []
+    for artifact_id in sorted(selected):
+        record = records[artifact_id]
+        serving = cast(JsonObject, record["serving"])
+        environment = Path(str(serving["environment_path"])).expanduser().resolve()
+        executable = Path(str(serving["executable"])).expanduser().resolve()
+        python = environment / "bin" / "python"
+        expected_version = str(serving["backend_version"])
+        errors: list[str] = []
+        detected_version: str | None = None
+        cli_returncode: int | None = None
+        cli_error: str | None = None
+        arguments_supported: bool | None = None
+        missing_arguments: list[str] = []
+        if not environment.is_dir():
+            errors.append("environment_missing")
+        if not python.is_file():
+            errors.append("python_missing")
+        if not executable.is_file() or not (executable.stat().st_mode & 0o111):
+            errors.append("vllm_executable_missing")
+        if not errors:
+            try:
+                metadata = subprocess.run(  # nosec B603
+                    [
+                        str(python),
+                        "-c",
+                        "from importlib.metadata import version; print(version('vllm'))",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=30,
+                )
+                detected_version = metadata.stdout.strip() if metadata.returncode == 0 else None
+                if detected_version != expected_version:
+                    errors.append("vllm_version_mismatch")
+                if probe_cli:
+                    cli = subprocess.run(  # nosec B603
+                        [str(executable), "--version"],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=30,
+                    )
+                    cli_returncode = cli.returncode
+                    if cli.returncode != 0:
+                        lines = (cli.stderr or cli.stdout).strip().splitlines()
+                        cli_error = lines[-1] if lines else "vllm --version returned no diagnostics"
+                        errors.append("vllm_cli_unusable")
+                    else:
+                        help_result = subprocess.run(  # nosec B603
+                            [str(executable), "serve", "--help"],
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                            timeout=30,
+                        )
+                        required_arguments = {
+                            "--host",
+                            "--port",
+                            "--served-model-name",
+                            "--tensor-parallel-size",
+                            "--max-model-len",
+                            "--max-num-seqs",
+                            "--gpu-memory-utilization",
+                            "--enable-prefix-caching",
+                            "--enable-chunked-prefill",
+                            *(
+                                argument
+                                for argument in cast(list[str], serving["extra_args"])
+                                if argument.startswith("--")
+                            ),
+                        }
+                        help_text = help_result.stdout + help_result.stderr
+                        missing_arguments = sorted(
+                            argument for argument in required_arguments if argument not in help_text
+                        )
+                        arguments_supported = help_result.returncode == 0 and not missing_arguments
+                        if not arguments_supported:
+                            errors.append("vllm_serving_arguments_unsupported")
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                cli_error = str(exc)
+                errors.append("vllm_environment_probe_failed")
+        results.append(
+            {
+                "artifact_id": artifact_id,
+                "available": not errors,
+                "environment_path": str(environment),
+                "executable": str(executable),
+                "expected_version": expected_version,
+                "detected_version": detected_version,
+                "cli_returncode": cli_returncode,
+                "cli_probe": "COMPLETE" if probe_cli else "NOT_REQUESTED",
+                "cli_error": cli_error,
+                "arguments_supported": arguments_supported,
+                "missing_arguments": missing_arguments,
+                "errors": errors,
+            }
+        )
+    return {
+        "status": "SERVING_ENVIRONMENTS_READY"
+        if all(item["available"] is True for item in results)
+        else "SERVING_ENVIRONMENTS_INCOMPLETE",
+        "environments": results,
+    }
 
 
 def validate_profile_alignment(experiment_root: Path) -> JsonObject:
@@ -208,7 +340,12 @@ def validate_profile_alignment(experiment_root: Path) -> JsonObject:
 
 
 def _validate_artifact_manifest(
-    artifact_id: str, output_path: Path, manifest_path: Path, source_revision: str
+    artifact_id: str,
+    output_path: Path,
+    manifest_path: Path,
+    source_revision: str,
+    *,
+    verify_hashes: bool,
 ) -> JsonObject:
     if not manifest_path.is_file():
         return {"status": "MISSING", "path": str(manifest_path)}
@@ -237,10 +374,14 @@ def _validate_artifact_manifest(
         source = output_path / relative_path
         if not source.is_file():
             errors.append(f"missing:{relative}")
-        elif source.stat().st_size != raw.get("size") or _sha256(source) != raw.get("sha256"):
+        elif source.stat().st_size != raw.get("size") or (
+            verify_hashes and _sha256(source) != raw.get("sha256")
+        ):
             errors.append(f"hash:{relative}")
     return {
-        "status": "VERIFIED" if not errors else "INVALID",
+        "status": ("VERIFIED" if verify_hashes else "METADATA_VERIFIED")
+        if not errors
+        else "INVALID",
         "path": str(manifest_path),
         "files": len(files),
         "errors": errors,
@@ -288,10 +429,23 @@ def _quantization_config_status(artifact_id: str, config: JsonObject) -> str:
     )
 
 
-def validate_local_artifacts(experiment_root: Path) -> JsonObject:
+def validate_local_artifacts(
+    experiment_root: Path,
+    artifact_ids: set[str] | None = None,
+    *,
+    verify_hashes: bool = True,
+) -> JsonObject:
     records = load_model_artifacts(experiment_root / "model_artifacts.json")
+    selected = artifact_ids or set(records)
+    unknown = selected - set(records)
+    if unknown:
+        raise EngineeringError(f"Unknown model artifact ids: {sorted(unknown)}")
     results: list[JsonObject] = []
-    for artifact_id in ("phase1_main", "phase2_main", "phase2_rtl_worker"):
+    for artifact_id in (
+        candidate
+        for candidate in ("phase1_main", "phase2_main", "phase2_rtl_worker")
+        if candidate in selected
+    ):
         record = records[artifact_id]
         output = Path(str(record["output_path"])).expanduser().resolve()
         verification = cast(JsonObject, record["verification"])
@@ -305,11 +459,18 @@ def validate_local_artifacts(experiment_root: Path) -> JsonObject:
             config_status = _quantization_config_status(artifact_id, config)
         manifest_path = Path(str(verification.get("artifact_manifest"))).expanduser().resolve()
         manifest = _validate_artifact_manifest(
-            artifact_id, output, manifest_path, str(record["source_revision"])
+            artifact_id,
+            output,
+            manifest_path,
+            str(record["source_revision"]),
+            verify_hashes=verify_hashes,
         )
-        available = output.is_dir() and not missing and config_status == "VERIFIED"
-        if record["availability_policy"] == "requires_local_quantization":
-            available = available and manifest.get("status") == "VERIFIED"
+        available = (
+            output.is_dir()
+            and not missing
+            and config_status == "VERIFIED"
+            and manifest.get("status") in {"VERIFIED", "METADATA_VERIFIED"}
+        )
         results.append(
             {
                 "artifact_id": artifact_id,

@@ -6,7 +6,6 @@
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
 STATE_DIR="${ROOT}/outputs/a6000_agent_team/model_servers"
-VLLM="${ROOT}/.venv-vllm/bin/vllm"
 PYTHON="${ROOT}/.venv/bin/python"
 
 mkdir -p "${STATE_DIR}" 2>/dev/null
@@ -19,17 +18,18 @@ profile_values() {
   mapfile -t PROFILE_DATA < <(
     "${PYTHON}" "${ROOT}/scripts/manage_multilanguage_models.py" server-profile --artifact "$1"
   )
-  if [ "${#PROFILE_DATA[@]}" -lt 7 ]; then
+  if [ "${#PROFILE_DATA[@]}" -lt 8 ]; then
     echo "Invalid or unknown server profile: $1"
     return 2
   fi
-  MODEL_PATH="${PROFILE_DATA[0]}"
-  SERVED_MODEL="${PROFILE_DATA[1]}"
-  PORT="${PROFILE_DATA[2]}"
-  GPU_FRACTION="${PROFILE_DATA[3]}"
-  MAX_MODEL_LEN="${PROFILE_DATA[4]}"
-  MAX_SEQS="${PROFILE_DATA[5]}"
-  EXTRA_ARGS=("${PROFILE_DATA[@]:6}")
+  VLLM="${PROFILE_DATA[0]}"
+  MODEL_PATH="${PROFILE_DATA[1]}"
+  SERVED_MODEL="${PROFILE_DATA[2]}"
+  PORT="${PROFILE_DATA[3]}"
+  GPU_FRACTION="${PROFILE_DATA[4]}"
+  MAX_MODEL_LEN="${PROFILE_DATA[5]}"
+  MAX_SEQS="${PROFILE_DATA[6]}"
+  EXTRA_ARGS=("${PROFILE_DATA[@]:7}")
   PID_FILE="${STATE_DIR}/${1}.pid"
   LOG_FILE="${STATE_DIR}/${1}_$(date -u +%Y%m%dT%H%M%SZ).log"
 }
@@ -130,12 +130,29 @@ status_profile() {
   return 0
 }
 
+command_profile() {
+  PROFILE="$1"
+  profile_values "${PROFILE}" || return 0
+  printf 'profile=%s\nexecutable=%s\npid_file=%s\nlog_file=%s\ncommand=' \
+    "${PROFILE}" "${VLLM}" "${PID_FILE}" "${LOG_FILE}"
+  printf '%q ' "${VLLM}" serve "${MODEL_PATH}" \
+    --host 127.0.0.1 --port "${PORT}" --served-model-name "${SERVED_MODEL}" \
+    --tensor-parallel-size 1 --max-model-len "${MAX_MODEL_LEN}" \
+    --max-num-seqs "${MAX_SEQS}" --gpu-memory-utilization "${GPU_FRACTION}" \
+    --enable-prefix-caching --enable-chunked-prefill "${EXTRA_ARGS[@]}"
+  printf '\n'
+  return 0
+}
+
 ACTION="${1:-help}"
 case "${ACTION}" in
   start-phase1) start_profile phase1_main ;;
   start-phase2-main) start_profile phase2_main ;;
   start-phase2-worker) start_profile phase2_rtl_worker ;;
   start-phase2) start_profile phase2_main; start_profile phase2_rtl_worker ;;
+  command-phase1) command_profile phase1_main ;;
+  command-phase2-main) command_profile phase2_main ;;
+  command-phase2-worker) command_profile phase2_rtl_worker ;;
   stop-phase1) stop_profile phase1_main ;;
   stop-phase2-main) stop_profile phase2_main ;;
   stop-phase2-worker) stop_profile phase2_rtl_worker ;;
@@ -156,7 +173,7 @@ case "${ACTION}" in
     "${ROOT}/.venv/bin/python" "${ROOT}/scripts/manage_multilanguage_models.py" gpu
     ;;
   *)
-    echo "Usage: $0 {start-phase1|start-phase2-main|start-phase2-worker|start-phase2|stop-phase1|stop-phase2-main|stop-phase2-worker|stop-phase2|status|health-phase1|health-phase2|gpu}"
+    echo "Usage: $0 {start-phase1|start-phase2-main|start-phase2-worker|start-phase2|command-phase1|command-phase2-main|command-phase2-worker|stop-phase1|stop-phase2-main|stop-phase2-worker|stop-phase2|status|health-phase1|health-phase2|gpu}"
     ;;
 esac
 
