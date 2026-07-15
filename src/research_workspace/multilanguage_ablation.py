@@ -75,7 +75,9 @@ EXPERIMENT_ID = "multilanguage_dual_model_ablation_v1"
 _TASK_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 Category = Literal["implementation", "repair", "edge_case", "integration"]
-PhaseId = Literal["phase1", "phase2"]
+PhaseId = Literal["phase1", "phase2", "phase3"]
+_PHASE_IDS: tuple[PhaseId, ...] = ("phase1", "phase2", "phase3")
+_ARM_PHASE: dict[str, PhaseId] = {"A": "phase1", "B": "phase2", "C": "phase3"}
 
 
 def _activate_isolated_tools(repository_root: Path) -> None:
@@ -158,7 +160,7 @@ class ExperimentPhase:
     phase_id: PhaseId
     label: str
     arm_ids: tuple[Literal["A", "B", "C"], ...]
-    requires_completed_phase: PhaseId | None
+    requires_completed_phases: tuple[PhaseId, ...]
 
 
 @dataclass(frozen=True)
@@ -520,8 +522,8 @@ def load_experiment_configuration(
     if arms[1].models.main != arms[2].models.main:
         raise EngineeringError("Arms B and C must use the identical main-model profile")
     raw_phases = value.get("phases")
-    if not isinstance(raw_phases, list) or len(raw_phases) != 2:
-        raise EngineeringError("Experiment must configure exactly two serialized phases")
+    if not isinstance(raw_phases, list) or len(raw_phases) != 3:
+        raise EngineeringError("Experiment must configure exactly three serialized phases")
     phases: list[ExperimentPhase] = []
     for index, raw_phase in enumerate(raw_phases):
         if not isinstance(raw_phase, dict):
@@ -529,25 +531,33 @@ def load_experiment_configuration(
         phase_value = dict(raw_phase)
         _exact_keys(
             phase_value,
-            {"phase_id", "label", "arms", "requires_completed_phase"},
+            {"phase_id", "label", "arms", "requires_completed_phases"},
             label=f"Experiment phase {index}",
         )
         phase_id = phase_value.get("phase_id")
-        expected_id = "phase1" if index == 0 else "phase2"
+        expected_id = _PHASE_IDS[index]
         if phase_id != expected_id:
-            raise EngineeringError("Serialized phases must be listed as phase1 then phase2")
+            raise EngineeringError(
+                "Serialized phases must be listed as phase1, phase2, then phase3"
+            )
         phase_arms = _strings(phase_value.get("arms"), label=f"{phase_id} arms")
-        required = phase_value.get("requires_completed_phase")
-        if index == 0 and (phase_arms != ("A",) or required is not None):
+        required = _strings(
+            phase_value.get("requires_completed_phases"),
+            label=f"{phase_id} dependencies",
+            non_empty=False,
+        )
+        if index == 0 and (phase_arms != ("A",) or required):
             raise EngineeringError("Phase 1 must contain only Arm A and have no dependency")
-        if index == 1 and (phase_arms != ("B", "C") or required != "phase1"):
-            raise EngineeringError("Phase 2 must contain Arms B/C and require completed Phase 1")
+        if index == 1 and (phase_arms != ("B",) or required != ("phase1",)):
+            raise EngineeringError("Phase 2 must contain only Arm B and require Phase 1")
+        if index == 2 and (phase_arms != ("C",) or required != ("phase1", "phase2")):
+            raise EngineeringError("Phase 3 must contain only Arm C and require Phases 1 and 2")
         phases.append(
             ExperimentPhase(
                 phase_id=cast(PhaseId, phase_id),
                 label=_string(phase_value.get("label"), label=f"{phase_id} label"),
                 arm_ids=cast(tuple[Literal["A", "B", "C"], ...], phase_arms),
-                requires_completed_phase=cast(PhaseId | None, required),
+                requires_completed_phases=cast(tuple[PhaseId, ...], required),
             )
         )
     aligned = (
@@ -914,6 +924,23 @@ def _phase_arms(
     return tuple(arm for arm in configuration.arms if arm.arm_id in identifiers)
 
 
+def _phase_for_arm(arm_id: str) -> PhaseId:
+    try:
+        return _ARM_PHASE[arm_id]
+    except KeyError as exc:
+        raise EngineeringError(f"Unknown experiment arm: {arm_id}") from exc
+
+
+def _artifact_ids_for_phase(phase_id: PhaseId | None) -> set[str]:
+    if phase_id == "phase1":
+        return {"phase1_main"}
+    if phase_id == "phase2":
+        return {"phase2_main"}
+    if phase_id == "phase3":
+        return {"phase2_main", "phase2_rtl_worker"}
+    return {"phase1_main", "phase2_main", "phase2_rtl_worker"}
+
+
 def _phase_manifest_path(configuration: ExperimentConfiguration, phase_id: PhaseId) -> Path:
     return configuration.output_root / "phases" / phase_id / "manifest.json"
 
@@ -1172,13 +1199,7 @@ def build_plan(
         global_missing.add(
             "model_profiles:" + ",".join(cast(list[str], profile_alignment["errors"]))
         )
-    selected_artifact_ids = (
-        {"phase1_main"}
-        if phase_id == "phase1"
-        else {"phase2_main", "phase2_rtl_worker"}
-        if phase_id == "phase2"
-        else {"phase1_main", "phase2_main", "phase2_rtl_worker"}
-    )
+    selected_artifact_ids = _artifact_ids_for_phase(phase_id)
     local_artifacts = validate_local_artifacts(
         configuration.model_artifacts_path.parent,
         selected_artifact_ids,
@@ -1238,7 +1259,8 @@ def build_plan(
                 "arm_order": list(_arm_order(index)),
                 "phase_arm_order": {
                     "phase1": ["A"],
-                    "phase2": [arm_id for arm_id in _arm_order(index) if arm_id in {"B", "C"}],
+                    "phase2": ["B"],
+                    "phase3": ["C"],
                 },
                 "worker_eligibility": assess_rtl_worker_eligibility(task.routing).to_json(),
                 "expected_model_route": expected_routes,
@@ -1262,7 +1284,7 @@ def build_plan(
                 "phase_id": phase.phase_id,
                 "label": phase.label,
                 "arms": list(phase.arm_ids),
-                "requires_completed_phase": phase.requires_completed_phase,
+                "requires_completed_phases": list(phase.requires_completed_phases),
             }
             for phase in configuration.phases
         ],
@@ -1315,26 +1337,32 @@ def runtime_prerequisites(
         for path in (*task.editable_sources, *task.public_tests):
             if not _git_object_exists(repository_root, configuration.base_revision, path):
                 missing.append(f"base_revision_missing:{path}")
-    if phase_id == "phase2":
-        phase_one = phase_status(configuration, "phase1")
-        if phase_one.get("status") != "COMPLETE":
-            missing.append("phase1_not_complete_or_incompatible")
-        elif isinstance(phase_one.get("manifest"), dict):
+    if phase_id is not None:
+        held_value = os.getenv(configuration.held_out_environment_variable)
+        held_hash = (
+            _sha256_file(Path(held_value).expanduser().resolve() / "manifest.json")
+            if held_value
+            else "UNRESOLVED"
+        )
+        corpus_hashes = _corpus_snapshot_hashes(configuration.overlay_root)
+        for dependency in _phase(configuration, phase_id).requires_completed_phases:
+            dependency_status = phase_status(configuration, dependency)
+            if dependency_status.get("status") != "COMPLETE":
+                missing.append(f"{dependency}_not_complete_or_incompatible")
+                continue
+            manifest = dependency_status.get("manifest")
+            if not isinstance(manifest, dict):
+                missing.append(f"{dependency}_manifest_missing")
+                continue
             try:
-                held_value = os.getenv(configuration.held_out_environment_variable)
-                held_hash = (
-                    _sha256_file(Path(held_value).expanduser().resolve() / "manifest.json")
-                    if held_value
-                    else "UNRESOLVED"
-                )
                 _assert_phase_manifest_compatible(
                     configuration,
-                    cast(JsonObject, phase_one["manifest"]),
-                    _corpus_snapshot_hashes(configuration.overlay_root),
+                    cast(JsonObject, manifest),
+                    corpus_hashes,
                     held_hash,
                 )
             except EngineeringError as exc:
-                missing.append(f"phase1_incompatible:{exc}")
+                missing.append(f"{dependency}_incompatible:{exc}")
     return {"passed": not missing, "missing": sorted(set(str(item) for item in missing))}
 
 
@@ -1395,16 +1423,19 @@ def _pair_complete(
     task_id: str,
     *,
     held_out_manifest_sha256: str | None = None,
+    configuration_fingerprint: JsonObject | None = None,
 ) -> bool:
     path = _pair_result_path(configuration, arm_id, task_id)
     if not path.is_file():
         return False
     value = _read_json(path)
-    expected_phase = "phase1" if arm_id == "A" else "phase2"
+    expected_phase = _phase_for_arm(arm_id)
     return (
         value.get("status") == "COMPLETE_EVALUATED"
         and value.get("base_revision") == configuration.base_revision
         and value.get("execution_phase") == expected_phase
+        and configuration_fingerprint is not None
+        and value.get("configuration_fingerprint") == configuration_fingerprint
         and (
             held_out_manifest_sha256 is None
             or value.get("held_out_manifest_sha256") == held_out_manifest_sha256
@@ -1449,6 +1480,11 @@ def phase_status(configuration: ExperimentConfiguration, phase_id: PhaseId) -> J
         and isinstance(fingerprint.get("held_out_manifest_sha256"), str)
         else None
     )
+    compatible_fingerprint = (
+        cast(JsonObject, fingerprint)
+        if isinstance(fingerprint, dict) and not compatibility_errors
+        else None
+    )
     completed = [
         {"task_id": task_id, "arm_id": arm_id}
         for task_id, arm_id in expected
@@ -1457,6 +1493,7 @@ def phase_status(configuration: ExperimentConfiguration, phase_id: PhaseId) -> J
             arm_id,
             task_id,
             held_out_manifest_sha256=held_out_manifest_sha256,
+            configuration_fingerprint=compatible_fingerprint,
         )
     ]
     pairs_complete = len(completed) == len(expected)
@@ -1587,6 +1624,11 @@ def _write_phase_manifest(
         "tool_versions": tool_versions,
         "gpu_memory_observations": gpu_observations,
         "endpoint_health": endpoint_health,
+        "server_lifecycle": {
+            "management_mode": os.getenv("LAPLACE_SERVER_MANAGEMENT_MODE", "external"),
+            "orchestration_id": os.getenv("LAPLACE_SERVER_OWNER_TOKEN"),
+            "profiles": sorted(_artifact_ids_for_phase(phase_id)),
+        },
         "output_paths": {
             "phase_manifest": str(path),
             "pair_results": str(configuration.output_root / "pairs"),
@@ -1628,14 +1670,7 @@ def preflight_report(
     ]
     affected = [item for item in affected if item["missing_required_tools"]]
     phases: JsonObject = {}
-    selected_phases: tuple[PhaseId, ...] = (
-        (phase_id,)
-        if phase_id is not None
-        else (
-            "phase1",
-            "phase2",
-        )
-    )
+    selected_phases: tuple[PhaseId, ...] = (phase_id,) if phase_id is not None else _PHASE_IDS
     for selected_phase in selected_phases:
         prerequisites = runtime_prerequisites(
             repository_root, configuration, phase_id=selected_phase
@@ -1675,11 +1710,9 @@ def validate_phase_setup(
     *,
     probe_runtime: bool = False,
 ) -> JsonObject:
-    """Validate one phase without requiring artifacts or endpoints from the other phase."""
+    """Validate one phase without requiring artifacts or endpoints from other phases."""
     _activate_isolated_tools(repository_root)
-    selected_artifact_ids = (
-        {"phase1_main"} if phase_id == "phase1" else {"phase2_main", "phase2_rtl_worker"}
-    )
+    selected_artifact_ids = _artifact_ids_for_phase(phase_id)
     artifact_validation = validate_local_artifacts(
         configuration.model_artifacts_path.parent, selected_artifact_ids
     )
@@ -2185,16 +2218,19 @@ def run_phase(
         ):
             raise EngineeringError(f"Arm {arm.arm_id} endpoint identity preflight failed")
     corpus_hashes = _corpus_snapshot_hashes(configuration.overlay_root)
-    if phase_id == "phase2":
-        phase_one_path = _phase_manifest_path(configuration, "phase1")
-        if not phase_one_path.is_file():
-            raise EngineeringError("Phase 2 requires a completed Phase 1 manifest")
-        phase_one_manifest = _read_json(phase_one_path)
-        if phase_one_manifest.get("status") != "COMPLETE":
-            raise EngineeringError("Phase 2 requires Phase 1 status COMPLETE")
+    configuration_fingerprint = _configuration_fingerprint(
+        configuration, corpus_hashes, held_out_manifest_sha256
+    )
+    for dependency in _phase(configuration, phase_id).requires_completed_phases:
+        dependency_path = _phase_manifest_path(configuration, dependency)
+        if not dependency_path.is_file():
+            raise EngineeringError(f"{phase_id} requires a completed {dependency} manifest")
+        dependency_manifest = _read_json(dependency_path)
+        if dependency_manifest.get("status") != "COMPLETE":
+            raise EngineeringError(f"{phase_id} requires {dependency} status COMPLETE")
         _assert_phase_manifest_compatible(
             configuration,
-            phase_one_manifest,
+            dependency_manifest,
             corpus_hashes,
             held_out_manifest_sha256,
         )
@@ -2235,6 +2271,7 @@ def run_phase(
                 arm.arm_id,
                 task.task_id,
                 held_out_manifest_sha256=held_out_manifest_sha256,
+                configuration_fingerprint=configuration_fingerprint,
             ):
                 resumed += 1
                 continue
@@ -2338,6 +2375,7 @@ def run_phase(
                 "arm_id": arm.arm_id,
                 "base_revision": _require_base_revision(configuration),
                 "execution_phase": phase_id,
+                "configuration_fingerprint": configuration_fingerprint,
                 "held_out_manifest_sha256": held_out_manifest_sha256,
                 "started_at": pair_started_at,
                 "ended_at": _now(),
@@ -2455,11 +2493,11 @@ def _sum_numeric_field(rows: list[JsonObject], field: str) -> float:
 
 
 def merge_phase_results(configuration: ExperimentConfiguration) -> JsonObject:
-    """Validate both serialized phases and package their one logical result set."""
+    """Validate all serialized phases and package their one logical result set."""
     _require_base_revision(configuration)
     corpus_hashes = _corpus_snapshot_hashes(configuration.overlay_root)
     phase_manifests: list[JsonObject] = []
-    for phase_id in ("phase1", "phase2"):
+    for phase_id in _PHASE_IDS:
         status = phase_status(configuration, phase_id)
         if status.get("status") != "COMPLETE":
             raise EngineeringError(
@@ -2479,7 +2517,7 @@ def merge_phase_results(configuration: ExperimentConfiguration) -> JsonObject:
         _assert_phase_manifest_compatible(configuration, dict(manifest), corpus_hashes, held_hash)
         phase_manifests.append(dict(manifest))
     first_fingerprint = phase_manifests[0].get("fingerprint")
-    if phase_manifests[1].get("fingerprint") != first_fingerprint:
+    if any(manifest.get("fingerprint") != first_fingerprint for manifest in phase_manifests[1:]):
         raise EngineeringError(
             "Serialized phase fingerprints differ; task definitions, corpus, base revision, "
             "or evaluation settings changed"
@@ -2490,18 +2528,31 @@ def merge_phase_results(configuration: ExperimentConfiguration) -> JsonObject:
     tasks = load_benchmark_manifest(configuration.manifest_path)
     expected = {(task.task_id, arm) for task in tasks for arm in ("A", "B", "C")}
     observed: set[tuple[str, str]] = set()
-    for path in sorted((configuration.output_root / "pairs").glob("*/*.json")):
+    result_paths = sorted((configuration.output_root / "pairs").glob("*/*.json"))
+    if len(result_paths) != len(expected):
+        raise EngineeringError(
+            f"Cannot merge: expected exactly {len(expected)} pair result files, "
+            f"found {len(result_paths)}"
+        )
+    for path in result_paths:
         row = _read_json(path)
         key = (str(row.get("task_id")), str(row.get("arm_id")))
-        if key in expected and row.get("status") == "COMPLETE_EVALUATED":
-            if row.get("base_revision") != configuration.base_revision:
-                raise EngineeringError(f"Pair {key} has an incompatible base revision")
-            if row.get("held_out_manifest_sha256") != expected_held_hash:
-                raise EngineeringError(f"Pair {key} has an incompatible held-out pack")
-            expected_phase = "phase1" if key[1] == "A" else "phase2"
-            if row.get("execution_phase") != expected_phase:
-                raise EngineeringError(f"Pair {key} has an invalid serialized phase record")
-            observed.add(key)
+        if key not in expected:
+            raise EngineeringError(f"Cannot merge: unexpected task-arm pair {key} in {path}")
+        if key in observed:
+            raise EngineeringError(f"Cannot merge: duplicate task-arm pair {key}")
+        if row.get("status") != "COMPLETE_EVALUATED":
+            raise EngineeringError(f"Cannot merge: pair {key} is not COMPLETE_EVALUATED")
+        if row.get("base_revision") != configuration.base_revision:
+            raise EngineeringError(f"Pair {key} has an incompatible base revision")
+        if row.get("held_out_manifest_sha256") != expected_held_hash:
+            raise EngineeringError(f"Pair {key} has an incompatible held-out pack")
+        if row.get("configuration_fingerprint") != first_fingerprint:
+            raise EngineeringError(f"Pair {key} has an incompatible fingerprint")
+        expected_phase = _phase_for_arm(key[1])
+        if row.get("execution_phase") != expected_phase:
+            raise EngineeringError(f"Pair {key} has an invalid serialized phase record")
+        observed.add(key)
     missing = sorted(expected - observed)
     if missing:
         raise EngineeringError(f"Cannot merge: {len(missing)} completed task-arm pairs are missing")
@@ -2716,7 +2767,7 @@ def package_results(configuration: ExperimentConfiguration) -> JsonObject:
             )
     phase_records = [
         _read_json(path)
-        for phase_id in ("phase1", "phase2")
+        for phase_id in _PHASE_IDS
         if (path := _phase_manifest_path(configuration, phase_id)).is_file()
     ]
     payload: JsonObject = {
@@ -2739,9 +2790,10 @@ def package_results(configuration: ExperimentConfiguration) -> JsonObject:
             "sum_all_task_seconds": _sum_numeric_field(rows, "total_task_seconds"),
         },
         "comparison_context": {
-            "B_minus_A": "cross_phase_serialized_model_serving_comparison",
-            "C_minus_B": "within_phase_new_configuration_comparison",
-            "timing_caution": "Arm A ran in a separate serving phase. Cross-phase timing includes server and phase conditions and must not be interpreted as a pure model-quality effect.",
+            "arm_phase_mapping": {"A": "phase1", "B": "phase2", "C": "phase3"},
+            "B_minus_A": "cross_model_cross_phase_serialized_comparison",
+            "C_minus_B": "specialist_routing_comparison_across_serialized_phases",
+            "timing_caution": "Every arm ran in a separate serving phase. Cross-phase timing includes server and phase conditions and must not be interpreted as a pure model-quality effect.",
         },
         "statistical_generality_claim": False,
         "warning": "This controlled 32-task benchmark supports paired diagnostic comparisons only; it does not establish statistical generality.",
@@ -2839,8 +2891,8 @@ def package_results(configuration: ExperimentConfiguration) -> JsonObject:
         "B minus A isolates the main-model replacement. C minus B isolates the RTL specialist. "
         "All held-out checks occur only after implementation stops in a separate evaluation worktree.",
         "",
-        "Arm A is executed in the legacy serving phase; Arms B and C are executed in the new serving phase. "
-        "B-minus-A timing is cross-phase and includes serving-phase conditions, while C-minus-B is within the same serving phase.",
+        "Arm A is Phase 1, Arm B is Phase 2, and Arm C is Phase 3. "
+        "Both B-minus-A and C-minus-B timings are cross-phase and include serving-phase conditions.",
         "",
         "No statistical generality is claimed from 32 tasks. Missing GPU-memory or token measurements remain null rather than estimated.",
     ]
@@ -2861,6 +2913,7 @@ def main(argv: list[str] | None = None) -> int:
             "validate-complete",
             "validate-phase1",
             "validate-phase2",
+            "validate-phase3",
             "validate-manifest",
             "validate-corpus",
             "validate-heldout",
@@ -2869,8 +2922,10 @@ def main(argv: list[str] | None = None) -> int:
             "plan-only",
             "run-phase1",
             "run-phase2",
+            "run-phase3",
             "resume-phase1",
             "resume-phase2",
+            "resume-phase3",
             "phase-status",
             "run-pair",
             "merge-report",
@@ -2879,7 +2934,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path)
     parser.add_argument("--base-revision")
     parser.add_argument("--held-out-root", type=Path)
-    parser.add_argument("--phase", choices=("phase1", "phase2"))
+    parser.add_argument("--phase", choices=_PHASE_IDS)
+    parser.add_argument(
+        "--require-complete",
+        action="store_true",
+        help="Make phase-status fail unless every selected phase is compatible and complete.",
+    )
     parser.add_argument(
         "--probe-runtime",
         action="store_true",
@@ -2909,7 +2969,7 @@ def main(argv: list[str] | None = None) -> int:
                     {
                         "phase_id": phase.phase_id,
                         "arms": list(phase.arm_ids),
-                        "requires_completed_phase": phase.requires_completed_phase,
+                        "requires_completed_phases": list(phase.requires_completed_phases),
                     }
                     for phase in configuration.phases
                 ],
@@ -2945,10 +3005,8 @@ def main(argv: list[str] | None = None) -> int:
                 "held_out": held_out,
                 "missing_prerequisites": sorted(set(str(item) for item in missing)),
             }
-        elif arguments.command in {"validate-phase1", "validate-phase2"}:
-            phase_to_validate: PhaseId = (
-                "phase1" if arguments.command == "validate-phase1" else "phase2"
-            )
+        elif arguments.command in {"validate-phase1", "validate-phase2", "validate-phase3"}:
+            phase_to_validate = cast(PhaseId, arguments.command.removeprefix("validate-"))
             result = validate_phase_setup(
                 root,
                 configuration,
@@ -3030,29 +3088,39 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif arguments.command == "validate-runtime":
             if arguments.phase is None:
-                raise EngineeringError("validate-runtime requires --phase phase1 or phase2")
+                raise EngineeringError("validate-runtime requires --phase phase1, phase2 or phase3")
             result = validate_runtime(root, configuration, cast(PhaseId, arguments.phase))
         elif arguments.command in {
             "run-phase1",
             "resume-phase1",
             "run-phase2",
             "resume-phase2",
+            "run-phase3",
+            "resume-phase3",
         }:
-            phase_id: PhaseId = "phase1" if arguments.command.endswith("phase1") else "phase2"
+            phase_id = cast(PhaseId, arguments.command.rsplit("-", 1)[-1])
             result = run_phase(root, configuration, phase_id)
         elif arguments.command == "phase-status":
             _require_base_revision(configuration)
             selected = (
-                (cast(PhaseId, arguments.phase),)
-                if arguments.phase is not None
-                else ("phase1", "phase2")
+                (cast(PhaseId, arguments.phase),) if arguments.phase is not None else _PHASE_IDS
+            )
+            phase_results = {
+                selected_phase: phase_status(configuration, selected_phase)
+                for selected_phase in selected
+            }
+            all_complete = all(
+                record.get("status") == "COMPLETE" for record in phase_results.values()
             )
             result = {
-                "status": "PHASE_STATUS",
-                "phases": {
-                    phase_id: phase_status(configuration, cast(PhaseId, phase_id))
-                    for phase_id in selected
-                },
+                "status": (
+                    "COMPLETE"
+                    if arguments.require_complete and all_complete
+                    else "INCOMPLETE"
+                    if arguments.require_complete
+                    else "PHASE_STATUS"
+                ),
+                "phases": phase_results,
             }
         elif arguments.command == "run-pair":
             if arguments.request is None:

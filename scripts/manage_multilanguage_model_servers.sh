@@ -7,6 +7,7 @@
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
 STATE_DIR="${ROOT}/outputs/a6000_agent_team/model_servers"
 PYTHON="${ROOT}/.venv/bin/python"
+OWNER_TOKEN="${LAPLACE_SERVER_OWNER_TOKEN:-}"
 
 mkdir -p "${STATE_DIR}" 2>/dev/null
 
@@ -31,6 +32,7 @@ profile_values() {
   MAX_SEQS="${PROFILE_DATA[6]}"
   EXTRA_ARGS=("${PROFILE_DATA[@]:7}")
   PID_FILE="${STATE_DIR}/${1}.pid"
+  OWNER_FILE="${PID_FILE}.owner"
   LOG_FILE="${STATE_DIR}/${1}_$(date -u +%Y%m%dT%H%M%SZ).log"
 }
 
@@ -90,6 +92,10 @@ start_profile() {
   printf '%s\n' "${PID}" >"${PID_FILE}"
   sleep 1
   if pid_is_owned "${PROFILE}"; then
+    if [ -n "${OWNER_TOKEN}" ]; then
+      printf '%s\n%s\n' "${OWNER_TOKEN}" "${PID}" >"${OWNER_FILE}"
+      chmod 600 "${OWNER_FILE}" 2>/dev/null
+    fi
     echo "${PROFILE} started with PID ${PID}."
   else
     echo "${PROFILE} did not remain running; inspect ${LOG_FILE}."
@@ -104,6 +110,14 @@ stop_profile() {
     echo "No owned ${PROFILE} server is running; no process was signalled."
     return 0
   fi
+  if [ -n "${OWNER_TOKEN}" ]; then
+    RECORDED_TOKEN="$(sed -n '1p' "${OWNER_FILE}" 2>/dev/null)"
+    RECORDED_PID="$(sed -n '2p' "${OWNER_FILE}" 2>/dev/null)"
+    if [ "${RECORDED_TOKEN}" != "${OWNER_TOKEN}" ] || [ "${RECORDED_PID}" != "${PID}" ]; then
+      echo "${PROFILE} was not started by orchestration token ${OWNER_TOKEN}; no process was signalled."
+      return 0
+    fi
+  fi
   echo "Stopping owned ${PROFILE} PID ${PID}."
   kill -TERM "${PID}" 2>/dev/null
   COUNT=0
@@ -114,7 +128,7 @@ stop_profile() {
   if [ -r "/proc/${PID}/cmdline" ]; then
     echo "PID ${PID} did not stop after 30 seconds; it was not force-killed."
   else
-    rm -f "${PID_FILE}"
+    rm -f "${PID_FILE}" "${OWNER_FILE}"
     echo "${PROFILE} stopped."
   fi
   return 0
@@ -148,15 +162,23 @@ ACTION="${1:-help}"
 case "${ACTION}" in
   start-phase1) start_profile phase1_main ;;
   start-phase2-main) start_profile phase2_main ;;
+  start-phase2) start_profile phase2_main ;;
   start-phase2-worker) start_profile phase2_rtl_worker ;;
-  start-phase2) start_profile phase2_main; start_profile phase2_rtl_worker ;;
+  start-phase3-main) start_profile phase2_main ;;
+  start-phase3-worker) start_profile phase2_rtl_worker ;;
+  start-phase3) start_profile phase2_main; start_profile phase2_rtl_worker ;;
   command-phase1) command_profile phase1_main ;;
   command-phase2-main) command_profile phase2_main ;;
   command-phase2-worker) command_profile phase2_rtl_worker ;;
+  command-phase3-main) command_profile phase2_main ;;
+  command-phase3-worker) command_profile phase2_rtl_worker ;;
   stop-phase1) stop_profile phase1_main ;;
   stop-phase2-main) stop_profile phase2_main ;;
+  stop-phase2) stop_profile phase2_main ;;
   stop-phase2-worker) stop_profile phase2_rtl_worker ;;
-  stop-phase2) stop_profile phase2_rtl_worker; stop_profile phase2_main ;;
+  stop-phase3-main) stop_profile phase2_main ;;
+  stop-phase3-worker) stop_profile phase2_rtl_worker ;;
+  stop-phase3) stop_profile phase2_rtl_worker; stop_profile phase2_main ;;
   status)
     status_profile phase1_main
     status_profile phase2_main
@@ -167,13 +189,16 @@ case "${ACTION}" in
     ;;
   health-phase2)
     "${ROOT}/.venv/bin/python" "${ROOT}/scripts/manage_multilanguage_models.py" endpoint --artifact phase2_main
+    ;;
+  health-phase3)
+    "${ROOT}/.venv/bin/python" "${ROOT}/scripts/manage_multilanguage_models.py" endpoint --artifact phase2_main
     "${ROOT}/.venv/bin/python" "${ROOT}/scripts/manage_multilanguage_models.py" endpoint --artifact phase2_rtl_worker
     ;;
   gpu)
     "${ROOT}/.venv/bin/python" "${ROOT}/scripts/manage_multilanguage_models.py" gpu
     ;;
   *)
-    echo "Usage: $0 {start-phase1|start-phase2-main|start-phase2-worker|start-phase2|command-phase1|command-phase2-main|command-phase2-worker|stop-phase1|stop-phase2-main|stop-phase2-worker|stop-phase2|status|health-phase1|health-phase2|gpu}"
+    echo "Usage: $0 {start-phase1|start-phase2|start-phase3|start-phase3-worker|command-phase1|command-phase2-main|command-phase3-main|command-phase3-worker|stop-phase1|stop-phase2|stop-phase3|status|health-phase1|health-phase2|health-phase3|gpu}"
     ;;
 esac
 

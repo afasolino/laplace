@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import urllib.request
@@ -51,6 +52,7 @@ from research_workspace.multilanguage_ablation import (
     package_results,
     phase_status,
     preflight_report,
+    runtime_prerequisites,
     validate_phase_setup,
     validate_runtime,
     validate_held_out_pack,
@@ -324,7 +326,7 @@ def test_manifest_validates_all_task_schemas_and_plan_does_not_probe_endpoints(
     assert plan["task_count"] == 32
     assert plan["endpoint_status"] == "NOT_PROBED_PLAN_ONLY"
     assert len(plan["tasks"]) == 32
-    assert [phase.arm_ids for phase in configuration.phases] == [("A",), ("B", "C")]
+    assert [phase.arm_ids for phase in configuration.phases] == [("A",), ("B",), ("C",)]
     assert configuration.base_revision is None
     phase_one_plan = build_plan(REPOSITORY_ROOT, configuration, phase_id="phase1")
     assert phase_one_plan["selected_phase"] == "phase1"
@@ -332,6 +334,10 @@ def test_manifest_validates_all_task_schemas_and_plan_does_not_probe_endpoints(
         "phase2_main" in item or "phase2_rtl_worker" in item
         for item in phase_one_plan["missing_prerequisites"]
     )
+    phase_two_plan = build_plan(REPOSITORY_ROOT, configuration, phase_id="phase2")
+    assert not any("phase2_rtl_worker" in item for item in phase_two_plan["missing_prerequisites"])
+    phase_three_plan = build_plan(REPOSITORY_ROOT, configuration, phase_id="phase3")
+    assert any("phase2_rtl_worker" in item for item in phase_three_plan["missing_prerequisites"])
 
 
 def test_preflight_is_scoped_to_requested_phase(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -379,6 +385,46 @@ def test_phase_setup_validation_does_not_require_other_phase(
     assert result["status"] == "PHASE_CONFIGURATION_READY"
     assert result["phase_id"] == "phase1"
     assert result["runtime"]["status"] == "NOT_PROBED"
+
+
+def test_phase_validation_selects_only_required_model_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configuration = load_experiment_configuration(REPOSITORY_ROOT, CONFIG_PATH)
+    selected: list[set[str]] = []
+
+    def artifacts(_root: Path, artifact_ids: set[str]) -> dict[str, object]:
+        selected.append(artifact_ids)
+        return {"status": "ALL_MODEL_ARTIFACTS_AVAILABLE"}
+
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation.validate_local_artifacts", artifacts
+    )
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation.runtime_prerequisites",
+        lambda *args, **kwargs: {"passed": True, "missing": []},
+    )
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation.validate_held_out_pack",
+        lambda *args, **kwargs: {"status": "VALID_ISOLATED_HELD_OUT_PACK"},
+    )
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation.prepare_corpus_overlay",
+        lambda *args, **kwargs: {"status": "PREPARED"},
+    )
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation.validate_corpus_retrieval",
+        lambda *args, **kwargs: {"status": "VERIFIED_NON_EMPTY"},
+    )
+    monkeypatch.setenv(configuration.held_out_environment_variable, str(tmp_path))
+    assert validate_phase_setup(REPOSITORY_ROOT, configuration, "phase2")["status"] == (
+        "PHASE_CONFIGURATION_READY"
+    )
+    assert selected[-1] == {"phase2_main"}
+    assert validate_phase_setup(REPOSITORY_ROOT, configuration, "phase3")["status"] == (
+        "PHASE_CONFIGURATION_READY"
+    )
+    assert selected[-1] == {"phase2_main", "phase2_rtl_worker"}
 
 
 def test_serving_environment_validation_checks_version_and_arguments(
@@ -628,17 +674,30 @@ def test_empty_result_packaging_is_explicit_and_does_not_invent_measurements(
     payload = json.loads(Path(str(reports["json"])).read_text(encoding="utf-8"))
     assert payload["task_arm_results"] == []
     assert payload["statistical_generality_claim"] is False
+    assert payload["comparison_context"]["arm_phase_mapping"] == {
+        "A": "phase1",
+        "B": "phase2",
+        "C": "phase3",
+    }
+    assert "across_serialized_phases" in payload["comparison_context"]["C_minus_B"]
     assert Path(str(reports["csv"])).is_file()
     assert Path(str(reports["markdown"])).is_file()
 
 
-def test_phase_resume_status_counts_only_matching_base_results(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("phase_id", "arm_id"),
+    (("phase1", "A"), ("phase2", "B"), ("phase3", "C")),
+)
+def test_phase_resume_status_counts_only_fingerprint_compatible_results(
+    tmp_path: Path, phase_id: str, arm_id: str
+) -> None:
     configuration = replace(
         load_experiment_configuration(REPOSITORY_ROOT, CONFIG_PATH, base_revision="a" * 40),
         output_root=tmp_path,
     )
     tasks = load_benchmark_manifest(configuration.manifest_path)
-    pairs = tmp_path / "pairs" / "A"
+    fingerprint = _configuration_fingerprint(configuration, {}, "f" * 64)
+    pairs = tmp_path / "pairs" / arm_id
     pairs.mkdir(parents=True)
     for task in tasks:
         (pairs / f"{task.task_id}.json").write_text(
@@ -646,17 +705,17 @@ def test_phase_resume_status_counts_only_matching_base_results(tmp_path: Path) -
                 {
                     "status": "COMPLETE_EVALUATED",
                     "task_id": task.task_id,
-                    "arm_id": "A",
+                    "arm_id": arm_id,
                     "base_revision": "a" * 40,
-                    "execution_phase": "phase1",
+                    "execution_phase": phase_id,
+                    "configuration_fingerprint": fingerprint,
                     "held_out_manifest_sha256": "f" * 64,
                 }
             ),
             encoding="utf-8",
         )
-    manifest = tmp_path / "phases" / "phase1" / "manifest.json"
+    manifest = tmp_path / "phases" / phase_id / "manifest.json"
     manifest.parent.mkdir(parents=True)
-    fingerprint = _configuration_fingerprint(configuration, {}, "f" * 64)
     manifest.write_text(
         json.dumps(
             {
@@ -666,18 +725,18 @@ def test_phase_resume_status_counts_only_matching_base_results(tmp_path: Path) -
         ),
         encoding="utf-8",
     )
-    assert phase_status(configuration, "phase1")["status"] == "COMPLETE"
+    assert phase_status(configuration, phase_id)["status"] == "COMPLETE"
     first = pairs / f"{tasks[0].task_id}.json"
     value = json.loads(first.read_text(encoding="utf-8"))
     value["base_revision"] = "b" * 40
     first.write_text(json.dumps(value), encoding="utf-8")
-    status = phase_status(configuration, "phase1")
+    status = phase_status(configuration, phase_id)
     assert status["status"] == "INCOMPLETE"
     assert status["remaining_pairs"] == 1
     value["base_revision"] = "a" * 40
-    value["held_out_manifest_sha256"] = "e" * 64
+    value["configuration_fingerprint"] = {**fingerprint, "experiment_sha256": "0" * 64}
     first.write_text(json.dumps(value), encoding="utf-8")
-    status = phase_status(configuration, "phase1")
+    status = phase_status(configuration, phase_id)
     assert status["status"] == "INCOMPLETE"
     assert status["remaining_pairs"] == 1
 
@@ -696,6 +755,49 @@ def test_phase_fingerprint_rejects_changed_benchmark_or_corpus() -> None:
         _assert_phase_manifest_compatible(
             configuration, {"fingerprint": expected}, {"c": "changed"}, "f" * 64
         )
+
+
+def test_three_phase_dependencies_are_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
+    configuration = load_experiment_configuration(
+        REPOSITORY_ROOT, CONFIG_PATH, base_revision="a" * 40
+    )
+    states = {"phase1": "COMPLETE", "phase2": "INCOMPLETE"}
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation.build_plan",
+        lambda *args, **kwargs: {"missing_prerequisites": []},
+    )
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation._git_worktree_clean", lambda *args: True
+    )
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation._git_object_exists", lambda *args: True
+    )
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation.phase_status",
+        lambda config, phase: {
+            "status": states[phase],
+            "manifest": {"status": "COMPLETE", "fingerprint": {}},
+        },
+    )
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation._assert_phase_manifest_compatible",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation._corpus_snapshot_hashes", lambda *args: {}
+    )
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation._sha256_file", lambda *args: "f" * 64
+    )
+    monkeypatch.setenv(configuration.held_out_environment_variable, "/tmp/heldout/manifest")
+    phase_two = runtime_prerequisites(REPOSITORY_ROOT, configuration, phase_id="phase2")
+    assert phase_two["passed"] is True
+    phase_three = runtime_prerequisites(REPOSITORY_ROOT, configuration, phase_id="phase3")
+    assert phase_three["passed"] is False
+    assert "phase2_not_complete_or_incompatible" in phase_three["missing"]
+    states["phase2"] = "COMPLETE"
+    phase_three = runtime_prerequisites(REPOSITORY_ROOT, configuration, phase_id="phase3")
+    assert phase_three["passed"] is True
 
 
 def test_runtime_endpoint_probe_is_scoped_to_the_selected_phase(
@@ -721,14 +823,20 @@ def test_runtime_endpoint_probe_is_scoped_to_the_selected_phase(
 
     def health(self: object, *, include_worker: bool) -> dict[str, object]:
         worker_flags.append(include_worker)
-        return {"main": {"status": "AVAILABLE"}}
+        result: dict[str, object] = {"main": {"status": "AVAILABLE"}}
+        if include_worker:
+            result["rtl_worker"] = {"status": "AVAILABLE"}
+        return result
 
     monkeypatch.setattr("research_workspace.model_routing.AuditedModelCaller.health", health)
     assert validate_runtime(REPOSITORY_ROOT, configuration, "phase1")["status"] == "RUNTIME_READY"
     assert worker_flags == [False]
     worker_flags.clear()
     assert validate_runtime(REPOSITORY_ROOT, configuration, "phase2")["status"] == "RUNTIME_READY"
-    assert worker_flags == [False, True]
+    assert worker_flags == [False]
+    worker_flags.clear()
+    assert validate_runtime(REPOSITORY_ROOT, configuration, "phase3")["status"] == "RUNTIME_READY"
+    assert worker_flags == [True]
 
 
 def test_merge_requires_and_packages_all_serialized_task_arm_pairs(tmp_path: Path) -> None:
@@ -763,7 +871,8 @@ def test_merge_requires_and_packages_all_serialized_task_arm_pairs(tmp_path: Pat
                         "task_id": task.task_id,
                         "arm_id": arm,
                         "base_revision": configuration.base_revision,
-                        "execution_phase": "phase1" if arm == "A" else "phase2",
+                        "execution_phase": {"A": "phase1", "B": "phase2", "C": "phase3"}[arm],
+                        "configuration_fingerprint": fingerprint,
                         "held_out_manifest_sha256": "f" * 64,
                         "language": task.language,
                         "category": task.category,
@@ -772,7 +881,7 @@ def test_merge_requires_and_packages_all_serialized_task_arm_pairs(tmp_path: Pat
                 ),
                 encoding="utf-8",
             )
-    for phase_id, expected_pairs in (("phase1", 32), ("phase2", 64)):
+    for phase_id in ("phase1", "phase2", "phase3"):
         path = configuration.output_root / "phases" / phase_id / "manifest.json"
         path.parent.mkdir(parents=True)
         path.write_text(
@@ -780,7 +889,7 @@ def test_merge_requires_and_packages_all_serialized_task_arm_pairs(tmp_path: Pat
                 {
                     "status": "COMPLETE",
                     "phase_id": phase_id,
-                    "expected_pairs": expected_pairs,
+                    "expected_pairs": 32,
                     "fingerprint": fingerprint,
                 }
             ),
@@ -789,6 +898,130 @@ def test_merge_requires_and_packages_all_serialized_task_arm_pairs(tmp_path: Pat
     merged = merge_phase_results(configuration)
     assert merged["status"] == "MERGED_COMPLETE"
     assert merged["task_arm_pairs"] == 96
+    removed_path = configuration.output_root / "pairs" / "C" / f"{tasks[0].task_id}.json"
+    removed = removed_path.read_text(encoding="utf-8")
+    removed_path.unlink()
+    with pytest.raises(Exception, match="Cannot merge"):
+        merge_phase_results(configuration)
+    removed_path.write_text(removed, encoding="utf-8")
+    unexpected = configuration.output_root / "pairs" / "C" / "stale-task.json"
+    unexpected.write_text(removed, encoding="utf-8")
+    with pytest.raises(Exception, match="exactly 96"):
+        merge_phase_results(configuration)
+
+
+def _fake_three_phase_controls(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    control_log = tmp_path / "control.log"
+    server_log = tmp_path / "server.log"
+    python = tmp_path / "fake-python"
+    python.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf \'%s\\n\' "$*" >>"${FAKE_CONTROL_LOG}"\n'
+        "for phase in phase1 phase2 phase3; do\n"
+        '  if [[ " $* " == *" phase-status "* && " $* " == *" --phase ${phase} "* '
+        '&& " $* " == *" --require-complete "* ]]; then\n'
+        '      grep -qx "${phase}" "${FAKE_PHASE_STATE}" 2>/dev/null\n'
+        "      exit $?\n"
+        "  fi\n"
+        "done\n"
+        "for phase in phase1 phase2 phase3; do\n"
+        '  if [[ " $* " == *" run-${phase} "* ]]; then\n'
+        '      if [ "${FAKE_FAIL_PHASE:-}" = "${phase}" ]; then exit 2; fi\n'
+        '      printf \'%s\\n\' "${phase}" >>"${FAKE_PHASE_STATE}"\n'
+        "      exit 0\n"
+        "  fi\n"
+        "done\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    manager = tmp_path / "fake-server-manager"
+    manager.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf \'%s %s\\n\' "${LAPLACE_SERVER_OWNER_TOKEN:-external}" "$1" '
+        '>>"${FAKE_SERVER_LOG}"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    manager.chmod(0o755)
+    return python, manager, control_log, server_log
+
+
+def _run_fake_managed_all(tmp_path: Path, *, fail_phase: str = "") -> tuple[list[str], list[str]]:
+    python, manager, control_log, server_log = _fake_three_phase_controls(tmp_path)
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "LAPLACE_PYTHON": str(python),
+            "LAPLACE_SERVER_MANAGER": str(manager),
+            "LAPLACE_ABLATION_BASE_REVISION": "a" * 40,
+            "LAPLACE_ABLATION_HELD_OUT_ROOT": str(tmp_path / "heldout"),
+            "LAPLACE_ABLATION_OUTPUT_ROOT": str(tmp_path / "output"),
+            "FAKE_CONTROL_LOG": str(control_log),
+            "FAKE_SERVER_LOG": str(server_log),
+            "FAKE_PHASE_STATE": str(tmp_path / "completed_phases"),
+            "FAKE_FAIL_PHASE": fail_phase,
+        }
+    )
+    completed = subprocess.run(
+        [str(REPOSITORY_ROOT / "scripts/run_multilanguage_dual_model_ablation.sh"), "all"],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert completed.returncode == 0
+    controls = control_log.read_text(encoding="utf-8").splitlines()
+    servers = server_log.read_text(encoding="utf-8").splitlines()
+    return controls, servers
+
+
+def test_managed_all_orders_phases_and_reuses_qwen_main(tmp_path: Path) -> None:
+    controls, servers = _run_fake_managed_all(tmp_path)
+    positions = {
+        marker: next(index for index, line in enumerate(controls) if marker in line)
+        for marker in (
+            "validate-phase1",
+            "run-phase1",
+            "validate-phase2",
+            "run-phase2",
+            "validate-phase3",
+            "run-phase3",
+            "merge-report",
+        )
+    }
+    assert list(positions.values()) == sorted(positions.values())
+    actions = [line.split(maxsplit=1)[1] for line in servers]
+    assert actions == [
+        "start-phase1",
+        "stop-phase1",
+        "start-phase2",
+        "start-phase3",
+        "stop-phase3",
+    ]
+    tokens = {line.split(maxsplit=1)[0] for line in servers}
+    assert len(tokens) == 1
+    assert "external" not in tokens
+
+
+def test_managed_all_failure_prevents_next_phase(tmp_path: Path) -> None:
+    controls, servers = _run_fake_managed_all(tmp_path, fail_phase="phase2")
+    assert any("run-phase2" in line for line in controls)
+    assert not any("validate-phase3" in line or "run-phase3" in line for line in controls)
+    assert not any("merge-report" in line for line in controls)
+    assert all("start-phase3" not in line for line in servers)
+    assert any("stop-phase2" in line for line in servers)
+
+
+def test_server_shutdown_requires_pid_command_and_orchestration_ownership() -> None:
+    script = (REPOSITORY_ROOT / "scripts/manage_multilanguage_model_servers.sh").read_text(
+        encoding="utf-8"
+    )
+    signal_index = script.index('kill -TERM "${PID}"')
+    assert script.index('RECORDED_TOKEN="$(sed -n') < signal_index
+    assert script.index('*"${MODEL_PATH}"*"--host 127.0.0.1"*"--port ${PORT}"*') < signal_index
 
 
 def test_held_out_pack_is_hash_checked_and_must_be_external(tmp_path: Path) -> None:

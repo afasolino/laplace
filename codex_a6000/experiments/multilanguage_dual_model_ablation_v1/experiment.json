@@ -29,13 +29,19 @@
       "phase_id": "phase1",
       "label": "legacy_configuration",
       "arms": ["A"],
-      "requires_completed_phase": null
+      "requires_completed_phases": []
     },
     {
       "phase_id": "phase2",
-      "label": "new_configuration",
-      "arms": ["B", "C"],
-      "requires_completed_phase": "phase1"
+      "label": "main_model_upgrade_configuration",
+      "arms": ["B"],
+      "requires_completed_phases": ["phase1"]
+    },
+    {
+      "phase_id": "phase3",
+      "label": "dual_model_configuration",
+      "arms": ["C"],
+      "requires_completed_phases": ["phase1", "phase2"]
     }
   ],
   "arm_order_strategy": "serialized_phase_then_deterministic_rotation",

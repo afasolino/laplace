@@ -18,29 +18,40 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["phase_id", "label", "arms", "requires_completed_phase"],
+          "required": ["phase_id", "label", "arms", "requires_completed_phases"],
           "properties": {
             "phase_id": {"const": "phase1"},
             "label": {"type": "string", "minLength": 1},
             "arms": {"const": ["A"]},
-            "requires_completed_phase": {"type": "null"}
+            "requires_completed_phases": {"const": []}
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["phase_id", "label", "arms", "requires_completed_phase"],
+          "required": ["phase_id", "label", "arms", "requires_completed_phases"],
           "properties": {
             "phase_id": {"const": "phase2"},
             "label": {"type": "string", "minLength": 1},
-            "arms": {"const": ["B", "C"]},
-            "requires_completed_phase": {"const": "phase1"}
+            "arms": {"const": ["B"]},
+            "requires_completed_phases": {"const": ["phase1"]}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["phase_id", "label", "arms", "requires_completed_phases"],
+          "properties": {
+            "phase_id": {"const": "phase3"},
+            "label": {"type": "string", "minLength": 1},
+            "arms": {"const": ["C"]},
+            "requires_completed_phases": {"const": ["phase1", "phase2"]}
           }
         }
       ],
       "items": false,
-      "minItems": 2,
-      "maxItems": 2
+      "minItems": 3,
+      "maxItems": 3
     },
     "arm_order_strategy": {"const": "serialized_phase_then_deterministic_rotation"},
     "corpus": {"type": "object"},

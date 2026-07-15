@@ -12,19 +12,20 @@ models, start serving processes, expose held-out tests, or permit CPU inference.
   failure diagnosis and review. `CodeV-R1-RL-Qwen-7B-INT4` may implement or
   repair only a metadata-eligible, single synthesizable RTL module.
 
-The arms form one logical experiment but run in two resumable serving phases.
-Phase 1 contains only Arm A, so neither Qwen3.6 nor CodeV is required. Phase 2
-contains Arms B and C, requires a compatible completed Phase 1, and never
-repeats an already evaluated Arm-A pair. The merger rejects different base
+The arms form one logical experiment but run in three resumable serving phases.
+Phase 1 contains Arm A, Phase 2 contains Arm B, and Phase 3 contains Arm C.
+Phase 2 requires compatible completed Phase-1 results. Phase 3 requires both
+prior phases. Every task-arm result carries the complete compatibility
+fingerprint, so resume never skips an unbound or stale pair. The merger rejects different base
 commits, task manifests, corpus snapshots, experiment configurations or
 evaluation settings.
 
 The profiles contain exact official source revisions and loopback serving
 identities. Phase 1 uses the installed upstream Qwen AWQ artifact at revision
-`1ed0a6145da0ce550c628e8e8b678f51e695995d`. Phase 2 pins
+`1ed0a6145da0ce550c628e8e8b678f51e695995d`. Phases 2 and 3 pin
 `Qwen/Qwen3.6-35B-A3B@995ad96eacd98c81ed38be0c5b274b04031597b0`
 and `zhuyaoyu/CodeV-R1-RL-Qwen-7B@286cf433f596f1b8525529c1163eb81c19425c22`.
-No arbitrary community quantization is accepted. The two Phase-2 artifacts
+No arbitrary community quantization is accepted. The two new-model artifacts
 remain unavailable until the pinned local W4A16 recipe is explicitly run and
 its complete file-hash manifest and compressed-tensors metadata validate.
 Arm B and Arm C retain identical main-model settings.
@@ -58,6 +59,8 @@ From the repository root:
 ```bash
 .venv/bin/python -m research_workspace.multilanguage_ablation validate-config
 .venv/bin/python -m research_workspace.multilanguage_ablation validate-phase1
+.venv/bin/python -m research_workspace.multilanguage_ablation validate-phase2
+.venv/bin/python -m research_workspace.multilanguage_ablation validate-phase3
 .venv/bin/python -m research_workspace.multilanguage_ablation validate-manifest
 .venv/bin/python -m research_workspace.multilanguage_ablation validate-corpus
 .venv/bin/python -m research_workspace.multilanguage_ablation preflight
@@ -106,8 +109,13 @@ scripts/manage_multilanguage_model_servers.sh start-phase2
 .venv/bin/python -m research_workspace.multilanguage_ablation validate-runtime --phase phase2
 .venv/bin/python -m research_workspace.multilanguage_ablation run-phase2
 .venv/bin/python -m research_workspace.multilanguage_ablation phase-status --phase phase2
-.venv/bin/python -m research_workspace.multilanguage_ablation merge-report
 scripts/manage_multilanguage_model_servers.sh stop-phase2
+scripts/manage_multilanguage_model_servers.sh start-phase3
+.venv/bin/python -m research_workspace.multilanguage_ablation validate-runtime --phase phase3
+.venv/bin/python -m research_workspace.multilanguage_ablation run-phase3
+.venv/bin/python -m research_workspace.multilanguage_ablation phase-status --phase phase3
+scripts/manage_multilanguage_model_servers.sh stop-phase3
+.venv/bin/python -m research_workspace.multilanguage_ablation merge-report
 ```
 
 The fail-closed launcher performs those steps in order and preserves a timestamped
@@ -116,9 +124,26 @@ log:
 ```bash
 scripts/run_multilanguage_dual_model_ablation.sh phase1
 scripts/run_multilanguage_dual_model_ablation.sh phase2
+scripts/run_multilanguage_dual_model_ablation.sh phase3
+scripts/run_multilanguage_dual_model_ablation.sh all
 scripts/run_multilanguage_dual_model_ablation.sh status
 scripts/run_multilanguage_dual_model_ablation.sh merge
 ```
+
+Individual commands default to externally managed servers. Append `managed`
+to let the safe PID/model/address/port/token lifecycle start and stop that
+phase. Bare `all` defaults to managed serialized execution and reuses the
+identical Qwen3.6 server from Phase 2 while starting CodeV for Phase 3:
+
+```bash
+scripts/run_multilanguage_dual_model_ablation.sh phase2 external
+scripts/run_multilanguage_dual_model_ablation.sh phase2 managed
+scripts/run_multilanguage_dual_model_ablation.sh all managed
+scripts/run_multilanguage_dual_model_ablation.sh all external
+```
+
+External `all` never changes server state; use the individual external phase
+commands when the operator must replace one resident model between phases.
 
 Do not infer statistical generality from the 32 tasks. Reports retain paired
 per-task differences and deterministic bootstrap intervals only as diagnostic
