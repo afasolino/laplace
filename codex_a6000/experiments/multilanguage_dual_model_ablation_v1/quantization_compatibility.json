@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "backend": {
+    "package": "llmcompressor",
+    "version": "0.12.0",
+    "metadata_sha256": "812cb4a3fedc014806bbc8212c840d3e121c12062bc66868f0094796823f8d08"
+  },
+  "backend_requirements": {
+    "compressed-tensors": "==0.17.1",
+    "datasets": ">=4.8.4,<=5.0.0",
+    "torch": ">=2.10.0,<=2.12.0",
+    "transformers": ">=5.9.0,<=5.10.1"
+  },
+  "direct_pins": {
+    "datasets": "5.0.0",
+    "huggingface-hub": "1.23.0",
+    "llmcompressor": "0.12.0",
+    "transformers": "5.10.1"
+  },
+  "quantization_script": "scripts/quantize_multilanguage_model.py",
+  "required_api_markers": [
+    "from llmcompressor import oneshot",
+    "from llmcompressor.modifiers.quantization import QuantizationModifier",
+    "from llmcompressor.modifiers.transform.awq import AWQModifier",
+    "from compressed_tensors.utils import save_mtp_tensors_to_checkpoint",
+    "from transformers import AutoProcessor, Qwen3_5MoeForConditionalGeneration"
+  ],
+  "artifact_architectures": {
+    "phase2_main": ["qwen3_5_moe"],
+    "phase2_rtl_worker": ["qwen2", "qwen2_5"]
+  },
+  "evidence": {
+    "source": "Published wheel metadata resolved by uv for Python 3.11 on 2026-07-16; no model artifact was downloaded.",
+    "transformers_metadata_sha256": "d4a3cf5c2637abc683cf702d14f2adb63f66989fcd198717aebc51e201258bd8",
+    "compressed_tensors_metadata_sha256": "fbbcc4aa94635524e79f2d02fc5e098a5441cbae919698437d33b3326403eef6",
+    "transformers_architecture_marker": "qwen3_5_moe -> Qwen3_5MoeForConditionalGeneration",
+    "limitation": "Actual pinned source config.json files must still validate their model_type before quantization. Missing source weights leave artifact support explicitly deferred."
+  }
+}

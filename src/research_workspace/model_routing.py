@@ -17,7 +17,12 @@ from typing import Callable, Literal
 
 from .engineering import EngineeringError, JsonObject, _write_json_atomic
 from .inference import ServingCandidate, backend_for
-from .llm import GenerationResult, LocalGenerationBackend, ModelRequired
+from .llm import (
+    GenerationResult,
+    LocalGenerationBackend,
+    ModelInvocationError,
+    ModelRequired,
+)
 
 
 ModelRole = Literal[
@@ -233,9 +238,31 @@ class RoutedCall:
     generation_seconds: float
     retry_index: int
     audit_path: str
+    budget: JsonObject
 
 
 ResponseValidator = Callable[[str], object]
+PromptCompactor = Callable[[], str]
+
+
+class ContextBudgetError(ModelRequired):
+    """A prompt cannot fit a model's configured context without losing protected evidence."""
+
+    def __init__(self, message: str, *, budget: JsonObject) -> None:
+        super().__init__(message)
+        self.category = "context_overflow"
+        self.budget = budget
+
+
+_ROLE_COMPLETION_CAPS: dict[ModelRole, int | None] = {
+    "planning_supervision": 1536,
+    "retrieval_interpretation": 1024,
+    "general_implementation": None,
+    "rtl_contract_generation": 2048,
+    "bounded_rtl_implementation": None,
+    "bounded_rtl_repair": None,
+    "review": 768,
+}
 
 
 class AuditedModelCaller:
@@ -267,6 +294,43 @@ class AuditedModelCaller:
             records["rtl_worker"] = self._backend(worker).health()
         return records
 
+    @staticmethod
+    def _prompt_tokens(backend: LocalGenerationBackend, prompt: str) -> tuple[int, str, str | None]:
+        counter = getattr(backend, "token_count", None)
+        if callable(counter):
+            try:
+                count = counter(prompt)
+                if isinstance(count, int) and count >= 0:
+                    return count, "model_tokenizer_endpoint", None
+            except ModelRequired as exc:
+                tokenizer_error = str(exc)
+            except (OSError, ValueError, TypeError) as exc:
+                tokenizer_error = str(exc)
+        else:
+            tokenizer_error = "backend has no token_count method"
+        # UTF-8 bytes / 3 is deliberately conservative for the configured code models.
+        estimate = max(1, (len(prompt.encode("utf-8")) + 2) // 3)
+        return estimate, "conservative_utf8_bytes_divided_by_3", tokenizer_error
+
+    @staticmethod
+    def _requested_completion_tokens(
+        decision: RoutingDecision, role: ModelRole, override: int | None
+    ) -> int:
+        configured = decision.candidate.max_output_tokens
+        role_cap = (
+            decision.candidate.reviewer_max_output_tokens
+            if role == "review"
+            else _ROLE_COMPLETION_CAPS[role]
+        )
+        values = [configured]
+        if role_cap is not None:
+            values.append(role_cap)
+        if override is not None:
+            if override < 1:
+                raise EngineeringError("Requested completion tokens must be positive")
+            values.append(override)
+        return min(values)
+
     def generate(
         self,
         prompt: str,
@@ -276,6 +340,8 @@ class AuditedModelCaller:
         retry_index: int = 0,
         fallback_reason: str | None = None,
         validator: ResponseValidator | None = None,
+        requested_completion_tokens: int | None = None,
+        compact_prompt: PromptCompactor | None = None,
     ) -> RoutedCall:
         if not prompt.strip():
             raise EngineeringError("Model prompt cannot be empty")
@@ -288,32 +354,102 @@ class AuditedModelCaller:
         call_id = uuid.uuid4().hex
         started = time.monotonic()
         created_at = datetime.now(UTC).isoformat()
+        requested = self._requested_completion_tokens(decision, role, requested_completion_tokens)
+        context_limit = decision.candidate.context_tokens
+        safety_margin = decision.candidate.context_safety_margin_tokens
+        minimum_completion = min(requested, decision.candidate.minimum_completion_tokens)
+        effective_prompt = prompt
+        prompt_tokens, token_count_method, tokenizer_error = self._prompt_tokens(
+            backend, effective_prompt
+        )
+        capacity = max(0, context_limit - safety_margin - prompt_tokens)
+        effective_completion = min(requested, capacity)
+        compaction_occurred = False
+        compaction_reason: str | None = None
+        if effective_completion < minimum_completion and compact_prompt is not None:
+            compacted = compact_prompt()
+            if not compacted.strip():
+                raise EngineeringError("Prompt compactor returned an empty prompt")
+            if compacted != effective_prompt:
+                effective_prompt = compacted
+                compaction_occurred = True
+                compaction_reason = "minimum_completion_budget_did_not_fit"
+                prompt_tokens, token_count_method, tokenizer_error = self._prompt_tokens(
+                    backend, effective_prompt
+                )
+                capacity = max(0, context_limit - safety_margin - prompt_tokens)
+                effective_completion = min(requested, capacity)
+        budget: JsonObject = {
+            "prompt_tokens": prompt_tokens,
+            "prompt_token_count_method": token_count_method,
+            "tokenizer_error": tokenizer_error,
+            "requested_completion_tokens": requested,
+            "effective_completion_token_cap": effective_completion,
+            "minimum_usable_completion_tokens": minimum_completion,
+            "context_limit": context_limit,
+            "safety_margin_tokens": safety_margin,
+            "compaction_occurred": compaction_occurred,
+            "compaction_reason": compaction_reason,
+            "context_rejection_reason": None,
+        }
+        path = self.audit_root / f"{created_at.replace(':', '')}_{call_id}.json"
+
+        def write_audit(payload: JsonObject) -> None:
+            record: JsonObject = {
+                "schema_version": 2,
+                "call_id": call_id,
+                "task_id": metadata.task_id,
+                "experiment_arm": metadata.experiment_arm,
+                "created_at": created_at,
+                "routing": decision.to_json(),
+                "prompt_sha256": hashlib.sha256(effective_prompt.encode("utf-8")).hexdigest(),
+                "prompt_characters": len(effective_prompt),
+                **budget,
+                "retry_index": retry_index,
+                "fallback_used": fallback_reason is not None,
+                **payload,
+            }
+            _write_json_atomic(path, record, readonly=True)
+
+        if effective_completion < minimum_completion:
+            budget["context_rejection_reason"] = (
+                f"prompt={prompt_tokens} + safety={safety_margin} leaves "
+                f"{capacity} tokens; minimum completion is {minimum_completion}"
+            )
+            elapsed = time.monotonic() - started
+            message = "Irreducible prompt context overflow after bounded compaction"
+            write_audit(
+                {
+                    "completion_tokens": None,
+                    "generation_seconds": elapsed,
+                    "response_valid": False,
+                    "status": "CONTEXT_REJECTED",
+                    "failure_category": "context_overflow",
+                    "error": message,
+                }
+            )
+            raise ContextBudgetError(message, budget=budget)
         try:
-            result = backend.generate(prompt, context_tokens=decision.candidate.context_tokens)
+            result = backend.generate(
+                effective_prompt,
+                context_tokens=context_limit,
+                max_tokens=effective_completion,
+            )
         except ModelRequired as exc:
             elapsed = time.monotonic() - started
-            path = self.audit_root / f"{created_at.replace(':', '')}_{call_id}.json"
-            _write_json_atomic(
-                path,
+            category = getattr(exc, "category", "endpoint_unavailable")
+            write_audit(
                 {
-                    "schema_version": 1,
-                    "call_id": call_id,
-                    "task_id": metadata.task_id,
-                    "experiment_arm": metadata.experiment_arm,
-                    "created_at": created_at,
-                    "routing": decision.to_json(),
-                    "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
-                    "prompt_characters": len(prompt),
-                    "prompt_tokens": None,
                     "completion_tokens": None,
                     "generation_seconds": elapsed,
                     "response_valid": False,
                     "status": "MODEL_REQUIRED",
-                    "retry_index": retry_index,
-                    "fallback_used": fallback_reason is not None,
+                    "failure_category": category,
+                    "http_status": exc.http_status
+                    if isinstance(exc, ModelInvocationError)
+                    else None,
                     "error": str(exc),
-                },
-                readonly=True,
+                }
             )
             raise
         elapsed = time.monotonic() - started
@@ -327,19 +463,9 @@ class AuditedModelCaller:
                 validation_error = str(exc)
         elif not valid:
             validation_error = "Model response is empty"
-        path = self.audit_root / f"{created_at.replace(':', '')}_{call_id}.json"
-        _write_json_atomic(
-            path,
+        write_audit(
             {
-                "schema_version": 1,
-                "call_id": call_id,
-                "task_id": metadata.task_id,
-                "experiment_arm": metadata.experiment_arm,
-                "created_at": created_at,
-                "routing": decision.to_json(),
-                "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
-                "prompt_characters": len(prompt),
-                "prompt_tokens": result.prompt_tokens,
+                "server_reported_prompt_tokens": result.prompt_tokens,
                 "completion_tokens": result.completion_tokens,
                 "generation_seconds": elapsed,
                 "ttft_seconds": result.ttft_seconds,
@@ -347,10 +473,8 @@ class AuditedModelCaller:
                 "response_valid": valid,
                 "validation_error": validation_error,
                 "status": result.status,
-                "retry_index": retry_index,
-                "fallback_used": fallback_reason is not None,
-            },
-            readonly=True,
+                "failure_category": None,
+            }
         )
         return RoutedCall(
             result,
@@ -360,6 +484,7 @@ class AuditedModelCaller:
             elapsed,
             retry_index,
             str(path),
+            budget,
         )
 
 
@@ -390,6 +515,9 @@ def serving_candidate_from_json(value: object) -> ServingCandidate:
         "top_p",
         "seed",
         "request_timeout_seconds",
+        "context_safety_margin_tokens",
+        "minimum_completion_tokens",
+        "reviewer_max_output_tokens",
     }
     unexpected = sorted(set(value) - allowed)
     if unexpected:
@@ -408,6 +536,9 @@ def serving_candidate_from_json(value: object) -> ServingCandidate:
         "context_tokens": 8192,
         "max_output_tokens": 2048,
         "request_timeout_seconds": 120,
+        "context_safety_margin_tokens": 512,
+        "minimum_completion_tokens": 256,
+        "reviewer_max_output_tokens": 768,
     }
     integers: dict[str, int] = {}
     for key, default in integer_fields.items():
@@ -445,6 +576,9 @@ def serving_candidate_from_json(value: object) -> ServingCandidate:
         top_p=float(top_p),
         seed=seed,
         request_timeout_seconds=integers["request_timeout_seconds"],
+        context_safety_margin_tokens=integers["context_safety_margin_tokens"],
+        minimum_completion_tokens=integers["minimum_completion_tokens"],
+        reviewer_max_output_tokens=integers["reviewer_max_output_tokens"],
     )
 
 

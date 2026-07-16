@@ -20,6 +20,16 @@ fingerprint, so resume never skips an unbound or stale pair. The merger rejects 
 commits, task manifests, corpus snapshots, experiment configurations or
 evaluation settings.
 
+Task-arm result schema 2 applies context-aware generation budgets to every
+role. Reviewer output is capped independently, prompts are compacted only by
+explicit evidence-preserving policies, and irreducible overflow is recorded as
+a typed terminal infrastructure failure. Every attempted pair produces either
+a complete evaluated candidate result or a resumable terminal failure record.
+Only complete, fingerprint-compatible candidate results are skipped on resume.
+Schema-1 Phase-1 evidence remains preserved in the legacy output paths, while
+new results are written below a base-revision and `failure-accounting-v2`
+result-set directory.
+
 The profiles contain exact official source revisions and loopback serving
 identities. Phase 1 uses the installed upstream Qwen AWQ artifact at revision
 `1ed0a6145da0ce550c628e8e8b678f51e695995d`. Phases 2 and 3 pin
@@ -67,6 +77,8 @@ From the repository root:
 .venv/bin/python -m research_workspace.multilanguage_ablation plan-only
 .venv/bin/python scripts/manage_multilanguage_models.py validate-metadata
 .venv/bin/python scripts/manage_multilanguage_models.py check
+.venv/bin/python scripts/manage_multilanguage_models.py validate-quantization-lock \
+  --lock .models/quantization_requirements.lock
 scripts/bootstrap_multilanguage_tools.sh report
 scripts/bootstrap_multilanguage_tools.sh probe
 ```
@@ -91,6 +103,14 @@ Phase-2 `.venv-vllm` serving environment. Phase 1 deliberately reuses the
 validated CUDA 12.4 environment at `.venv-vllm-cu124` with vLLM
 `0.8.5.post1`; the server lifecycle script resolves the phase-specific
 executable from the governed model-artifact profile.
+
+The quantization lock pins `llmcompressor==0.12.0`,
+`compressed-tensors==0.17.1`, `transformers==5.10.1`, `datasets==5.0.0`,
+and the backend-compatible Torch range resolved by `uv`. The offline validator
+checks those constraints, hashes and required quantization API markers. It does
+not claim that either Phase-2 source model or quantized artifact exists; source
+`config.json` architecture validation remains fail-closed until the user later
+authorizes the pinned source downloads.
 
 After the model profiles, held-out pack, exact post-implementation base commit,
 CUDA device and separately started loopback servers pass validation:

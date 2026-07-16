@@ -25,10 +25,11 @@ from research_workspace.governed_corpus import (
     validate_corpus_retrieval,
 )
 from research_workspace.inference import ServingCandidate
-from research_workspace.llm import GenerationResult
+from research_workspace.llm import GenerationResult, ModelInvocationError
 from research_workspace.llm import VllmProvider
 from research_workspace.model_routing import (
     AuditedModelCaller,
+    ContextBudgetError,
     DualModelConfiguration,
     RoleRouter,
     RoutingTaskMetadata,
@@ -38,11 +39,14 @@ from research_workspace.model_routing import (
 from research_workspace.model_artifacts import (
     validate_local_artifacts,
     validate_profile_alignment,
+    validate_quantization_lock,
     validate_serving_environments,
 )
 from research_workspace.multilanguage_ablation import (
     _assert_phase_manifest_compatible,
     _configuration_fingerprint,
+    _execute_task_lane,
+    _result_set_root,
     _run_lane_subprocess,
     _task_spec,
     build_plan,
@@ -181,9 +185,20 @@ def test_role_router_uses_worker_only_for_eligible_bounded_rtl_roles() -> None:
 
 
 class _FixtureBackend:
-    def generate(self, prompt: str, *, context_tokens: int = 8192) -> GenerationResult:
+    def generate(
+        self,
+        prompt: str,
+        *,
+        context_tokens: int = 8192,
+        max_tokens: int | None = None,
+    ) -> GenerationResult:
         assert prompt and context_tokens == 4096
+        assert max_tokens is not None and max_tokens <= 512
         return GenerationResult("valid", "worker", None, None, "mocked", 11, 3)
+
+    def token_count(self, prompt: str) -> int:
+        assert prompt
+        return 11
 
     def health(self) -> dict[str, str]:
         return {"status": "AVAILABLE", "backend": "fixture"}
@@ -217,6 +232,154 @@ def test_every_routed_call_writes_complete_audit_record(tmp_path: Path) -> None:
     assert audit["response_valid"] is True
     assert audit["retry_index"] == 0
     assert audit["fallback_used"] is False
+    assert audit["requested_completion_tokens"] == 512
+    assert audit["effective_completion_token_cap"] == 512
+    assert audit["context_limit"] == 4096
+
+
+class _BudgetBackend:
+    def __init__(self, token_counts: dict[str, int], error: Exception | None = None) -> None:
+        self.token_counts = token_counts
+        self.error = error
+        self.max_tokens: list[int | None] = []
+
+    def token_count(self, prompt: str) -> int:
+        return self.token_counts[prompt]
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        context_tokens: int = 8192,
+        max_tokens: int | None = None,
+    ) -> GenerationResult:
+        self.max_tokens.append(max_tokens)
+        if self.error is not None:
+            raise self.error
+        return GenerationResult("valid", "main", None, None, "mocked", None, 3)
+
+    def health(self) -> dict[str, str]:
+        return {"status": "AVAILABLE", "backend": "budget-fixture"}
+
+    def model_identity(self) -> dict[str, str]:
+        return {"backend": "budget-fixture", "model": "main"}
+
+
+def test_reviewer_completion_is_capped_to_remaining_context(tmp_path: Path) -> None:
+    backend = _BudgetBackend({"review": 3300})
+    caller = AuditedModelCaller(
+        RoleRouter(DualModelConfiguration(main=_candidate(8102, "main"))),
+        tmp_path,
+        backend_factory=lambda candidate: backend,
+    )
+    call = caller.generate("review", role="review", metadata=_eligible("A"))
+    assert backend.max_tokens == [284]
+    assert call.budget["requested_completion_tokens"] == 512
+    assert call.budget["effective_completion_token_cap"] == 284
+    assert call.budget["context_limit"] == 4096
+    assert call.budget["safety_margin_tokens"] == 512
+
+
+def test_context_compaction_is_invoked_before_generation(tmp_path: Path) -> None:
+    backend = _BudgetBackend({"large": 3900, "compact": 100})
+    caller = AuditedModelCaller(
+        RoleRouter(DualModelConfiguration(main=_candidate(8102, "main"))),
+        tmp_path,
+        backend_factory=lambda candidate: backend,
+    )
+    call = caller.generate(
+        "large",
+        role="review",
+        metadata=_eligible("A"),
+        compact_prompt=lambda: "compact",
+    )
+    assert backend.max_tokens == [512]
+    assert call.budget["compaction_occurred"] is True
+    assert call.budget["prompt_tokens"] == 100
+
+
+def test_irreducible_context_overflow_is_typed_and_audited(tmp_path: Path) -> None:
+    backend = _BudgetBackend({"large": 3900, "still-large": 3800})
+    caller = AuditedModelCaller(
+        RoleRouter(DualModelConfiguration(main=_candidate(8102, "main"))),
+        tmp_path,
+        backend_factory=lambda candidate: backend,
+    )
+    with pytest.raises(ContextBudgetError) as caught:
+        caller.generate(
+            "large",
+            role="review",
+            metadata=_eligible("A"),
+            compact_prompt=lambda: "still-large",
+        )
+    assert caught.value.category == "context_overflow"
+    assert caught.value.budget["context_rejection_reason"]
+    audit = json.loads(next(tmp_path.glob("*.json")).read_text(encoding="utf-8"))
+    assert audit["status"] == "CONTEXT_REJECTED"
+    assert audit["response_valid"] is False
+
+
+def test_http_400_model_error_becomes_a_typed_terminal_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configuration = replace(
+        load_experiment_configuration(REPOSITORY_ROOT, CONFIG_PATH, base_revision="a" * 40),
+        output_root=tmp_path / "output",
+        overlay_root=tmp_path / "corpus",
+    )
+    task = load_benchmark_manifest(configuration.manifest_path)[0]
+    arm = configuration.arms[0]
+    monkeypatch.setattr(
+        "research_workspace.team_runner.LocalTeamRunner.run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ModelInvocationError(
+                "HTTP 400 maximum context length exceeded",
+                category="http_error",
+                http_status=400,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "research_workspace.multilanguage_ablation.gpu_memory_snapshot",
+        lambda *args, **kwargs: {"status": "UNAVAILABLE"},
+    )
+    lane = _execute_task_lane(REPOSITORY_ROOT, configuration, task, arm, tmp_path / "lane-project")[
+        "lane"
+    ]
+    assert isinstance(lane, dict)
+    assert lane["status"] == "TERMINAL_FAILURE"
+    assert lane["failure_category"] == "http_error"
+    assert lane["terminal"] is True
+    assert lane["resumability"]["skip_on_resume"] is False
+
+
+def test_python_task_verification_is_scoped_and_sanitizes_experiment_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "candidate.py").write_text(
+        "def add(left: int, right: int) -> int:\n    return left + right\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "test_public.py").write_text(
+        "import os\nfrom candidate import add\n\n"
+        "def test_public_contract() -> None:\n"
+        "    assert 'LAPLACE_ABLATION_BASE_REVISION' not in os.environ\n"
+        "    assert add(2, 3) == 5\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "test_unrelated.py").write_text(
+        "def test_unrelated_repository_failure() -> None:\n    assert False\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LAPLACE_ABLATION_BASE_REVISION", "a" * 40)
+    report = LocalToolRunner(tmp_path, tmp_path / "logs").run_python_quality_gates(
+        ["candidate.py"], required_test_paths=["test_public.py"], timeout_seconds=60
+    )
+    assert report["passed"] is True
+    assert report["repository_wide_tests_executed"] is False
+    assert report["required_test_paths"] == ["test_public.py"]
+    commands = [item["command"] for item in report["results"]]
+    assert all("test_unrelated.py" not in command for command in commands)
 
 
 def _contract(source: Path) -> str:
@@ -518,7 +681,11 @@ def test_task_lane_timeout_is_killable_and_retained_as_typed_evidence(
     assert result["status"] == "TIMEOUT"
     assert result["returncode"] == 124
     assert result["timeout_seconds"] == 17
-    assert result["bundle"] == {}
+    bundle = result["bundle"]
+    assert isinstance(bundle, dict)
+    assert bundle["status"] == "TERMINAL_FAILURE"
+    assert bundle["lane"]["failure_category"] == "timeout"
+    assert bundle["lane"]["terminal"] is True
     assert Path(str(result["command_log"])).is_file()
 
 
@@ -684,6 +851,93 @@ def test_empty_result_packaging_is_explicit_and_does_not_invent_measurements(
     assert Path(str(reports["markdown"])).is_file()
 
 
+def test_infrastructure_failures_are_excluded_from_model_quality_metrics(tmp_path: Path) -> None:
+    configuration = replace(
+        load_experiment_configuration(REPOSITORY_ROOT, CONFIG_PATH, base_revision="a" * 40),
+        output_root=tmp_path,
+    )
+    pair_root = _result_set_root(configuration) / "pairs" / "A"
+    pair_root.mkdir(parents=True)
+    common = {
+        "schema_version": 2,
+        "terminal": True,
+        "arm_id": "A",
+        "language": "python",
+        "category": "implementation",
+        "execution_phase": "phase1",
+        "total_task_seconds": 1.0,
+        "model_calls": {},
+    }
+    (pair_root / "candidate.json").write_text(
+        json.dumps(
+            {
+                **common,
+                "task_id": "candidate",
+                "status": "COMPLETE_EVALUATED",
+                "outcome_kind": "candidate_result",
+                "held_out": {"status": "PASS", "score": 100.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (pair_root / "infra.json").write_text(
+        json.dumps(
+            {
+                **common,
+                "task_id": "infra",
+                "status": "TERMINAL_FAILURE",
+                "outcome_kind": "infrastructure_failure",
+                "held_out": {
+                    "status": "NOT_RUN_INFRASTRUCTURE_FAILURE",
+                    "score": None,
+                    "included_in_model_quality_metrics": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    reports = package_results(configuration)
+    payload = json.loads(Path(str(reports["json"])).read_text(encoding="utf-8"))
+    assert len(payload["infrastructure_failures"]) == 1
+    assert payload["model_quality_task_arm_results"] == 1
+    aggregate = next(
+        item
+        for item in payload["aggregates"]
+        if item.get("arm_id") == "A" and item.get("language") == "python"
+    )
+    assert aggregate["tasks"] == 1
+    assert aggregate["mean_held_out_score"] == 100.0
+
+
+def test_offline_quantization_lock_satisfies_backend_metadata(tmp_path: Path) -> None:
+    lock = tmp_path / "quantization.lock"
+    lock.write_text(
+        """compressed-tensors==0.17.1 \\
+    --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+datasets==5.0.0 \\
+    --hash=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+huggingface-hub==1.23.0 \\
+    --hash=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+llmcompressor==0.12.0 \\
+    --hash=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+torch==2.12.0 \\
+    --hash=sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+transformers==5.10.1 \\
+    --hash=sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+""",
+        encoding="utf-8",
+    )
+    experiment = CONFIG_PATH.parent
+    result = validate_quantization_lock(experiment, lock)
+    assert result["status"] == "QUANTIZATION_LOCK_COMPATIBLE"
+    assert result["resolved_versions"]["transformers"] == "5.10.1"
+    assert result["source_artifacts_ready"] is False
+    assert all(
+        item["status"] == "DEFERRED_SOURCE_ARTIFACT_MISSING"
+        for item in result["source_architecture_validation"]
+    )
+
+
 @pytest.mark.parametrize(
     ("phase_id", "arm_id"),
     (("phase1", "A"), ("phase2", "B"), ("phase3", "C")),
@@ -697,24 +951,37 @@ def test_phase_resume_status_counts_only_fingerprint_compatible_results(
     )
     tasks = load_benchmark_manifest(configuration.manifest_path)
     fingerprint = _configuration_fingerprint(configuration, {}, "f" * 64)
-    pairs = tmp_path / "pairs" / arm_id
+    pairs = _result_set_root(configuration) / "pairs" / arm_id
     pairs.mkdir(parents=True)
     for task in tasks:
         (pairs / f"{task.task_id}.json").write_text(
             json.dumps(
                 {
+                    "schema_version": 2,
                     "status": "COMPLETE_EVALUATED",
+                    "terminal": True,
+                    "outcome_kind": "candidate_result",
+                    "experiment_id": "multilanguage_dual_model_ablation_v1",
                     "task_id": task.task_id,
+                    "language": task.language,
+                    "category": task.category,
                     "arm_id": arm_id,
                     "base_revision": "a" * 40,
                     "execution_phase": phase_id,
                     "configuration_fingerprint": fingerprint,
                     "held_out_manifest_sha256": "f" * 64,
+                    "started_at": "2026-07-16T00:00:00+00:00",
+                    "ended_at": "2026-07-16T00:00:01+00:00",
+                    "total_task_seconds": 1.0,
+                    "model_calls": {},
+                    "held_out": {"status": "PASS", "score": 100.0},
+                    "resumability": {"skip_on_resume": True},
+                    "lane_result": {},
                 }
             ),
             encoding="utf-8",
         )
-    manifest = tmp_path / "phases" / phase_id / "manifest.json"
+    manifest = _result_set_root(configuration) / "phases" / phase_id / "manifest.json"
     manifest.parent.mkdir(parents=True)
     manifest.write_text(
         json.dumps(
@@ -739,6 +1006,101 @@ def test_phase_resume_status_counts_only_fingerprint_compatible_results(
     status = phase_status(configuration, phase_id)
     assert status["status"] == "INCOMPLETE"
     assert status["remaining_pairs"] == 1
+
+
+def test_legacy_result_schema_and_old_output_root_are_not_resumable(tmp_path: Path) -> None:
+    configuration = replace(
+        load_experiment_configuration(REPOSITORY_ROOT, CONFIG_PATH, base_revision="a" * 40),
+        output_root=tmp_path,
+    )
+    task = load_benchmark_manifest(configuration.manifest_path)[0]
+    fingerprint = _configuration_fingerprint(configuration, {}, "f" * 64)
+    legacy = tmp_path / "pairs" / "A" / f"{task.task_id}.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "COMPLETE_EVALUATED",
+                "task_id": task.task_id,
+                "arm_id": "A",
+                "base_revision": "a" * 40,
+                "execution_phase": "phase1",
+                "configuration_fingerprint": fingerprint,
+                "held_out_manifest_sha256": "f" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert phase_status(configuration, "phase1")["completed_pairs"] == 0
+    assert "failure-accounting-v2" in str(_result_set_root(configuration))
+
+
+def test_thirty_one_of_thirty_two_pairs_cannot_complete_a_phase(tmp_path: Path) -> None:
+    configuration = replace(
+        load_experiment_configuration(REPOSITORY_ROOT, CONFIG_PATH, base_revision="a" * 40),
+        output_root=tmp_path,
+    )
+    tasks = load_benchmark_manifest(configuration.manifest_path)
+    fingerprint = _configuration_fingerprint(configuration, {}, "f" * 64)
+    pair_root = _result_set_root(configuration) / "pairs" / "A"
+    pair_root.mkdir(parents=True)
+    for task in tasks[:-1]:
+        (pair_root / f"{task.task_id}.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "status": "COMPLETE_EVALUATED",
+                    "terminal": True,
+                    "outcome_kind": "candidate_result",
+                    "experiment_id": "multilanguage_dual_model_ablation_v1",
+                    "task_id": task.task_id,
+                    "language": task.language,
+                    "category": task.category,
+                    "arm_id": "A",
+                    "base_revision": "a" * 40,
+                    "execution_phase": "phase1",
+                    "configuration_fingerprint": fingerprint,
+                    "held_out_manifest_sha256": "f" * 64,
+                    "started_at": "2026-07-16T00:00:00+00:00",
+                    "ended_at": "2026-07-16T00:00:01+00:00",
+                    "total_task_seconds": 1.0,
+                    "model_calls": {},
+                    "held_out": {"status": "PASS", "score": 100.0},
+                    "resumability": {"skip_on_resume": True},
+                    "lane_result": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+    (pair_root / f"{tasks[-1].task_id}.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "status": "TERMINAL_FAILURE",
+                "terminal": True,
+                "outcome_kind": "infrastructure_failure",
+                "task_id": tasks[-1].task_id,
+                "arm_id": "A",
+                "base_revision": "a" * 40,
+                "execution_phase": "phase1",
+                "configuration_fingerprint": fingerprint,
+                "held_out_manifest_sha256": "f" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = _result_set_root(configuration) / "phases" / "phase1" / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        json.dumps({"status": "COMPLETE", "fingerprint": fingerprint}), encoding="utf-8"
+    )
+    status = phase_status(configuration, "phase1")
+    assert status["status"] == "INCOMPLETE"
+    assert status["completed_pairs"] == 31
+    assert status["remaining_pairs"] == 1
+    assert status["attempted_terminal_pairs"] == 32
+    assert status["terminal_failure_pairs"] == 1
 
 
 def test_phase_fingerprint_rejects_changed_benchmark_or_corpus() -> None:
@@ -861,13 +1223,17 @@ def test_merge_requires_and_packages_all_serialized_task_arm_pairs(tmp_path: Pat
     fingerprint = _configuration_fingerprint(configuration, corpus_hashes, "f" * 64)
     tasks = load_benchmark_manifest(configuration.manifest_path)
     for arm in ("A", "B", "C"):
-        pair_root = configuration.output_root / "pairs" / arm
+        pair_root = _result_set_root(configuration) / "pairs" / arm
         pair_root.mkdir(parents=True, exist_ok=True)
         for task in tasks:
             (pair_root / f"{task.task_id}.json").write_text(
                 json.dumps(
                     {
+                        "schema_version": 2,
                         "status": "COMPLETE_EVALUATED",
+                        "terminal": True,
+                        "outcome_kind": "candidate_result",
+                        "experiment_id": "multilanguage_dual_model_ablation_v1",
                         "task_id": task.task_id,
                         "arm_id": arm,
                         "base_revision": configuration.base_revision,
@@ -877,12 +1243,18 @@ def test_merge_requires_and_packages_all_serialized_task_arm_pairs(tmp_path: Pat
                         "language": task.language,
                         "category": task.category,
                         "held_out": {"score": 100},
+                        "started_at": "2026-07-16T00:00:00+00:00",
+                        "ended_at": "2026-07-16T00:00:01+00:00",
+                        "total_task_seconds": 1.0,
+                        "model_calls": {},
+                        "resumability": {"skip_on_resume": True},
+                        "lane_result": {},
                     }
                 ),
                 encoding="utf-8",
             )
     for phase_id in ("phase1", "phase2", "phase3"):
-        path = configuration.output_root / "phases" / phase_id / "manifest.json"
+        path = _result_set_root(configuration) / "phases" / phase_id / "manifest.json"
         path.parent.mkdir(parents=True)
         path.write_text(
             json.dumps(
@@ -898,13 +1270,13 @@ def test_merge_requires_and_packages_all_serialized_task_arm_pairs(tmp_path: Pat
     merged = merge_phase_results(configuration)
     assert merged["status"] == "MERGED_COMPLETE"
     assert merged["task_arm_pairs"] == 96
-    removed_path = configuration.output_root / "pairs" / "C" / f"{tasks[0].task_id}.json"
+    removed_path = _result_set_root(configuration) / "pairs" / "C" / f"{tasks[0].task_id}.json"
     removed = removed_path.read_text(encoding="utf-8")
     removed_path.unlink()
     with pytest.raises(Exception, match="Cannot merge"):
         merge_phase_results(configuration)
     removed_path.write_text(removed, encoding="utf-8")
-    unexpected = configuration.output_root / "pairs" / "C" / "stale-task.json"
+    unexpected = _result_set_root(configuration) / "pairs" / "C" / "stale-task.json"
     unexpected.write_text(removed, encoding="utf-8")
     with pytest.raises(Exception, match="exactly 96"):
         merge_phase_results(configuration)
@@ -972,7 +1344,7 @@ def _run_fake_managed_all(tmp_path: Path, *, fail_phase: str = "") -> tuple[list
         check=False,
         timeout=30,
     )
-    assert completed.returncode == 0
+    assert completed.returncode == (2 if fail_phase else 0)
     controls = control_log.read_text(encoding="utf-8").splitlines()
     servers = server_log.read_text(encoding="utf-8").splitlines()
     return controls, servers

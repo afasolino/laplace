@@ -17,6 +17,7 @@ from research_workspace.model_artifacts import (
     load_model_artifacts,
     validate_local_artifacts,
     validate_profile_alignment,
+    validate_quantization_lock,
     validate_serving_environments,
     write_artifact_manifest,
 )
@@ -90,12 +91,18 @@ def main() -> int:
             "server-profile",
             "environment",
             "ready",
+            "validate-quantization-lock",
         ),
     )
     parser.add_argument("--artifact")
+    parser.add_argument("--lock", type=Path, default=Path(".models/quantization_requirements.lock"))
     arguments = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     experiment = root / EXPERIMENT
+    if arguments.command == "validate-quantization-lock":
+        result = validate_quantization_lock(experiment, (root / arguments.lock).resolve())
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result.get("status") == "QUANTIZATION_LOCK_COMPATIBLE" else 2
     if arguments.command == "validate-metadata":
         result: object = validate_profile_alignment(experiment)
     elif arguments.command == "check":

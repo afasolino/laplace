@@ -4,7 +4,7 @@
     "python": "3.11",
     "llmcompressor": "0.12.0",
     "llmcompressor_revision": "6d2a0908e45324b76e390bdec600143e85a075f8",
-    "transformers": "5.13.1",
+    "transformers": "5.10.1",
     "datasets": "5.0.0",
     "huggingface_hub": "1.23.0",
     "vllm": "0.25.0"

@@ -1155,6 +1155,10 @@ class LocalToolRunner:
         if timeout_seconds < 1 or timeout_seconds > 1800:
             raise ToolExecutionError("Tool timeout must be between 1 and 1800 seconds")
         started = time.monotonic()
+        environment = os.environ.copy()
+        for key in tuple(environment):
+            if key.startswith("LAPLACE_ABLATION_") or key == "LAPLACE_SERVER_OWNER_TOKEN":
+                environment.pop(key, None)
         try:
             # The command is built only by this module's allowlisted methods.
             process = subprocess.Popen(  # nosec B603
@@ -1164,6 +1168,7 @@ class LocalToolRunner:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
+                env=environment,
             )
         except OSError as exc:
             raise ToolExecutionError(f"Cannot start {tool}: {exc}") from exc
@@ -1211,17 +1216,13 @@ class LocalToolRunner:
         required_test_paths: list[str] | None = None,
         timeout_seconds: int = 300,
     ) -> JsonObject:
-        """Run project quality gates plus task-local public tests.
-
-        ``pytest`` normally follows the repository's ``testpaths`` setting.
-        A task fixture outside that directory would therefore be invisible to a
-        project-wide run.  Required fixture tests are supplied as safe relative
-        paths and are always run explicitly before the full suite.
-        """
+        """Run only task-scoped Python gates and explicitly declared public tests."""
         targets = self._target_paths(paths or [])
         python_targets = [target for target in targets if Path(target).suffix == ".py"]
         bandit_targets = python_targets or ["src"]
         required_tests = self._target_paths(required_test_paths or [])
+        if not required_tests:
+            raise ToolExecutionError("At least one explicit public Python test is required")
         if not all(Path(test).suffix == ".py" for test in required_tests):
             raise ToolExecutionError("Required Python tests must be .py files")
         public_test_commands: list[tuple[str, list[str]]] = []
@@ -1241,10 +1242,21 @@ class LocalToolRunner:
         commands: list[tuple[str, list[str]]] = [
             ("ruff_format", [sys.executable, "-m", "ruff", "format", "--check", *targets]),
             ("ruff", [sys.executable, "-m", "ruff", "check", *targets]),
-            ("mypy", [sys.executable, "-m", "mypy", "src"]),
+            ("mypy", [sys.executable, "-m", "mypy", *targets]),
             *public_test_commands,
-            ("pytest", [sys.executable, "-m", "pytest"]),
-            ("coverage", [sys.executable, "-m", "coverage", "run", "-m", "pytest"]),
+            (
+                "coverage",
+                [
+                    sys.executable,
+                    "-m",
+                    "coverage",
+                    "run",
+                    "-m",
+                    "pytest",
+                    "-q",
+                    *required_tests,
+                ],
+            ),
         ]
         if shutil.which("bandit"):
             commands.append(
@@ -1259,6 +1271,8 @@ class LocalToolRunner:
             "operation": "run_python_quality_gates",
             "repository_root": str(self.repository_root),
             "required_test_paths": required_tests,
+            "scope_policy": "task_declared_sources_and_public_tests_only",
+            "repository_wide_tests_executed": False,
             "passed": passed,
             "results": results,
             "created_at": _now(),

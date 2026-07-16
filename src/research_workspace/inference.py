@@ -38,6 +38,9 @@ class ServingCandidate:
     top_p: float = 1.0
     seed: int | None = 0
     request_timeout_seconds: int = 120
+    context_safety_margin_tokens: int = 512
+    minimum_completion_tokens: int = 256
+    reviewer_max_output_tokens: int = 768
 
     def __post_init__(self) -> None:
         parsed = urlparse(self.endpoint)
@@ -55,6 +58,14 @@ class ServingCandidate:
             raise ValueError("Serving top_p must be greater than 0 and at most 1")
         if self.request_timeout_seconds < 1 or self.request_timeout_seconds > 1800:
             raise ValueError("Serving request timeout must be between 1 and 1800 seconds")
+        if self.context_safety_margin_tokens < 64 or self.context_safety_margin_tokens > 4096:
+            raise ValueError("Serving context safety margin must be between 64 and 4096 tokens")
+        if self.minimum_completion_tokens < 64 or self.minimum_completion_tokens > 2048:
+            raise ValueError("Serving minimum completion must be between 64 and 2048 tokens")
+        if self.minimum_completion_tokens > self.max_output_tokens:
+            raise ValueError("Serving minimum completion cannot exceed max_output_tokens")
+        if self.reviewer_max_output_tokens < 64 or self.reviewer_max_output_tokens > 2048:
+            raise ValueError("Reviewer max output must be between 64 and 2048 tokens")
 
     def to_json(self) -> JsonObject:
         return {
@@ -75,6 +86,9 @@ class ServingCandidate:
             "top_p": self.top_p,
             "seed": self.seed,
             "request_timeout_seconds": self.request_timeout_seconds,
+            "context_safety_margin_tokens": self.context_safety_margin_tokens,
+            "minimum_completion_tokens": self.minimum_completion_tokens,
+            "reviewer_max_output_tokens": self.reviewer_max_output_tokens,
         }
 
 

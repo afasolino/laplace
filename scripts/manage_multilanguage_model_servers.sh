@@ -57,7 +57,7 @@ pid_is_owned() {
 
 start_profile() {
   PROFILE="$1"
-  profile_values "${PROFILE}" || return 0
+  profile_values "${PROFILE}" || return 2
   if pid_is_owned "${PROFILE}"; then
     echo "${PROFILE} is already running with PID ${PID}."
     return 0
@@ -65,7 +65,7 @@ start_profile() {
   if [ ! -x "${VLLM}" ]; then
     echo "Missing vLLM executable: ${VLLM}"
     echo "Prepare the pinned serving environment before retrying."
-    return 0
+    return 2
   fi
   READY_OUTPUT="$(
     "${PYTHON}" "${ROOT}/scripts/manage_multilanguage_models.py" ready --artifact "${PROFILE}" 2>&1
@@ -74,7 +74,7 @@ start_profile() {
     echo "Model artifact is not hash- and metadata-verified: ${MODEL_PATH}"
     echo "${READY_OUTPUT}"
     echo "Preparation commands: ${PYTHON} ${ROOT}/scripts/manage_multilanguage_models.py commands"
-    return 0
+    return 2
   fi
   echo "Starting ${PROFILE}; log: ${LOG_FILE}"
   nohup "${VLLM}" serve "${MODEL_PATH}" \
@@ -99,13 +99,14 @@ start_profile() {
     echo "${PROFILE} started with PID ${PID}."
   else
     echo "${PROFILE} did not remain running; inspect ${LOG_FILE}."
+    return 2
   fi
   return 0
 }
 
 stop_profile() {
   PROFILE="$1"
-  profile_values "${PROFILE}" || return 0
+  profile_values "${PROFILE}" || return 2
   if ! pid_is_owned "${PROFILE}"; then
     echo "No owned ${PROFILE} server is running; no process was signalled."
     return 0
@@ -115,7 +116,7 @@ stop_profile() {
     RECORDED_PID="$(sed -n '2p' "${OWNER_FILE}" 2>/dev/null)"
     if [ "${RECORDED_TOKEN}" != "${OWNER_TOKEN}" ] || [ "${RECORDED_PID}" != "${PID}" ]; then
       echo "${PROFILE} was not started by orchestration token ${OWNER_TOKEN}; no process was signalled."
-      return 0
+      return 2
     fi
   fi
   echo "Stopping owned ${PROFILE} PID ${PID}."
@@ -127,6 +128,7 @@ stop_profile() {
   done
   if [ -r "/proc/${PID}/cmdline" ]; then
     echo "PID ${PID} did not stop after 30 seconds; it was not force-killed."
+    return 2
   else
     rm -f "${PID_FILE}" "${OWNER_FILE}"
     echo "${PROFILE} stopped."
@@ -146,7 +148,7 @@ status_profile() {
 
 command_profile() {
   PROFILE="$1"
-  profile_values "${PROFILE}" || return 0
+  profile_values "${PROFILE}" || return 2
   printf 'profile=%s\nexecutable=%s\npid_file=%s\nlog_file=%s\ncommand=' \
     "${PROFILE}" "${VLLM}" "${PID_FILE}" "${LOG_FILE}"
   printf '%q ' "${VLLM}" serve "${MODEL_PATH}" \
@@ -159,48 +161,78 @@ command_profile() {
 }
 
 ACTION="${1:-help}"
+ACTION_STATUS=2
 case "${ACTION}" in
-  start-phase1) start_profile phase1_main ;;
-  start-phase2-main) start_profile phase2_main ;;
-  start-phase2) start_profile phase2_main ;;
-  start-phase2-worker) start_profile phase2_rtl_worker ;;
-  start-phase3-main) start_profile phase2_main ;;
-  start-phase3-worker) start_profile phase2_rtl_worker ;;
-  start-phase3) start_profile phase2_main; start_profile phase2_rtl_worker ;;
-  command-phase1) command_profile phase1_main ;;
-  command-phase2-main) command_profile phase2_main ;;
-  command-phase2-worker) command_profile phase2_rtl_worker ;;
-  command-phase3-main) command_profile phase2_main ;;
-  command-phase3-worker) command_profile phase2_rtl_worker ;;
-  stop-phase1) stop_profile phase1_main ;;
-  stop-phase2-main) stop_profile phase2_main ;;
-  stop-phase2) stop_profile phase2_main ;;
-  stop-phase2-worker) stop_profile phase2_rtl_worker ;;
-  stop-phase3-main) stop_profile phase2_main ;;
-  stop-phase3-worker) stop_profile phase2_rtl_worker ;;
-  stop-phase3) stop_profile phase2_rtl_worker; stop_profile phase2_main ;;
+  start-phase1) start_profile phase1_main; ACTION_STATUS="$?" ;;
+  start-phase2-main) start_profile phase2_main; ACTION_STATUS="$?" ;;
+  start-phase2) start_profile phase2_main; ACTION_STATUS="$?" ;;
+  start-phase2-worker) start_profile phase2_rtl_worker; ACTION_STATUS="$?" ;;
+  start-phase3-main) start_profile phase2_main; ACTION_STATUS="$?" ;;
+  start-phase3-worker) start_profile phase2_rtl_worker; ACTION_STATUS="$?" ;;
+  start-phase3)
+    start_profile phase2_main
+    ACTION_STATUS="$?"
+    if [ "${ACTION_STATUS}" -eq 0 ]; then
+      start_profile phase2_rtl_worker
+      ACTION_STATUS="$?"
+    fi
+    ;;
+  command-phase1) command_profile phase1_main; ACTION_STATUS="$?" ;;
+  command-phase2-main) command_profile phase2_main; ACTION_STATUS="$?" ;;
+  command-phase2-worker) command_profile phase2_rtl_worker; ACTION_STATUS="$?" ;;
+  command-phase3-main) command_profile phase2_main; ACTION_STATUS="$?" ;;
+  command-phase3-worker) command_profile phase2_rtl_worker; ACTION_STATUS="$?" ;;
+  stop-phase1) stop_profile phase1_main; ACTION_STATUS="$?" ;;
+  stop-phase2-main) stop_profile phase2_main; ACTION_STATUS="$?" ;;
+  stop-phase2) stop_profile phase2_main; ACTION_STATUS="$?" ;;
+  stop-phase2-worker) stop_profile phase2_rtl_worker; ACTION_STATUS="$?" ;;
+  stop-phase3-main) stop_profile phase2_main; ACTION_STATUS="$?" ;;
+  stop-phase3-worker) stop_profile phase2_rtl_worker; ACTION_STATUS="$?" ;;
+  stop-phase3)
+    stop_profile phase2_rtl_worker
+    WORKER_STOP_STATUS="$?"
+    stop_profile phase2_main
+    MAIN_STOP_STATUS="$?"
+    ACTION_STATUS="${WORKER_STOP_STATUS}"
+    if [ "${ACTION_STATUS}" -eq 0 ]; then
+      ACTION_STATUS="${MAIN_STOP_STATUS}"
+    fi
+    ;;
   status)
     status_profile phase1_main
     status_profile phase2_main
     status_profile phase2_rtl_worker
+    ACTION_STATUS=0
     ;;
   health-phase1)
     "${ROOT}/.venv/bin/python" "${ROOT}/scripts/manage_multilanguage_models.py" endpoint --artifact phase1_main
+    ACTION_STATUS="$?"
     ;;
   health-phase2)
     "${ROOT}/.venv/bin/python" "${ROOT}/scripts/manage_multilanguage_models.py" endpoint --artifact phase2_main
+    ACTION_STATUS="$?"
     ;;
   health-phase3)
     "${ROOT}/.venv/bin/python" "${ROOT}/scripts/manage_multilanguage_models.py" endpoint --artifact phase2_main
-    "${ROOT}/.venv/bin/python" "${ROOT}/scripts/manage_multilanguage_models.py" endpoint --artifact phase2_rtl_worker
+    ACTION_STATUS="$?"
+    if [ "${ACTION_STATUS}" -eq 0 ]; then
+      "${ROOT}/.venv/bin/python" "${ROOT}/scripts/manage_multilanguage_models.py" endpoint --artifact phase2_rtl_worker
+      ACTION_STATUS="$?"
+    fi
     ;;
   gpu)
     "${ROOT}/.venv/bin/python" "${ROOT}/scripts/manage_multilanguage_models.py" gpu
+    ACTION_STATUS="$?"
     ;;
   *)
     echo "Usage: $0 {start-phase1|start-phase2|start-phase3|start-phase3-worker|command-phase1|command-phase2-main|command-phase3-main|command-phase3-worker|stop-phase1|stop-phase2|stop-phase3|status|health-phase1|health-phase2|health-phase3|gpu}"
     ;;
 esac
 
-# Deliberately do not propagate an error status that would close an interactive pane.
-true
+# Propagate lifecycle failures to orchestration without using strict shell modes.
+# When invoked from an interactive shell or a tmux pane, returning from this
+# script leaves that caller available for inspection.
+finish_with_status() {
+  return "$1"
+}
+finish_with_status "${ACTION_STATUS}"

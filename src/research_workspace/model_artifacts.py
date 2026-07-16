@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess  # nosec B404
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +37,165 @@ _ARTIFACT_IDENTITY = {
     "phase2_main": ("phase2", "main", "requires_local_quantization"),
     "phase2_rtl_worker": ("phase2", "rtl_worker", "requires_local_quantization"),
 }
+
+
+def _numeric_version(value: str) -> tuple[int, ...]:
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", value):
+        raise EngineeringError(f"Unsupported non-numeric pinned version: {value}")
+    return tuple(int(part) for part in value.split("."))
+
+
+def _satisfies_version(version: str, constraint: str) -> bool:
+    actual = _numeric_version(version)
+    for clause in constraint.split(","):
+        match = re.fullmatch(r"(==|>=|<=|>|<)([0-9]+(?:\.[0-9]+)*)", clause.strip())
+        if match is None:
+            raise EngineeringError(f"Unsupported compatibility constraint: {constraint}")
+        operator, expected_text = match.groups()
+        expected = _numeric_version(expected_text)
+        if operator == "==" and actual != expected:
+            return False
+        if operator == ">=" and actual < expected:
+            return False
+        if operator == "<=" and actual > expected:
+            return False
+        if operator == ">" and actual <= expected:
+            return False
+        if operator == "<" and actual >= expected:
+            return False
+    return True
+
+
+def _locked_versions(lock_path: Path) -> tuple[dict[str, str], set[str]]:
+    try:
+        text = lock_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise EngineeringError(f"Cannot read quantization lock {lock_path}: {exc}") from exc
+    versions: dict[str, str] = {}
+    hashed: set[str] = set()
+    matches = list(
+        re.finditer(
+            r"(?m)^([A-Za-z0-9_.-]+)==([^ \\\n]+)(.*?)(?=^[A-Za-z0-9_.-]+==|\Z)", text, re.S
+        )
+    )
+    for match in matches:
+        name = match.group(1).lower().replace("_", "-")
+        versions[name] = match.group(2)
+        if "--hash=sha256:" in match.group(3):
+            hashed.add(name)
+    if not versions:
+        raise EngineeringError("Quantization lock contains no exact package pins")
+    return versions, hashed
+
+
+def validate_quantization_lock(experiment_root: Path, lock_path: Path) -> JsonObject:
+    """Validate the resolved AWQ stack without importing it or loading model weights."""
+    compatibility = _read_object(experiment_root / "quantization_compatibility.json")
+    if (
+        set(compatibility)
+        != {
+            "schema_version",
+            "backend",
+            "backend_requirements",
+            "direct_pins",
+            "quantization_script",
+            "required_api_markers",
+            "artifact_architectures",
+            "evidence",
+        }
+        or compatibility.get("schema_version") != 1
+    ):
+        raise EngineeringError("Quantization compatibility metadata is malformed")
+    requirements = compatibility.get("backend_requirements")
+    direct = compatibility.get("direct_pins")
+    architectures = compatibility.get("artifact_architectures")
+    markers = compatibility.get("required_api_markers")
+    if not all(isinstance(item, dict) for item in (requirements, direct, architectures)):
+        raise EngineeringError("Quantization compatibility maps are malformed")
+    if not isinstance(markers, list) or not all(isinstance(item, str) for item in markers):
+        raise EngineeringError("Quantization compatibility API markers are malformed")
+    versions, hashed = _locked_versions(lock_path.resolve())
+    errors: list[str] = []
+    for raw_name, raw_constraint in cast(dict[object, object], requirements).items():
+        name = str(raw_name).lower().replace("_", "-")
+        constraint = str(raw_constraint)
+        resolved = versions.get(name)
+        if resolved is None:
+            errors.append(f"missing_backend_requirement:{name}{constraint}")
+        elif not _satisfies_version(resolved, constraint):
+            errors.append(f"incompatible_backend_requirement:{name}=={resolved}:{constraint}")
+        elif name not in hashed:
+            errors.append(f"missing_hash:{name}")
+    records = load_model_artifacts(experiment_root / "model_artifacts.json")
+    environment_raw = _read_object(experiment_root / "model_artifacts.json").get(
+        "quantization_environment"
+    )
+    environment = cast(dict[str, object], environment_raw)
+    for raw_name, raw_version in cast(dict[object, object], direct).items():
+        name = str(raw_name).lower().replace("_", "-")
+        version = str(raw_version)
+        if versions.get(name) != version:
+            errors.append(
+                f"direct_pin_mismatch:{name}:locked={versions.get(name)}:expected={version}"
+            )
+        profile_key = name.replace("-", "_")
+        if environment.get(profile_key) != version:
+            errors.append(
+                f"model_profile_pin_mismatch:{profile_key}:"
+                f"configured={environment.get(profile_key)}:expected={version}"
+            )
+    script_path = experiment_root.parents[2] / str(compatibility["quantization_script"])
+    try:
+        script = script_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise EngineeringError(f"Cannot read quantization script {script_path}: {exc}") from exc
+    for marker in cast(list[str], markers):
+        if marker not in script:
+            errors.append(f"quantization_api_marker_missing:{marker}")
+    source_validation: list[JsonObject] = []
+    for artifact_id in ("phase2_main", "phase2_rtl_worker"):
+        source = Path(str(records[artifact_id]["source_path"]))
+        config_path = source / "config.json"
+        allowed_raw = cast(dict[object, object], architectures).get(artifact_id)
+        allowed = [str(item) for item in allowed_raw] if isinstance(allowed_raw, list) else []
+        if not config_path.is_file():
+            source_validation.append(
+                {
+                    "artifact_id": artifact_id,
+                    "status": "DEFERRED_SOURCE_ARTIFACT_MISSING",
+                    "config_path": str(config_path),
+                    "allowed_model_types": allowed,
+                }
+            )
+            continue
+        config = _read_object(config_path)
+        model_type = config.get("model_type")
+        supported = isinstance(model_type, str) and model_type in allowed
+        source_validation.append(
+            {
+                "artifact_id": artifact_id,
+                "status": "SUPPORTED" if supported else "UNSUPPORTED",
+                "config_path": str(config_path),
+                "model_type": model_type,
+                "allowed_model_types": allowed,
+            }
+        )
+        if not supported:
+            errors.append(f"unsupported_source_architecture:{artifact_id}:{model_type}")
+    return {
+        "status": "QUANTIZATION_LOCK_COMPATIBLE" if not errors else "FAILED",
+        "lock_path": str(lock_path.resolve()),
+        "lock_sha256": _sha256(lock_path.resolve()),
+        "resolved_versions": versions,
+        "backend_requirements": requirements,
+        "direct_pins": direct,
+        "source_architecture_validation": source_validation,
+        "source_artifacts_ready": all(
+            item.get("status") == "SUPPORTED" for item in source_validation
+        ),
+        "quantization_claim": "NOT_RUN",
+        "errors": errors,
+    }
 
 
 def _read_object(path: Path) -> JsonObject:

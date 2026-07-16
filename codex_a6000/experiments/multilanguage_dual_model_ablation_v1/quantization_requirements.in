@@ -1,6 +1,6 @@
 # Direct inputs for the user-authorized Phase-2 quantization environment.
 # Generate and retain the hashed transitive lock before downloading model weights.
 llmcompressor==0.12.0
-transformers==5.13.1
+transformers==5.10.1
 datasets==5.0.0
 huggingface_hub==1.23.0

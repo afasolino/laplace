@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://laplace.local/schemas/multilanguage_ablation_pair_result.schema.json",
+  "title": "Terminal multilingual ablation task-arm result",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "terminal",
+    "outcome_kind",
+    "experiment_id",
+    "task_id",
+    "arm_id",
+    "execution_phase",
+    "base_revision",
+    "configuration_fingerprint",
+    "held_out_manifest_sha256",
+    "started_at",
+    "ended_at",
+    "total_task_seconds",
+    "model_calls",
+    "held_out",
+    "resumability",
+    "lane_result"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "status": {"enum": ["COMPLETE_EVALUATED", "TERMINAL_FAILURE"]},
+    "terminal": {"const": true},
+    "outcome_kind": {"enum": ["candidate_result", "infrastructure_failure"]},
+    "experiment_id": {"const": "multilanguage_dual_model_ablation_v1"},
+    "task_id": {"type": "string", "minLength": 1},
+    "arm_id": {"enum": ["A", "B", "C"]},
+    "execution_phase": {"enum": ["phase1", "phase2", "phase3"]},
+    "base_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "configuration_fingerprint": {"type": "object"},
+    "held_out_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "started_at": {"type": "string", "minLength": 1},
+    "ended_at": {"type": "string", "minLength": 1},
+    "total_task_seconds": {"type": "number", "minimum": 0},
+    "model_calls": {"type": "object"},
+    "held_out": {"type": "object"},
+    "resumability": {"type": "object"},
+    "lane_result": {"type": "object"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "TERMINAL_FAILURE"}}},
+      "then": {
+        "properties": {"outcome_kind": {"const": "infrastructure_failure"}},
+        "required": [
+          "route",
+          "stage",
+          "failure_category",
+          "error",
+          "retry_counts",
+          "deterministic_verification",
+          "reviewer_status"
+        ]
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "COMPLETE_EVALUATED"}}},
+      "then": {"properties": {"outcome_kind": {"const": "candidate_result"}}}
+    }
+  ]
+}

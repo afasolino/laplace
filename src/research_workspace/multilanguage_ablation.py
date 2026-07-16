@@ -56,12 +56,14 @@ from .model_artifacts import (
     validate_serving_environments,
 )
 from .model_routing import (
+    ContextBudgetError,
     DualModelConfiguration,
     RtlScope,
     RoutingTaskMetadata,
     assess_rtl_worker_eligibility,
     load_dual_model_configuration,
 )
+from .llm import ModelInvocationError, ModelRequired
 from .team_runner import (
     LocalTeamRunner,
     TeamWorkflowOptions,
@@ -72,6 +74,8 @@ from .team_runner import (
 
 
 EXPERIMENT_ID = "multilanguage_dual_model_ablation_v1"
+RESULT_SCHEMA_VERSION = 2
+EVALUATION_PROTOCOL_VERSION = "failure-accounting-v2"
 _TASK_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 Category = Literal["implementation", "repair", "edge_case", "integration"]
@@ -942,7 +946,12 @@ def _artifact_ids_for_phase(phase_id: PhaseId | None) -> set[str]:
 
 
 def _phase_manifest_path(configuration: ExperimentConfiguration, phase_id: PhaseId) -> Path:
-    return configuration.output_root / "phases" / phase_id / "manifest.json"
+    return _result_set_root(configuration) / "phases" / phase_id / "manifest.json"
+
+
+def _result_set_root(configuration: ExperimentConfiguration) -> Path:
+    revision = configuration.base_revision or "UNRESOLVED_BASE"
+    return configuration.output_root / "result_sets" / f"{revision}_{EVALUATION_PROTOCOL_VERSION}"
 
 
 def _evaluation_settings(configuration: ExperimentConfiguration) -> JsonObject:
@@ -953,6 +962,8 @@ def _evaluation_settings(configuration: ExperimentConfiguration) -> JsonObject:
         "bootstrap_seed": configuration.bootstrap_seed,
         "confidence_level": configuration.confidence_level,
         "held_out_manifest_hashes_required": True,
+        "result_schema_version": RESULT_SCHEMA_VERSION,
+        "evaluation_protocol_version": EVALUATION_PROTOCOL_VERSION,
     }
 
 
@@ -974,6 +985,8 @@ def _configuration_fingerprint(
         "corpus_hashes": corpus_hashes or {},
         "held_out_manifest_sha256": held_out_manifest_sha256,
         "evaluation_settings_sha256": hashlib.sha256(settings).hexdigest(),
+        "result_schema_version": RESULT_SCHEMA_VERSION,
+        "evaluation_protocol_version": EVALUATION_PROTOCOL_VERSION,
     }
 
 
@@ -1429,9 +1442,16 @@ def _pair_complete(
     if not path.is_file():
         return False
     value = _read_json(path)
+    try:
+        _validate_terminal_pair_result(value)
+    except EngineeringError:
+        return False
     expected_phase = _phase_for_arm(arm_id)
     return (
-        value.get("status") == "COMPLETE_EVALUATED"
+        value.get("schema_version") == RESULT_SCHEMA_VERSION
+        and value.get("status") == "COMPLETE_EVALUATED"
+        and value.get("terminal") is True
+        and value.get("outcome_kind") == "candidate_result"
         and value.get("base_revision") == configuration.base_revision
         and value.get("execution_phase") == expected_phase
         and configuration_fingerprint is not None
@@ -1469,6 +1489,8 @@ def phase_status(configuration: ExperimentConfiguration, phase_id: PhaseId) -> J
                     "model_artifacts_sha256",
                     "model_configuration_hashes",
                     "evaluation_settings_sha256",
+                    "result_schema_version",
+                    "evaluation_protocol_version",
                 )
                 if fingerprint.get(key) != expected_fingerprint[key]
             ]
@@ -1496,6 +1518,32 @@ def phase_status(configuration: ExperimentConfiguration, phase_id: PhaseId) -> J
             configuration_fingerprint=compatible_fingerprint,
         )
     ]
+    terminal_failures: list[JsonObject] = []
+    attempted_terminal: list[JsonObject] = []
+    for task_id, arm_id in expected:
+        path = _pair_result_path(configuration, arm_id, task_id)
+        if not path.is_file():
+            continue
+        row = _read_json(path)
+        compatible = (
+            compatible_fingerprint is not None
+            and row.get("schema_version") == RESULT_SCHEMA_VERSION
+            and row.get("terminal") is True
+            and row.get("base_revision") == configuration.base_revision
+            and row.get("execution_phase") == phase_id
+            and row.get("configuration_fingerprint") == compatible_fingerprint
+            and row.get("held_out_manifest_sha256") == held_out_manifest_sha256
+        )
+        if not compatible:
+            continue
+        record: JsonObject = {
+            "task_id": task_id,
+            "arm_id": arm_id,
+            "status": row.get("status"),
+        }
+        attempted_terminal.append(record)
+        if row.get("status") == "TERMINAL_FAILURE":
+            terminal_failures.append(record)
     pairs_complete = len(completed) == len(expected)
     status = "INCOMPLETE"
     if pairs_complete:
@@ -1514,7 +1562,10 @@ def phase_status(configuration: ExperimentConfiguration, phase_id: PhaseId) -> J
         "expected_pairs": len(expected),
         "completed_pairs": len(completed),
         "remaining_pairs": len(expected) - len(completed),
+        "attempted_terminal_pairs": len(attempted_terminal),
+        "terminal_failure_pairs": len(terminal_failures),
         "completed_task_arm_pairs": completed,
+        "terminal_failure_task_arm_pairs": terminal_failures,
         "manifest_path": str(manifest_path),
         "manifest": manifest,
         "compatibility_errors": compatibility_errors,
@@ -1576,7 +1627,10 @@ def _write_phase_manifest(
     except ValueError:
         pass
     pair_task_seconds = 0.0
-    for item in cast(list[object], current["completed_task_arm_pairs"]):
+    all_terminal_items = cast(list[object], current["completed_task_arm_pairs"]) + cast(
+        list[object], current["terminal_failure_task_arm_pairs"]
+    )
+    for item in all_terminal_items:
         if not isinstance(item, dict):
             continue
         pair_path = _pair_result_path(
@@ -1587,7 +1641,7 @@ def _write_phase_manifest(
         if isinstance(elapsed, (int, float)):
             pair_task_seconds += float(elapsed)
     record: JsonObject = {
-        "schema_version": 1,
+        "schema_version": RESULT_SCHEMA_VERSION,
         "experiment_id": EXPERIMENT_ID,
         "phase_id": phase_id,
         "phase_label": phase.label,
@@ -1610,6 +1664,8 @@ def _write_phase_manifest(
         "sum_completed_task_seconds": pair_task_seconds,
         "runtime_definition": "wall elapsed includes interruptions; summed task time is the measured total of completed task-arm pairs",
         "task_arm_pairs_completed": current["completed_task_arm_pairs"],
+        "task_arm_pairs_terminal_failures": current["terminal_failure_task_arm_pairs"],
+        "task_arm_pairs_attempted_terminal": current["attempted_terminal_pairs"],
         "expected_pairs": current["expected_pairs"],
         "decoding_settings": {
             arm.arm_id: {
@@ -1631,8 +1687,9 @@ def _write_phase_manifest(
         },
         "output_paths": {
             "phase_manifest": str(path),
-            "pair_results": str(configuration.output_root / "pairs"),
-            "reports": str(configuration.output_root / "reports"),
+            "result_set_root": str(_result_set_root(configuration)),
+            "pair_results": str(_result_set_root(configuration) / "pairs"),
+            "reports": str(_result_set_root(configuration) / "reports"),
         },
     }
     _write_json_atomic(path, record)
@@ -1840,7 +1897,14 @@ def _load_artifact(task_value: JsonObject, name: str) -> JsonObject:
     path = artifacts.get(name)
     if not isinstance(path, str) or not Path(path).is_file():
         return {}
-    return _read_json(Path(path))
+    try:
+        return _read_json(Path(path))
+    except EngineeringError as exc:
+        return {
+            "status": "MALFORMED_ARTIFACT",
+            "artifact_name": name,
+            "error": str(exc),
+        }
 
 
 def _model_call_totals(project_root: Path) -> JsonObject:
@@ -1851,7 +1915,17 @@ def _model_call_totals(project_root: Path) -> JsonObject:
     invalid = 0
     calls: list[JsonObject] = []
     for path in sorted(project_root.glob("Outputs/AgentTeam/team_logs/model_calls/*.json")):
-        call = _read_json(path)
+        try:
+            call = _read_json(path)
+        except EngineeringError as exc:
+            call = {
+                "schema_version": RESULT_SCHEMA_VERSION,
+                "status": "MALFORMED_MODEL_CALL_AUDIT",
+                "response_valid": False,
+                "failure_category": "malformed_response",
+                "error": str(exc),
+                "audit_path": str(path),
+            }
         count += 1
         raw_prompt_tokens = call.get("prompt_tokens")
         raw_completion_tokens = call.get("completion_tokens")
@@ -1993,7 +2067,117 @@ def _evaluate_held_out(
 
 
 def _pair_result_path(configuration: ExperimentConfiguration, arm_id: str, task_id: str) -> Path:
-    return configuration.output_root / "pairs" / arm_id / f"{task_id}.json"
+    return _result_set_root(configuration) / "pairs" / arm_id / f"{task_id}.json"
+
+
+def _validate_terminal_pair_result(value: JsonObject) -> None:
+    required = {
+        "schema_version",
+        "status",
+        "terminal",
+        "outcome_kind",
+        "experiment_id",
+        "task_id",
+        "arm_id",
+        "execution_phase",
+        "base_revision",
+        "configuration_fingerprint",
+        "held_out_manifest_sha256",
+        "started_at",
+        "ended_at",
+        "total_task_seconds",
+        "model_calls",
+        "held_out",
+        "resumability",
+        "lane_result",
+    }
+    missing = sorted(required - set(value))
+    if missing:
+        raise EngineeringError(f"Terminal pair result is missing required fields: {missing}")
+    if value.get("schema_version") != RESULT_SCHEMA_VERSION or value.get("terminal") is not True:
+        raise EngineeringError("Terminal pair result schema identity is invalid")
+    status = value.get("status")
+    outcome = value.get("outcome_kind")
+    if status == "COMPLETE_EVALUATED" and outcome != "candidate_result":
+        raise EngineeringError("Complete evaluated result must be a candidate result")
+    if status == "TERMINAL_FAILURE":
+        failure_required = {
+            "route",
+            "stage",
+            "failure_category",
+            "error",
+            "retry_counts",
+            "deterministic_verification",
+            "reviewer_status",
+        }
+        failure_missing = sorted(failure_required - set(value))
+        if outcome != "infrastructure_failure" or failure_missing:
+            raise EngineeringError(
+                "Typed infrastructure failure is malformed; missing: " + ", ".join(failure_missing)
+            )
+    elif status != "COMPLETE_EVALUATED":
+        raise EngineeringError(f"Unknown terminal pair result status: {status}")
+
+
+def _task_failure_stage(task_value: JsonObject | None) -> str:
+    state = task_value.get("state") if isinstance(task_value, dict) else None
+    return {
+        "request": "task_normalization",
+        "requirements": "planning",
+        "plan": "planning",
+        "retrieval": "retrieval",
+        "implementation": "implementation",
+        "verification": "verification",
+        "review": "reviewer",
+        "bounded_correction": "repair",
+        "final_report": "finalization",
+        "blocked": "orchestration",
+    }.get(str(state), "orchestration")
+
+
+def _exception_failure_category(exc: Exception) -> str:
+    if isinstance(exc, ContextBudgetError):
+        return "context_overflow"
+    if isinstance(exc, ModelInvocationError):
+        return exc.category
+    if isinstance(exc, ModelRequired):
+        return "endpoint_unavailable"
+    if isinstance(exc, (subprocess.TimeoutExpired, TimeoutError)):
+        return "timeout"
+    name = exc.__class__.__name__.lower()
+    if "structured" in name or "validation" in name:
+        return "malformed_response"
+    if "tool" in name:
+        return "verification_infrastructure_failure"
+    return "orchestration_failure"
+
+
+def _terminal_lane_failure(
+    *,
+    task: AblationTask,
+    arm: AblationArm,
+    stage: str,
+    category: str,
+    error: str,
+    task_value: JsonObject | None = None,
+    worktree: str | None = None,
+) -> JsonObject:
+    return {
+        "status": "TERMINAL_FAILURE",
+        "terminal": True,
+        "outcome_kind": "infrastructure_failure",
+        "task_id": task.task_id,
+        "arm_id": arm.arm_id,
+        "stage": stage,
+        "failure_category": category,
+        "error": error,
+        "task": task_value or {},
+        "worktree": worktree,
+        "resumability": {
+            "classification": "RETRYABLE_TERMINAL_FAILURE",
+            "skip_on_resume": False,
+        },
+    }
 
 
 def _execute_task_lane(
@@ -2005,6 +2189,7 @@ def _execute_task_lane(
 ) -> JsonObject:
     """Execute one implementation lane in the child process, without held-out access."""
     normalized = normalize_task_spec(repository_root, task.language, _task_spec(task))
+    normalized["resolved_public_tests"] = list(task.public_tests)
     store = AgentTaskStore(project)
     store.create(task.language, normalized)
     metadata = _routing_metadata(
@@ -2046,10 +2231,27 @@ def _execute_task_lane(
     )
     host_runner = LocalToolRunner(repository_root, project / "host_logs")
     gpu_before = gpu_memory_snapshot(host_runner)
-    lane = runner.run(task.task_id, query=task.objective)
+    try:
+        lane = runner.run(task.task_id, query=task.objective)
+    except Exception as exc:
+        try:
+            failed_task = store.load(task.task_id).to_json()
+        except EngineeringError:
+            failed_task = {}
+        worktrees = sorted((project / "Data" / "AgentTeam" / "worktrees").glob("*"))
+        lane = _terminal_lane_failure(
+            task=task,
+            arm=arm,
+            stage=_task_failure_stage(failed_task),
+            category=_exception_failure_category(exc),
+            error=str(exc),
+            task_value=failed_task,
+            worktree=str(worktrees[-1]) if worktrees else None,
+        )
     gpu_after = gpu_memory_snapshot(host_runner)
     return {
-        "schema_version": 1,
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "status": lane.get("status"),
         "task_id": task.task_id,
         "arm_id": arm.arm_id,
         "project": str(project),
@@ -2070,8 +2272,8 @@ def _execute_lane_request(
         {"schema_version", "task_id", "arm_id", "project", "result_path"},
         label="Lane request",
     )
-    if request.get("schema_version") != 1:
-        raise EngineeringError("Lane request schema_version must equal 1")
+    if request.get("schema_version") != RESULT_SCHEMA_VERSION:
+        raise EngineeringError(f"Lane request schema_version must equal {RESULT_SCHEMA_VERSION}")
     task_id = _string(request.get("task_id"), label="lane task_id")
     arm_id = _string(request.get("arm_id"), label="lane arm_id")
     tasks = {task.task_id: task for task in load_benchmark_manifest(configuration.manifest_path)}
@@ -2086,13 +2288,38 @@ def _execute_lane_request(
         configuration.output_root,
         Path(_string(request.get("result_path"), label="lane result path")).resolve(),
     )
-    bundle = _execute_task_lane(
-        repository_root,
-        configuration,
-        tasks[task_id],
-        arms[arm_id],
-        project,
-    )
+    try:
+        bundle = _execute_task_lane(
+            repository_root,
+            configuration,
+            tasks[task_id],
+            arms[arm_id],
+            project,
+        )
+    except Exception as exc:
+        task_value: JsonObject = {}
+        try:
+            task_value = AgentTaskStore(project).load(task_id).to_json()
+        except EngineeringError:
+            pass
+        lane = _terminal_lane_failure(
+            task=tasks[task_id],
+            arm=arms[arm_id],
+            stage=_task_failure_stage(task_value),
+            category=_exception_failure_category(exc),
+            error=str(exc),
+            task_value=task_value,
+        )
+        bundle = {
+            "schema_version": RESULT_SCHEMA_VERSION,
+            "status": "TERMINAL_FAILURE",
+            "task_id": task_id,
+            "arm_id": arm_id,
+            "project": str(project),
+            "lane": lane,
+            "gpu_before": {"status": "UNAVAILABLE"},
+            "gpu_after": {"status": "UNAVAILABLE"},
+        }
     _write_json_atomic(result_path, bundle)
     return bundle
 
@@ -2120,7 +2347,7 @@ def _run_lane_subprocess(
     _write_json_atomic(
         request_path,
         {
-            "schema_version": 1,
+            "schema_version": RESULT_SCHEMA_VERSION,
             "task_id": task.task_id,
             "arm_id": arm.arm_id,
             "project": str(project),
@@ -2142,17 +2369,71 @@ def _run_lane_subprocess(
     ]
     started_at = _now()
     started = time.monotonic()
-    with command_log.open("w", encoding="utf-8") as stream:
-        process = subprocess.Popen(  # nosec B603
-            command,
-            cwd=repository_root,
-            stdout=stream,
-            stderr=subprocess.STDOUT,
-            text=True,
-            start_new_session=True,
-        )
-        process_result = _await_lane(process, timeout_seconds=configuration.default_timeout_seconds)
-    bundle = _read_json(lane_result_path) if lane_result_path.is_file() else {}
+    lane_environment = os.environ.copy()
+    for key in tuple(lane_environment):
+        if key.startswith("LAPLACE_ABLATION_") or key == "LAPLACE_SERVER_OWNER_TOKEN":
+            lane_environment.pop(key, None)
+    process_result: JsonObject
+    try:
+        with command_log.open("w", encoding="utf-8") as stream:
+            process = subprocess.Popen(  # nosec B603
+                command,
+                cwd=repository_root,
+                stdout=stream,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=True,
+                env=lane_environment,
+            )
+            process_result = _await_lane(
+                process, timeout_seconds=configuration.default_timeout_seconds
+            )
+    except (OSError, subprocess.SubprocessError) as exc:
+        process_result = {
+            "status": "FAILED_TO_START",
+            "returncode": None,
+            "error": str(exc),
+        }
+    bundle: JsonObject = {}
+    if lane_result_path.is_file():
+        try:
+            bundle = _read_json(lane_result_path)
+        except EngineeringError as exc:
+            bundle = {
+                "schema_version": RESULT_SCHEMA_VERSION,
+                "status": "TERMINAL_FAILURE",
+                "task_id": task.task_id,
+                "arm_id": arm.arm_id,
+                "project": str(project),
+                "lane": _terminal_lane_failure(
+                    task=task,
+                    arm=arm,
+                    stage="subprocess",
+                    category="malformed_lane_result",
+                    error=str(exc),
+                ),
+            }
+    if not bundle:
+        process_status = str(process_result.get("status", "FAILED"))
+        category = "timeout" if process_status == "TIMEOUT" else "subprocess_termination"
+        bundle = {
+            "schema_version": RESULT_SCHEMA_VERSION,
+            "status": "TERMINAL_FAILURE",
+            "task_id": task.task_id,
+            "arm_id": arm.arm_id,
+            "project": str(project),
+            "lane": _terminal_lane_failure(
+                task=task,
+                arm=arm,
+                stage="subprocess",
+                category=category,
+                error=(
+                    f"Task lane ended with {process_status} and return code "
+                    f"{process_result.get('returncode')} before emitting a result: "
+                    f"{process_result.get('error', 'no child result')}"
+                ),
+            ),
+        }
     return {
         "status": process_result.get("status"),
         "returncode": process_result.get("returncode"),
@@ -2164,6 +2445,92 @@ def _run_lane_subprocess(
         "command_log": str(command_log),
         "project": str(project),
         "bundle": bundle,
+    }
+
+
+def _terminal_pair_result(
+    *,
+    configuration: ExperimentConfiguration,
+    configuration_fingerprint: JsonObject,
+    held_out_manifest_sha256: str,
+    task: AblationTask,
+    arm: AblationArm,
+    phase_id: PhaseId,
+    pair_started_at: str,
+    elapsed_seconds: float,
+    lane_process: JsonObject,
+    lane: JsonObject,
+    model_calls: JsonObject,
+    verification: JsonObject,
+    review: JsonObject,
+    expected_route: str,
+    actual_routes: list[object],
+    stage: str,
+    category: str,
+    error: str,
+) -> JsonObject:
+    raw_task = lane.get("task")
+    task_value = cast(JsonObject, raw_task) if isinstance(raw_task, dict) else {}
+    retry_indexes: list[int] = []
+    for item in cast(list[object], model_calls.get("calls", [])):
+        if not isinstance(item, dict):
+            continue
+        retry_index = item.get("retry_index")
+        if isinstance(retry_index, int):
+            retry_indexes.append(retry_index)
+    lane_process_evidence = dict(lane_process)
+    lane_process_evidence.pop("bundle", None)
+    return {
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "status": "TERMINAL_FAILURE",
+        "terminal": True,
+        "outcome_kind": "infrastructure_failure",
+        "experiment_id": EXPERIMENT_ID,
+        "task_id": task.task_id,
+        "language": task.language,
+        "category": task.category,
+        "arm_id": arm.arm_id,
+        "base_revision": _require_base_revision(configuration),
+        "execution_phase": phase_id,
+        "configuration_fingerprint": configuration_fingerprint,
+        "held_out_manifest_sha256": held_out_manifest_sha256,
+        "started_at": pair_started_at,
+        "ended_at": _now(),
+        "total_task_seconds": elapsed_seconds,
+        "configured_timeout_seconds": configuration.default_timeout_seconds,
+        "route": {"expected": expected_route, "actual": actual_routes},
+        "stage": stage,
+        "failure_category": category,
+        "error": error,
+        "retry_counts": {
+            "correction_loops": task_value.get("correction_loops", 0),
+            "model_call_retries": max(retry_indexes, default=0),
+        },
+        "model_calls": model_calls,
+        "deterministic_verification": {
+            "status": "PASS"
+            if verification.get("passed") is True
+            else "FAILED"
+            if verification
+            else "NOT_RUN",
+            "evidence": verification,
+        },
+        "held_out": {
+            "status": "NOT_RUN_INFRASTRUCTURE_FAILURE",
+            "score": None,
+            "included_in_model_quality_metrics": False,
+        },
+        "reviewer_status": {
+            "status": review.get("status", "NOT_RUN") if review else "NOT_RUN",
+            "evidence": review,
+        },
+        "resumability": {
+            "classification": "RETRYABLE_TERMINAL_FAILURE",
+            "skip_on_resume": False,
+        },
+        "lane_process": lane_process_evidence,
+        "command_log": lane_process.get("command_log"),
+        "lane_result": lane,
     }
 
 
@@ -2319,20 +2686,12 @@ def run_phase(
                 },
                 arm=arm.arm_id,
             )
-            task_value = cast(JsonObject, lane.get("task", {}))
+            raw_task_value = lane.get("task")
+            task_value = (
+                cast(JsonObject, raw_task_value) if isinstance(raw_task_value, dict) else {}
+            )
             verification = _load_artifact(task_value, "verification_report")
             review = _load_artifact(task_value, "review_report")
-            held_out: JsonObject = {"status": "NOT_RUN", "score": None}
-            implementation_worktree = lane.get("worktree")
-            if isinstance(implementation_worktree, str) and Path(implementation_worktree).is_dir():
-                held_out = _evaluate_held_out(
-                    repository_root,
-                    configuration,
-                    task,
-                    arm,
-                    Path(implementation_worktree),
-                    held_root,
-                )
             model_calls = _model_call_totals(project)
             rejection_metrics = _rejection_metrics(model_calls)
             raw_calls = model_calls.get("calls")
@@ -2353,6 +2712,68 @@ def run_phase(
                 and item.get("response_valid") is not True
                 for item in call_records
             )
+            expected_route = (
+                "rtl_worker" if arm.arm_id == "C" and metadata.worker_eligible else "main"
+            )
+            implementation_worktree = lane.get("worktree")
+            terminal_stage: str | None = None
+            terminal_category: str | None = None
+            terminal_error: str | None = None
+            lane_status = str(lane.get("status", "TERMINAL_FAILURE"))
+            if lane_status == "TERMINAL_FAILURE":
+                terminal_stage = str(lane.get("stage", "orchestration"))
+                terminal_category = str(lane.get("failure_category", "orchestration_failure"))
+                terminal_error = str(lane.get("error", "Task lane failed without an error"))
+            elif lane_status in {"MODEL_REQUIRED", "BLOCKED_GPU", "BLOCKED_REFERENCE_EMPTY"}:
+                terminal_stage = _task_failure_stage(task_value)
+                terminal_category = {
+                    "MODEL_REQUIRED": "endpoint_unavailable",
+                    "BLOCKED_GPU": "gpu_unavailable",
+                    "BLOCKED_REFERENCE_EMPTY": "retrieval_infrastructure_failure",
+                }[lane_status]
+                terminal_error = str(lane.get("error", lane_status))
+            elif not (
+                isinstance(implementation_worktree, str) and Path(implementation_worktree).is_dir()
+            ):
+                terminal_stage = "orchestration"
+                terminal_category = "missing_implementation_worktree"
+                terminal_error = "Task lane did not return an existing isolated worktree"
+            elif verification.get("status") == "MALFORMED_ARTIFACT":
+                terminal_stage = "verification"
+                terminal_category = "verification_infrastructure_failure"
+                terminal_error = str(verification.get("error", "Malformed verifier artifact"))
+            elif review.get("status") == "MALFORMED_ARTIFACT":
+                terminal_stage = "reviewer"
+                terminal_category = "reviewer_failure"
+                terminal_error = str(review.get("error", "Malformed reviewer artifact"))
+            elif not verification:
+                terminal_stage = _task_failure_stage(task_value)
+                terminal_category = (
+                    "malformed_response"
+                    if model_calls.get("invalid_responses")
+                    else "verification_infrastructure_failure"
+                )
+                terminal_error = "Task lane emitted no deterministic verification artifact"
+            elif not review:
+                terminal_stage = "reviewer"
+                terminal_category = "reviewer_failure"
+                terminal_error = "Task lane emitted no reviewer artifact"
+
+            held_out: JsonObject = {"status": "NOT_RUN", "score": None}
+            if terminal_category is None:
+                try:
+                    held_out = _evaluate_held_out(
+                        repository_root,
+                        configuration,
+                        task,
+                        arm,
+                        Path(cast(str, implementation_worktree)),
+                        held_root,
+                    )
+                except Exception as exc:
+                    terminal_stage = "evaluator"
+                    terminal_category = "evaluator_failure"
+                    terminal_error = str(exc)
             verification_history = verification.get("history")
             first_pass = verification.get("passed")
             if (
@@ -2363,64 +2784,99 @@ def run_phase(
                 first_pass = verification_history[0].get("passed")
             lane_process_evidence = dict(lane_process)
             lane_process_evidence.pop("bundle", None)
-            pair: JsonObject = {
-                "schema_version": 1,
-                "status": "COMPLETE_EVALUATED"
-                if held_out.get("status") in {"PASS", "FAILED"}
-                else "INCOMPLETE",
-                "experiment_id": EXPERIMENT_ID,
-                "task_id": task.task_id,
-                "language": task.language,
-                "category": task.category,
-                "arm_id": arm.arm_id,
-                "base_revision": _require_base_revision(configuration),
-                "execution_phase": phase_id,
-                "configuration_fingerprint": configuration_fingerprint,
-                "held_out_manifest_sha256": held_out_manifest_sha256,
-                "started_at": pair_started_at,
-                "ended_at": _now(),
-                "total_task_seconds": time.monotonic() - pair_started,
-                "configured_timeout_seconds": configuration.default_timeout_seconds,
-                "lane_process": lane_process_evidence,
-                "command_log": lane_process.get("command_log"),
-                "first_pass_deterministic_success": first_pass,
-                "final_deterministic_success": verification.get("passed"),
-                "held_out": held_out,
-                "reviewer_decision": review.get("reviewer_verdict"),
-                "false_approval": review.get("reviewer_approved") is True
-                and held_out.get("status") == "FAILED",
-                "false_rejection": review.get("reviewer_approved") is False
-                and held_out.get("status") == "PASS",
-                "repair_cycles": task_value.get("correction_loops"),
-                "meaningful_repairs": task_value.get("correction_loops"),
-                "response_rejections": rejection_metrics,
-                "worker_eligibility": assess_rtl_worker_eligibility(metadata).to_json(),
-                "expected_route": "rtl_worker"
-                if arm.arm_id == "C" and metadata.worker_eligible
-                else "main",
-                "actual_routes": actual_routes,
-                "worker_fallback": any(item.get("fallback_used") is True for item in call_records),
-                "contract_failures": contract_failures,
-                "model_calls": model_calls,
-                "gpu_memory": {
-                    "status": "OBSERVED_SNAPSHOTS"
-                    if gpu_before.get("status") == "OBSERVED"
-                    and gpu_after.get("status") == "OBSERVED"
-                    else "UNAVAILABLE",
-                    "before": gpu_before,
-                    "after": gpu_after,
-                    "observed_mib": gpu_after.get("memory_used_mib"),
-                    "note": "These are observed pre/post snapshots and are not claimed as peak VRAM.",
-                },
-                "lane_result": lane,
-            }
+            if terminal_category is not None:
+                pair = _terminal_pair_result(
+                    configuration=configuration,
+                    configuration_fingerprint=configuration_fingerprint,
+                    held_out_manifest_sha256=held_out_manifest_sha256,
+                    task=task,
+                    arm=arm,
+                    phase_id=phase_id,
+                    pair_started_at=pair_started_at,
+                    elapsed_seconds=time.monotonic() - pair_started,
+                    lane_process=lane_process,
+                    lane=lane,
+                    model_calls=model_calls,
+                    verification=verification,
+                    review=review,
+                    expected_route=expected_route,
+                    actual_routes=actual_routes,
+                    stage=terminal_stage or "orchestration",
+                    category=terminal_category,
+                    error=terminal_error or terminal_category,
+                )
+            else:
+                pair = {
+                    "schema_version": RESULT_SCHEMA_VERSION,
+                    "status": "COMPLETE_EVALUATED",
+                    "terminal": True,
+                    "outcome_kind": "candidate_result",
+                    "experiment_id": EXPERIMENT_ID,
+                    "task_id": task.task_id,
+                    "language": task.language,
+                    "category": task.category,
+                    "arm_id": arm.arm_id,
+                    "base_revision": _require_base_revision(configuration),
+                    "execution_phase": phase_id,
+                    "configuration_fingerprint": configuration_fingerprint,
+                    "held_out_manifest_sha256": held_out_manifest_sha256,
+                    "started_at": pair_started_at,
+                    "ended_at": _now(),
+                    "total_task_seconds": time.monotonic() - pair_started,
+                    "configured_timeout_seconds": configuration.default_timeout_seconds,
+                    "lane_process": lane_process_evidence,
+                    "command_log": lane_process.get("command_log"),
+                    "first_pass_deterministic_success": first_pass,
+                    "final_deterministic_success": verification.get("passed"),
+                    "held_out": {
+                        **held_out,
+                        "included_in_model_quality_metrics": True,
+                    },
+                    "reviewer_decision": review.get("reviewer_verdict"),
+                    "false_approval": review.get("reviewer_approved") is True
+                    and held_out.get("status") == "FAILED",
+                    "false_rejection": review.get("reviewer_approved") is False
+                    and held_out.get("status") == "PASS",
+                    "repair_cycles": task_value.get("correction_loops"),
+                    "meaningful_repairs": task_value.get("correction_loops"),
+                    "response_rejections": rejection_metrics,
+                    "worker_eligibility": assess_rtl_worker_eligibility(metadata).to_json(),
+                    "expected_route": expected_route,
+                    "actual_routes": actual_routes,
+                    "worker_fallback": any(
+                        item.get("fallback_used") is True for item in call_records
+                    ),
+                    "contract_failures": contract_failures,
+                    "model_calls": model_calls,
+                    "gpu_memory": {
+                        "status": "OBSERVED_SNAPSHOTS"
+                        if gpu_before.get("status") == "OBSERVED"
+                        and gpu_after.get("status") == "OBSERVED"
+                        else "UNAVAILABLE",
+                        "before": gpu_before,
+                        "after": gpu_after,
+                        "observed_mib": gpu_after.get("memory_used_mib"),
+                        "note": "These are observed pre/post snapshots and are not claimed as peak VRAM.",
+                    },
+                    "lane_result": lane,
+                    "resumability": {
+                        "classification": "COMPATIBLE_COMPLETE_RESULT",
+                        "skip_on_resume": True,
+                    },
+                }
+            _validate_terminal_pair_result(pair)
             _write_json_atomic(result_path, pair)
             if pair["status"] == "COMPLETE_EVALUATED":
                 completed += 1
             else:
                 incomplete += 1
     phase_state = phase_status(configuration, phase_id)
-    final_status = "COMPLETE" if phase_state.get("remaining_pairs") == 0 else "INCOMPLETE"
+    final_status = (
+        "COMPLETE"
+        if phase_state.get("remaining_pairs") == 0
+        and phase_state.get("terminal_failure_pairs") == 0
+        else "INCOMPLETE"
+    )
     phase_manifest = _write_phase_manifest(
         configuration,
         phase_id,
@@ -2528,7 +2984,7 @@ def merge_phase_results(configuration: ExperimentConfiguration) -> JsonObject:
     tasks = load_benchmark_manifest(configuration.manifest_path)
     expected = {(task.task_id, arm) for task in tasks for arm in ("A", "B", "C")}
     observed: set[tuple[str, str]] = set()
-    result_paths = sorted((configuration.output_root / "pairs").glob("*/*.json"))
+    result_paths = sorted((_result_set_root(configuration) / "pairs").glob("*/*.json"))
     if len(result_paths) != len(expected):
         raise EngineeringError(
             f"Cannot merge: expected exactly {len(expected)} pair result files, "
@@ -2541,7 +2997,12 @@ def merge_phase_results(configuration: ExperimentConfiguration) -> JsonObject:
             raise EngineeringError(f"Cannot merge: unexpected task-arm pair {key} in {path}")
         if key in observed:
             raise EngineeringError(f"Cannot merge: duplicate task-arm pair {key}")
-        if row.get("status") != "COMPLETE_EVALUATED":
+        if (
+            row.get("schema_version") != RESULT_SCHEMA_VERSION
+            or row.get("status") != "COMPLETE_EVALUATED"
+            or row.get("terminal") is not True
+            or row.get("outcome_kind") != "candidate_result"
+        ):
             raise EngineeringError(f"Cannot merge: pair {key} is not COMPLETE_EVALUATED")
         if row.get("base_revision") != configuration.base_revision:
             raise EngineeringError(f"Pair {key} has an incompatible base revision")
@@ -2569,15 +3030,19 @@ def merge_phase_results(configuration: ExperimentConfiguration) -> JsonObject:
 
 def package_results(configuration: ExperimentConfiguration) -> JsonObject:
     rows: list[JsonObject] = []
-    for path in sorted((configuration.output_root / "pairs").glob("*/*.json")):
+    for path in sorted((_result_set_root(configuration) / "pairs").glob("*/*.json")):
         rows.append(_read_json(path))
-    by_pair = {(str(row.get("task_id")), str(row.get("arm_id"))): row for row in rows}
+    infrastructure_failures = [
+        row for row in rows if row.get("outcome_kind") == "infrastructure_failure"
+    ]
+    quality_rows = [row for row in rows if row.get("outcome_kind") == "candidate_result"]
+    by_pair = {(str(row.get("task_id")), str(row.get("arm_id"))): row for row in quality_rows}
     aggregates: list[JsonObject] = []
     for arm in ("A", "B", "C"):
         for language in ("all", "python", "c", "verilog", "systemverilog"):
             selected = [
                 row
-                for row in rows
+                for row in quality_rows
                 if row.get("arm_id") == arm
                 and (language == "all" or row.get("language") == language)
             ]
@@ -2655,25 +3120,27 @@ def package_results(configuration: ExperimentConfiguration) -> JsonObject:
         scoped_groups = {
             "worker_eligible_rtl": [
                 row
-                for row in rows
+                for row in quality_rows
                 if row.get("arm_id") == arm
                 and isinstance(row.get("worker_eligibility"), dict)
                 and cast(dict[str, object], row["worker_eligibility"]).get("eligible") is True
             ],
             "rtl_integration": [
                 row
-                for row in rows
+                for row in quality_rows
                 if row.get("arm_id") == arm
                 and row.get("language") in {"verilog", "systemverilog"}
                 and row.get("category") == "integration"
             ],
             "implementation": [
                 row
-                for row in rows
+                for row in quality_rows
                 if row.get("arm_id") == arm and row.get("category") == "implementation"
             ],
             "repair": [
-                row for row in rows if row.get("arm_id") == arm and row.get("category") == "repair"
+                row
+                for row in quality_rows
+                if row.get("arm_id") == arm and row.get("category") == "repair"
             ],
         }
         for scope, selected in scoped_groups.items():
@@ -2699,7 +3166,7 @@ def package_results(configuration: ExperimentConfiguration) -> JsonObject:
                 }
             )
     contrasts: list[JsonObject] = []
-    task_ids = sorted({str(row.get("task_id")) for row in rows})
+    task_ids = sorted({str(row.get("task_id")) for row in quality_rows})
     scopes = (
         "all",
         "python",
@@ -2771,10 +3238,12 @@ def package_results(configuration: ExperimentConfiguration) -> JsonObject:
         if (path := _phase_manifest_path(configuration, phase_id)).is_file()
     ]
     payload: JsonObject = {
-        "schema_version": 1,
+        "schema_version": RESULT_SCHEMA_VERSION,
         "experiment_id": EXPERIMENT_ID,
         "generated_at": _now(),
         "task_arm_results": rows,
+        "infrastructure_failures": infrastructure_failures,
+        "model_quality_task_arm_results": len(quality_rows),
         "aggregates": aggregates,
         "contrasts": contrasts,
         "serialized_phases": phase_records,
@@ -2798,7 +3267,7 @@ def package_results(configuration: ExperimentConfiguration) -> JsonObject:
         "statistical_generality_claim": False,
         "warning": "This controlled 32-task benchmark supports paired diagnostic comparisons only; it does not establish statistical generality.",
     }
-    report_root = configuration.output_root / "reports"
+    report_root = _result_set_root(configuration) / "reports"
     json_path = report_root / "results.json"
     csv_path = report_root / "results.csv"
     markdown_path = report_root / "summary.md"

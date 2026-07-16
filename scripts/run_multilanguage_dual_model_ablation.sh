@@ -145,13 +145,20 @@ run_managed_phase() {
   fi
   validate_phase_offline "${PHASE}" || return "$?"
   manage_server "start-${PHASE}"
-  wait_for_managed_endpoint "${PHASE}"
   RESULT="$?"
+  if [ "${RESULT}" -eq 0 ]; then
+    wait_for_managed_endpoint "${PHASE}"
+    RESULT="$?"
+  fi
   if [ "${RESULT}" -eq 0 ]; then
     run_phase_after_runtime_validation "${PHASE}"
     RESULT="$?"
   fi
   manage_server "stop-${PHASE}"
+  STOP_RESULT="$?"
+  if [ "${RESULT}" -eq 0 ]; then
+    RESULT="${STOP_RESULT}"
+  fi
   if [ "${RESULT}" -eq 0 ]; then
     cleanup_owner_token
   fi
@@ -164,13 +171,20 @@ run_all_managed() {
   if ! phase_complete phase1; then
     validate_phase_offline phase1 || return "$?"
     manage_server start-phase1
-    wait_for_managed_endpoint phase1
     RESULT="$?"
+    if [ "${RESULT}" -eq 0 ]; then
+      wait_for_managed_endpoint phase1
+      RESULT="$?"
+    fi
     if [ "${RESULT}" -eq 0 ]; then
       run_phase_after_runtime_validation phase1
       RESULT="$?"
     fi
     manage_server stop-phase1
+    STOP_RESULT="$?"
+    if [ "${RESULT}" -eq 0 ]; then
+      RESULT="${STOP_RESULT}"
+    fi
     if [ "${RESULT}" -ne 0 ]; then
       log_lifecycle "phase1_failed next_phase_blocked=true"
       return "${RESULT}"
@@ -184,8 +198,11 @@ run_all_managed() {
   if ! phase_complete phase2; then
     validate_phase_offline phase2 || return "$?"
     manage_server start-phase2
-    wait_for_managed_endpoint phase2
     RESULT="$?"
+    if [ "${RESULT}" -eq 0 ]; then
+      wait_for_managed_endpoint phase2
+      RESULT="$?"
+    fi
     if [ "${RESULT}" -eq 0 ]; then
       run_phase_after_runtime_validation phase2
       RESULT="$?"
@@ -209,13 +226,20 @@ run_all_managed() {
     fi
     # start-phase3 reuses a matching owned Qwen3.6 process and starts CodeV.
     manage_server start-phase3
-    wait_for_managed_endpoint phase3
     RESULT="$?"
+    if [ "${RESULT}" -eq 0 ]; then
+      wait_for_managed_endpoint phase3
+      RESULT="$?"
+    fi
     if [ "${RESULT}" -eq 0 ]; then
       run_phase_after_runtime_validation phase3
       RESULT="$?"
     fi
     manage_server stop-phase3
+    STOP_RESULT="$?"
+    if [ "${RESULT}" -eq 0 ]; then
+      RESULT="${STOP_RESULT}"
+    fi
     if [ "${RESULT}" -ne 0 ]; then
       log_lifecycle "phase3_failed merge_blocked=true"
       return "${RESULT}"
@@ -266,6 +290,7 @@ if [ "${ACTION}" != "status" ] && [ "${ACTION}" != "merge" ] \
   STARTUP_OK=0
 fi
 
+FINAL_STATUS=2
 if [ "${STARTUP_OK}" -eq 1 ]; then
   cd "${ROOT}" || STARTUP_OK=0
 fi
@@ -276,30 +301,41 @@ if [ "${STARTUP_OK}" -eq 1 ]; then
   if [ "${ACTION}" == "status" ]; then
     run_control "${PYTHON}" -m research_workspace.multilanguage_ablation \
       phase-status --config "${CONFIG}"
+    FINAL_STATUS="$?"
   elif [ "${ACTION}" == "merge" ]; then
     run_control "${PYTHON}" -m research_workspace.multilanguage_ablation \
       merge-report --config "${CONFIG}"
+    FINAL_STATUS="$?"
   elif [ "${ACTION}" == "all" ]; then
     SELECTED_MODE="${MODE:-managed}"
     if [ "${SELECTED_MODE}" == "managed" ]; then
       run_all_managed
+      FINAL_STATUS="$?"
     elif [ "${SELECTED_MODE}" == "external" ]; then
       run_all_external
+      FINAL_STATUS="$?"
     else
       echo "Mode must be external or managed."
+      FINAL_STATUS=2
     fi
   else
     SELECTED_MODE="${MODE:-external}"
     if [ "${SELECTED_MODE}" == "managed" ]; then
       run_managed_phase "${ACTION}"
+      FINAL_STATUS="$?"
     elif [ "${SELECTED_MODE}" == "external" ]; then
       run_external_phase "${ACTION}"
+      FINAL_STATUS="$?"
     else
       echo "Mode must be external or managed."
+      FINAL_STATUS=2
     fi
   fi
 fi
 
 echo "Launcher log: ${LOG_PATH}"
 echo "The shell remains available; inspect status before retrying an interrupted phase."
-true
+finish_with_status() {
+  return "$1"
+}
+finish_with_status "${FINAL_STATUS}"

@@ -15,7 +15,7 @@
         "python": {"const": "3.11"},
         "llmcompressor": {"const": "0.12.0"},
         "llmcompressor_revision": {"pattern": "^[0-9a-f]{40}$"},
-        "transformers": {"const": "5.13.1"},
+        "transformers": {"const": "5.10.1"},
         "datasets": {"const": "5.0.0"},
         "huggingface_hub": {"const": "1.23.0"},
         "vllm": {"const": "0.25.0"}

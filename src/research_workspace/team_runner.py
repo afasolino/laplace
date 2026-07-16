@@ -281,9 +281,18 @@ class LocalTeamRunner:
         role: ModelRole,
         prompt: str,
         validator: Callable[[str], object] | None = None,
+        compact_prompt: Callable[[], str] | None = None,
+        retry_index: int = 0,
     ) -> JsonObject:
         """Record a real local-model role contribution without granting it tool authority."""
-        call = caller.generate(prompt, role=role, metadata=task_metadata, validator=validator)
+        call = caller.generate(
+            prompt,
+            role=role,
+            metadata=task_metadata,
+            validator=validator,
+            compact_prompt=compact_prompt,
+            retry_index=retry_index,
+        )
         result = call.result
         return {
             "model": result.model,
@@ -297,6 +306,7 @@ class LocalTeamRunner:
             "validation_error": call.validation_error,
             "routing": call.decision.to_json(),
             "audit_path": call.audit_path,
+            "generation_budget": call.budget,
         }
 
     @staticmethod
@@ -315,8 +325,8 @@ class LocalTeamRunner:
                 "ruff_format",
                 "ruff",
                 "strict_mypy",
-                "project_pytest",
-                "coverage_pytest",
+                "task_public_pytest",
+                "task_public_coverage_pytest",
                 "bandit",
             ]
         elif task.domain == "c":
@@ -416,14 +426,111 @@ class LocalTeamRunner:
         return filtered
 
     @staticmethod
-    def _public_python_tests(worktree: Worktree, allowed_paths: list[str]) -> list[str]:
+    def _public_python_tests(task: AgentTask, worktree: Worktree) -> list[str]:
+        raw = task.specification.get("resolved_public_tests")
+        if not isinstance(raw, list) or not raw or not all(isinstance(item, str) for item in raw):
+            raise EngineeringError("Python task has no explicit resolved public-test paths")
         tests: list[str] = []
-        for path in allowed_paths:
-            candidate = Path(path).parent / "test_public.py"
-            absolute = _inside(worktree.root, worktree.root / candidate)
-            if absolute.is_file():
-                tests.append(candidate.as_posix())
+        for item in raw:
+            relative = _safe_relative(item, label="public Python test").as_posix()
+            absolute = _inside(worktree.root, worktree.root / relative)
+            if not absolute.is_file() or absolute.suffix != ".py":
+                raise EngineeringError(f"Declared public Python test is missing: {relative}")
+            tests.append(relative)
         return sorted(set(tests))
+
+    @staticmethod
+    def _compact_evidence_for_prompt(evidence: JsonObject) -> JsonObject:
+        """Remove verbose retrieved bodies while retaining rank, hash and provenance."""
+        compacted: JsonObject = {
+            "compaction_notice": (
+                "Retrieved bodies were omitted for context capacity. Selection order, scores, "
+                "immutable identifiers, hashes and provenance remain authoritative."
+            )
+        }
+        for key, value in evidence.items():
+            if key == "researcher_model_contribution" and isinstance(value, dict):
+                compacted[key] = {
+                    field: value.get(field)
+                    for field in ("status", "model", "audit_path", "response_valid")
+                }
+                continue
+            if isinstance(value, list):
+                records: list[object] = []
+                for raw in value:
+                    if not isinstance(raw, dict):
+                        records.append(raw)
+                        continue
+                    record = {
+                        field: raw.get(field)
+                        for field in (
+                            "source",
+                            "path",
+                            "file",
+                            "page",
+                            "section",
+                            "chunk_id",
+                            "reference_id",
+                            "rank",
+                            "score",
+                            "sha256",
+                            "revision",
+                            "licence",
+                            "provenance",
+                        )
+                        if field in raw
+                    }
+                    body = raw.get("text", raw.get("content"))
+                    if isinstance(body, str):
+                        record["omitted_body_sha256"] = hashlib.sha256(
+                            body.encode("utf-8")
+                        ).hexdigest()
+                        record["omitted_body_characters"] = len(body)
+                    records.append(
+                        record
+                        or {
+                            "record_sha256": hashlib.sha256(
+                                json.dumps(raw, sort_keys=True, default=str).encode("utf-8")
+                            ).hexdigest()
+                        }
+                    )
+                compacted[key] = records
+            else:
+                compacted[key] = value
+        return compacted
+
+    @staticmethod
+    def _compact_verification_for_review(verification: JsonObject) -> JsonObject:
+        """Keep every outcome and all failing diagnostics; omit verbose passing output."""
+
+        def compact(value: object) -> object:
+            if isinstance(value, list):
+                return [compact(item) for item in value]
+            if not isinstance(value, dict):
+                return value
+            failed = value.get("status") not in {None, "PASS"} or value.get("passed") is False
+            kept: JsonObject = {}
+            for key, item in value.items():
+                if key in {"stdout", "stderr"} and not failed:
+                    if isinstance(item, str) and item:
+                        kept[f"omitted_passing_{key}_sha256"] = hashlib.sha256(
+                            item.encode("utf-8")
+                        ).hexdigest()
+                        kept[f"omitted_passing_{key}_characters"] = len(item)
+                    continue
+                if key == "history":
+                    continue
+                kept[key] = compact(item)
+            return kept
+
+        result = compact(verification)
+        if not isinstance(result, dict):
+            raise EngineeringError("Verifier evidence is not an object")
+        result["compaction_notice"] = (
+            "All commands, statuses, return codes, log paths and failing diagnostics are present. "
+            "Only verbose stdout/stderr from passing commands was replaced by hashes and lengths."
+        )
+        return result
 
     def _run_python_adversarial_checks(
         self, runner: LocalToolRunner, task: AgentTask, worktree: Worktree
@@ -792,6 +899,7 @@ end endmodule
                 "reason": "One-agent ablation omits researcher generation.",
             }
             if self.options.role_mode == "five_role":
+                compact_evidence = self._compact_evidence_for_prompt(evidence)
                 researcher_summary = self._role_generation(
                     caller,
                     task_metadata,
@@ -801,6 +909,13 @@ end endmodule
                     "relevant to interface invariants, error cases, lifecycle/transactions, or RTL "
                     "microarchitecture and protocol behavior. Do not edit code.\n"
                     f"Evidence: {evidence}",
+                    compact_prompt=lambda: (
+                        "You are the Laplace researcher. Summarize the following precedence-ordered "
+                        "evidence index. Project-local conventions outrank references. Retrieved bodies "
+                        "were omitted only for context capacity; use the preserved ranks and provenance. "
+                        "Do not edit code.\n"
+                        f"Compacted evidence: {compact_evidence}"
+                    ),
                 )
             evidence["researcher_model_contribution"] = researcher_summary
             self.store.write_artifact(
@@ -1079,6 +1194,12 @@ end endmodule
                 validator=self._replacement_validator(
                     worktree=worktree, allowed_paths=allowed, domain=task.domain
                 ),
+                compact_prompt=lambda: self._prompt(
+                    task,
+                    self._compact_evidence_for_prompt(evidence),
+                    defect_report=latest_defect,
+                    current_sources=current_sources,
+                ),
             )
 
         contract, contract_error = self._worker_contract(
@@ -1128,6 +1249,12 @@ end endmodule
             fallback_reason=worker_error or "worker contract unavailable",
             validator=self._replacement_validator(
                 worktree=worktree, allowed_paths=allowed, domain=task.domain
+            ),
+            compact_prompt=lambda: self._prompt(
+                task,
+                self._compact_evidence_for_prompt(evidence),
+                defect_report=latest_defect,
+                current_sources=current_sources,
             ),
         )
 
@@ -1338,7 +1465,7 @@ end endmodule
                     [sys.executable, "-m", "ruff", "format", *allowed],
                     timeout_seconds=120,
                 ).to_json()
-                required_tests = self._public_python_tests(worktree, allowed)
+                required_tests = self._public_python_tests(task, worktree)
                 verification = runner.run_python_quality_gates(
                     allowed, required_test_paths=required_tests
                 )
@@ -1412,12 +1539,18 @@ end endmodule
             if self.options.role_mode == "five_role":
                 reviewer_errors: list[str] = []
                 for reviewer_retry in range(2):
+                    compact_evidence = self._compact_evidence_for_prompt(evidence_raw)
+                    compact_verification = self._compact_verification_for_review(verification)
                     reviewer_contribution = self._role_generation(
                         caller,
                         task_metadata,
                         "review",
                         self._review_prompt(task, evidence_raw, verification),
                         validator=lambda text: parse_reviewer_verdict(text),
+                        compact_prompt=lambda: self._review_prompt(
+                            task, compact_evidence, compact_verification
+                        ),
+                        retry_index=reviewer_retry,
                     )
                     try:
                         parsed_verdict = parse_reviewer_verdict(
