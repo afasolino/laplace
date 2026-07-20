@@ -8,6 +8,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
 STATE_DIR="${ROOT}/outputs/a6000_agent_team/model_servers"
 PYTHON="${ROOT}/.venv/bin/python"
 OWNER_TOKEN="${LAPLACE_SERVER_OWNER_TOKEN:-}"
+VLLM_OVERRIDE="${LAPLACE_VLLM_EXECUTABLE:-}"
+FFMPEG_LIBRARY_PATH="${LAPLACE_FFMPEG_LIBRARY_PATH:-${ROOT}/.runtime/ffmpeg7/lib}"
+
+if [ -d "${FFMPEG_LIBRARY_PATH}" ]; then
+  export LD_LIBRARY_PATH="${FFMPEG_LIBRARY_PATH}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
 
 mkdir -p "${STATE_DIR}" 2>/dev/null
 
@@ -24,6 +30,20 @@ profile_values() {
     return 2
   fi
   VLLM="${PROFILE_DATA[0]}"
+  if [ -n "${VLLM_OVERRIDE}" ]; then
+    case "${VLLM_OVERRIDE}" in
+      /*) VLLM="${VLLM_OVERRIDE}" ;;
+      *)
+        echo "LAPLACE_VLLM_EXECUTABLE must be an absolute path: ${VLLM_OVERRIDE}"
+        return 2
+        ;;
+    esac
+  fi
+  VLLM_BIN_DIR="$(dirname "${VLLM}")"
+  case ":${PATH}:" in
+    *":${VLLM_BIN_DIR}:"*) ;;
+    *) export PATH="${VLLM_BIN_DIR}:${PATH}" ;;
+  esac
   MODEL_PATH="${PROFILE_DATA[1]}"
   SERVED_MODEL="${PROFILE_DATA[2]}"
   PORT="${PROFILE_DATA[3]}"
@@ -146,6 +166,16 @@ status_profile() {
   return 0
 }
 
+require_profile_running() {
+  PROFILE="$1"
+  if pid_is_owned "${PROFILE}"; then
+    echo "${PROFILE}: RUNNING pid=${PID} port=${PORT} model=${SERVED_MODEL}"
+    return 0
+  fi
+  echo "${PROFILE}: NOT_RUNNING"
+  return 2
+}
+
 command_profile() {
   PROFILE="$1"
   profile_values "${PROFILE}" || return 2
@@ -182,6 +212,16 @@ case "${ACTION}" in
   command-phase2-worker) command_profile phase2_rtl_worker; ACTION_STATUS="$?" ;;
   command-phase3-main) command_profile phase2_main; ACTION_STATUS="$?" ;;
   command-phase3-worker) command_profile phase2_rtl_worker; ACTION_STATUS="$?" ;;
+  check-phase1) require_profile_running phase1_main; ACTION_STATUS="$?" ;;
+  check-phase2) require_profile_running phase2_main; ACTION_STATUS="$?" ;;
+  check-phase3)
+    require_profile_running phase2_main
+    ACTION_STATUS="$?"
+    if [ "${ACTION_STATUS}" -eq 0 ]; then
+      require_profile_running phase2_rtl_worker
+      ACTION_STATUS="$?"
+    fi
+    ;;
   stop-phase1) stop_profile phase1_main; ACTION_STATUS="$?" ;;
   stop-phase2-main) stop_profile phase2_main; ACTION_STATUS="$?" ;;
   stop-phase2) stop_profile phase2_main; ACTION_STATUS="$?" ;;
@@ -225,7 +265,7 @@ case "${ACTION}" in
     ACTION_STATUS="$?"
     ;;
   *)
-    echo "Usage: $0 {start-phase1|start-phase2|start-phase3|start-phase3-worker|command-phase1|command-phase2-main|command-phase3-main|command-phase3-worker|stop-phase1|stop-phase2|stop-phase3|status|health-phase1|health-phase2|health-phase3|gpu}"
+    echo "Usage: $0 {start-phase1|start-phase2|start-phase3|start-phase3-worker|command-phase1|command-phase2-main|command-phase3-main|command-phase3-worker|check-phase1|check-phase2|check-phase3|stop-phase1|stop-phase2|stop-phase3|status|health-phase1|health-phase2|health-phase3|gpu}"
     ;;
 esac
 

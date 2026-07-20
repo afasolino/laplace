@@ -64,6 +64,13 @@ wait_for_managed_endpoint() {
   PHASE="$1"
   WAIT_STARTED="$(date +%s)"
   while true; do
+    LAPLACE_SERVER_OWNER_TOKEN="${OWNER_TOKEN}" "${SERVER_MANAGER}" "check-${PHASE}"
+    SERVER_RESULT="$?"
+    if [ "${SERVER_RESULT}" -ne 0 ]; then
+      echo "${PHASE} server stopped before its endpoint became ready."
+      log_lifecycle "phase=${PHASE} server_running=false"
+      return 2
+    fi
     echo "CONTROL_COMMAND=$(printf '%q ' "${PYTHON}" -m research_workspace.multilanguage_ablation validate-runtime --phase "${PHASE}" --config "${CONFIG}")"
     "${PYTHON}" -m research_workspace.multilanguage_ablation \
       validate-runtime --phase "${PHASE}" --config "${CONFIG}"

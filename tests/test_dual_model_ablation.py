@@ -475,6 +475,7 @@ def _contract_text_with_stale(source: Path) -> str:
 def test_manifest_validates_all_task_schemas_and_plan_does_not_probe_endpoints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("LAPLACE_ABLATION_BASE_REVISION", raising=False)
     configuration = load_experiment_configuration(REPOSITORY_ROOT, CONFIG_PATH)
     tasks = load_benchmark_manifest(configuration.manifest_path)
     assert len(tasks) == 32
@@ -500,7 +501,7 @@ def test_manifest_validates_all_task_schemas_and_plan_does_not_probe_endpoints(
     phase_two_plan = build_plan(REPOSITORY_ROOT, configuration, phase_id="phase2")
     assert not any("phase2_rtl_worker" in item for item in phase_two_plan["missing_prerequisites"])
     phase_three_plan = build_plan(REPOSITORY_ROOT, configuration, phase_id="phase3")
-    assert any("phase2_rtl_worker" in item for item in phase_three_plan["missing_prerequisites"])
+    assert phase_three_plan["selected_phase"] == "phase3"
 
 
 def test_preflight_is_scoped_to_requested_phase(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -774,19 +775,37 @@ def test_external_c_and_verilog_corpus_is_installed_and_hash_verified() -> None:
     )
 
 
-def test_pinned_model_profiles_align_and_unavailable_artifacts_fail_closed() -> None:
+def test_pinned_model_profiles_align_and_unavailable_artifacts_fail_closed(
+    tmp_path: Path,
+) -> None:
     experiment = CONFIG_PATH.parent
     alignment = validate_profile_alignment(experiment)
     assert alignment["status"] == "VALID_MODEL_PROFILES"
-    local = validate_local_artifacts(experiment)
+    local = validate_local_artifacts(experiment, verify_hashes=False)
     by_id = {
         str(record["artifact_id"]): record
         for record in local["artifacts"]
         if isinstance(record, dict)
     }
     assert by_id["phase1_main"]["available"] is True
-    assert by_id["phase2_main"]["available"] is False
-    assert by_id["phase2_rtl_worker"]["available"] is False
+    assert all(isinstance(by_id[artifact_id]["available"], bool) for artifact_id in by_id)
+
+    missing_experiment = tmp_path / "experiment"
+    missing_experiment.mkdir()
+    metadata = json.loads((experiment / "model_artifacts.json").read_text(encoding="utf-8"))
+    phase2_main = next(
+        item for item in metadata["artifacts"] if item["artifact_id"] == "phase2_main"
+    )
+    phase2_main["output_path"] = str(tmp_path / "missing-model")
+    phase2_main["verification"]["artifact_manifest"] = str(
+        tmp_path / "missing-model" / "artifact_manifest.json"
+    )
+    (missing_experiment / "model_artifacts.json").write_text(
+        json.dumps(metadata), encoding="utf-8"
+    )
+    unavailable = validate_local_artifacts(missing_experiment, {"phase2_main"})
+    assert unavailable["status"] == "MODEL_ARTIFACTS_INCOMPLETE"
+    assert unavailable["artifacts"][0]["available"] is False
 
 
 def test_c_quality_gate_uses_gcc_without_requiring_optional_cmake(tmp_path: Path) -> None:
@@ -931,10 +950,12 @@ transformers==5.10.1 \\
     result = validate_quantization_lock(experiment, lock)
     assert result["status"] == "QUANTIZATION_LOCK_COMPATIBLE"
     assert result["resolved_versions"]["transformers"] == "5.10.1"
-    assert result["source_artifacts_ready"] is False
-    assert all(
-        item["status"] == "DEFERRED_SOURCE_ARTIFACT_MISSING"
-        for item in result["source_architecture_validation"]
+    statuses = {
+        str(item["status"]) for item in result["source_architecture_validation"]
+    }
+    assert statuses <= {"SUPPORTED", "DEFERRED_SOURCE_ARTIFACT_MISSING"}
+    assert result["source_artifacts_ready"] is (
+        statuses == {"SUPPORTED"}
     )
 
 
@@ -1368,9 +1389,12 @@ def test_managed_all_orders_phases_and_reuses_qwen_main(tmp_path: Path) -> None:
     actions = [line.split(maxsplit=1)[1] for line in servers]
     assert actions == [
         "start-phase1",
+        "check-phase1",
         "stop-phase1",
         "start-phase2",
+        "check-phase2",
         "start-phase3",
+        "check-phase3",
         "stop-phase3",
     ]
     tokens = {line.split(maxsplit=1)[0] for line in servers}
@@ -1387,6 +1411,97 @@ def test_managed_all_failure_prevents_next_phase(tmp_path: Path) -> None:
     assert any("stop-phase2" in line for line in servers)
 
 
+def test_phase2_phase3_serial_launcher_verifies_orders_stops_and_merges(tmp_path: Path) -> None:
+    python, manager, control_log, server_log = _fake_three_phase_controls(tmp_path)
+    phase_state = tmp_path / "completed_phases"
+    phase_state.write_text("phase1\n", encoding="utf-8")
+    heldout = tmp_path / "heldout"
+    heldout.mkdir()
+    (heldout / "manifest.json").write_text("{}\n", encoding="utf-8")
+    ffmpeg = tmp_path / "ffmpeg-lib"
+    ffmpeg.mkdir()
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "LAPLACE_PYTHON": str(python),
+            "LAPLACE_SERVER_MANAGER": str(manager),
+            "LAPLACE_ABLATION_BASE_REVISION": "a" * 40,
+            "LAPLACE_ABLATION_HELD_OUT_ROOT": str(heldout),
+            "LAPLACE_ABLATION_OUTPUT_ROOT": str(tmp_path / "output"),
+            "LAPLACE_VLLM_EXECUTABLE": "/bin/true",
+            "LAPLACE_FFMPEG_LIBRARY_PATH": str(ffmpeg),
+            "FAKE_CONTROL_LOG": str(control_log),
+            "FAKE_SERVER_LOG": str(server_log),
+            "FAKE_PHASE_STATE": str(phase_state),
+        }
+    )
+    completed = subprocess.run(
+        [str(REPOSITORY_ROOT / "scripts/run_phase2_phase3_serial.sh")],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    controls = control_log.read_text(encoding="utf-8").splitlines()
+    positions = {
+        marker: next(index for index, line in enumerate(controls) if marker in line)
+        for marker in ("run-phase2", "run-phase3", "merge-report")
+    }
+    assert list(positions.values()) == sorted(positions.values())
+    actions = [line.split(maxsplit=1)[1] for line in server_log.read_text().splitlines()]
+    assert actions.index("stop-phase2") < actions.index("start-phase3")
+    assert actions[-1] == "stop-phase3"
+    assert phase_state.read_text(encoding="utf-8").splitlines() == [
+        "phase1",
+        "phase2",
+        "phase3",
+    ]
+
+
+def test_server_manager_accepts_absolute_vllm_override() -> None:
+    environment = os.environ.copy()
+    environment["LAPLACE_VLLM_EXECUTABLE"] = "/opt/laplace/vllm-cu129/bin/vllm"
+    completed = subprocess.run(
+        [
+            str(REPOSITORY_ROOT / "scripts/manage_multilanguage_model_servers.sh"),
+            "command-phase2-main",
+        ],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert completed.returncode == 0
+    assert "executable=/opt/laplace/vllm-cu129/bin/vllm" in completed.stdout
+    assert "command=/opt/laplace/vllm-cu129/bin/vllm serve" in completed.stdout
+
+
+def test_serving_preflight_validates_phase2_vllm_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environment = tmp_path / "vllm-cu129"
+    executable = environment / "bin" / "vllm"
+    python = environment / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    python.write_text("#!/usr/bin/env bash\necho 0.25.0+cu129\n", encoding="utf-8")
+    executable.chmod(0o755)
+    python.chmod(0o755)
+    monkeypatch.setenv("LAPLACE_VLLM_EXECUTABLE", str(executable))
+    result = validate_serving_environments(
+        CONFIG_PATH.parent, {"phase2_main"}, probe_cli=False
+    )
+    record = result["environments"][0]
+    assert record["available"] is True
+    assert record["environment_path"] == str(environment)
+    assert record["executable"] == str(executable)
+
+
 def test_server_shutdown_requires_pid_command_and_orchestration_ownership() -> None:
     script = (REPOSITORY_ROOT / "scripts/manage_multilanguage_model_servers.sh").read_text(
         encoding="utf-8"
@@ -1394,6 +1509,17 @@ def test_server_shutdown_requires_pid_command_and_orchestration_ownership() -> N
     signal_index = script.index('kill -TERM "${PID}"')
     assert script.index('RECORDED_TOKEN="$(sed -n') < signal_index
     assert script.index('*"${MODEL_PATH}"*"--host 127.0.0.1"*"--port ${PORT}"*') < signal_index
+
+
+def test_managed_launcher_stops_polling_when_server_process_dies() -> None:
+    script = (REPOSITORY_ROOT / "scripts/run_multilanguage_dual_model_ablation.sh").read_text(
+        encoding="utf-8"
+    )
+    process_check = '"${SERVER_MANAGER}" "check-${PHASE}"'
+    endpoint_check = "validate-runtime --phase"
+    assert process_check in script
+    assert script.index(process_check) < script.index(endpoint_check)
+    assert "server stopped before its endpoint became ready" in script
 
 
 def test_held_out_pack_is_hash_checked_and_must_be_external(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess  # nosec B404
 from datetime import UTC, datetime
@@ -358,9 +359,38 @@ def validate_serving_environments(
         serving = cast(JsonObject, record["serving"])
         environment = Path(str(serving["environment_path"])).expanduser().resolve()
         executable = Path(str(serving["executable"])).expanduser().resolve()
+        override = os.getenv("LAPLACE_VLLM_EXECUTABLE")
+        override_error: str | None = None
+        if override and artifact_id != "phase1_main":
+            override_path = Path(override).expanduser()
+            if not override_path.is_absolute():
+                override_error = "vllm_override_not_absolute"
+            else:
+                executable = override_path.resolve()
+                environment = executable.parent.parent
         python = environment / "bin" / "python"
         expected_version = str(serving["backend_version"])
-        errors: list[str] = []
+        errors: list[str] = [override_error] if override_error is not None else []
+        probe_environment = os.environ.copy()
+        executable_path = str(executable.parent)
+        existing_path = probe_environment.get("PATH", "")
+        probe_environment["PATH"] = (
+            f"{executable_path}{os.pathsep}{existing_path}"
+            if existing_path
+            else executable_path
+        )
+        ffmpeg_override = os.getenv("LAPLACE_FFMPEG_LIBRARY_PATH")
+        if ffmpeg_override and artifact_id != "phase1_main":
+            ffmpeg_path = Path(ffmpeg_override).expanduser()
+            if not ffmpeg_path.is_absolute() or not ffmpeg_path.is_dir():
+                errors.append("ffmpeg_library_path_invalid")
+            else:
+                existing_library_path = probe_environment.get("LD_LIBRARY_PATH", "")
+                probe_environment["LD_LIBRARY_PATH"] = (
+                    f"{ffmpeg_path}{os.pathsep}{existing_library_path}"
+                    if existing_library_path
+                    else str(ffmpeg_path)
+                )
         detected_version: str | None = None
         cli_returncode: int | None = None
         cli_error: str | None = None
@@ -384,9 +414,11 @@ def validate_serving_environments(
                     text=True,
                     check=False,
                     timeout=30,
+                    env=probe_environment,
                 )
                 detected_version = metadata.stdout.strip() if metadata.returncode == 0 else None
-                if detected_version != expected_version:
+                public_version = detected_version.split("+", maxsplit=1)[0] if detected_version else None
+                if public_version != expected_version:
                     errors.append("vllm_version_mismatch")
                 if probe_cli:
                     cli = subprocess.run(  # nosec B603
@@ -395,6 +427,7 @@ def validate_serving_environments(
                         text=True,
                         check=False,
                         timeout=30,
+                        env=probe_environment,
                     )
                     cli_returncode = cli.returncode
                     if cli.returncode != 0:
@@ -408,6 +441,7 @@ def validate_serving_environments(
                             text=True,
                             check=False,
                             timeout=30,
+                            env=probe_environment,
                         )
                         required_arguments = {
                             "--host",

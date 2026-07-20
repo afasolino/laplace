@@ -165,6 +165,19 @@ scripts/run_multilanguage_dual_model_ablation.sh all external
 External `all` never changes server state; use the individual external phase
 commands when the operator must replace one resident model between phases.
 
+For the CUDA-12-family Phase 2/3 environment and the resumable serial run:
+
+```bash
+scripts/bootstrap_vllm_cu129.sh
+scripts/run_phase2_phase3_serial.sh
+```
+
+The bootstrap installs the official vLLM `0.25.0+cu129` wheel in the separate
+`.venv-vllm-cu129` environment. The serial launcher verifies Phase 1, finishes
+Phase 2, stops its server, finishes Phase 3, stops both Phase 3 servers, and
+merges the experiment. It retains per-invocation launcher and server logs and
+never deletes compatible partial pair results.
+
 Do not infer statistical generality from the 32 tasks. Reports retain paired
 per-task differences and deterministic bootstrap intervals only as diagnostic
 evidence.
