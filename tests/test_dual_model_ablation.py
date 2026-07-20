@@ -57,6 +57,7 @@ from research_workspace.multilanguage_ablation import (
     phase_status,
     preflight_report,
     runtime_prerequisites,
+    selective_retry_plan,
     validate_phase_setup,
     validate_runtime,
     validate_held_out_pack,
@@ -800,9 +801,7 @@ def test_pinned_model_profiles_align_and_unavailable_artifacts_fail_closed(
     phase2_main["verification"]["artifact_manifest"] = str(
         tmp_path / "missing-model" / "artifact_manifest.json"
     )
-    (missing_experiment / "model_artifacts.json").write_text(
-        json.dumps(metadata), encoding="utf-8"
-    )
+    (missing_experiment / "model_artifacts.json").write_text(json.dumps(metadata), encoding="utf-8")
     unavailable = validate_local_artifacts(missing_experiment, {"phase2_main"})
     assert unavailable["status"] == "MODEL_ARTIFACTS_INCOMPLETE"
     assert unavailable["artifacts"][0]["available"] is False
@@ -950,13 +949,9 @@ transformers==5.10.1 \\
     result = validate_quantization_lock(experiment, lock)
     assert result["status"] == "QUANTIZATION_LOCK_COMPATIBLE"
     assert result["resolved_versions"]["transformers"] == "5.10.1"
-    statuses = {
-        str(item["status"]) for item in result["source_architecture_validation"]
-    }
+    statuses = {str(item["status"]) for item in result["source_architecture_validation"]}
     assert statuses <= {"SUPPORTED", "DEFERRED_SOURCE_ARTIFACT_MISSING"}
-    assert result["source_artifacts_ready"] is (
-        statuses == {"SUPPORTED"}
-    )
+    assert result["source_artifacts_ready"] is (statuses == {"SUPPORTED"})
 
 
 @pytest.mark.parametrize(
@@ -1122,6 +1117,88 @@ def test_thirty_one_of_thirty_two_pairs_cannot_complete_a_phase(tmp_path: Path) 
     assert status["remaining_pairs"] == 1
     assert status["attempted_terminal_pairs"] == 32
     assert status["terminal_failure_pairs"] == 1
+
+
+def test_selective_retry_plan_retains_complete_and_retries_only_typed_failures(
+    tmp_path: Path,
+) -> None:
+    configuration = replace(
+        load_experiment_configuration(REPOSITORY_ROOT, CONFIG_PATH, base_revision="a" * 40),
+        output_root=tmp_path,
+    )
+    tasks = load_benchmark_manifest(configuration.manifest_path)
+    fingerprint = _configuration_fingerprint(configuration, {}, "f" * 64)
+    pair_root = _result_set_root(configuration) / "pairs" / "B"
+    pair_root.mkdir(parents=True)
+    for index, task in enumerate(tasks):
+        complete = index < 8
+        row: dict[str, object] = {
+            "schema_version": 2,
+            "status": "COMPLETE_EVALUATED" if complete else "TERMINAL_FAILURE",
+            "terminal": True,
+            "outcome_kind": "candidate_result" if complete else "infrastructure_failure",
+            "experiment_id": "multilanguage_dual_model_ablation_v1",
+            "task_id": task.task_id,
+            "arm_id": "B",
+            "base_revision": "a" * 40,
+            "execution_phase": "phase2",
+            "configuration_fingerprint": fingerprint,
+            "held_out_manifest_sha256": "f" * 64,
+            "started_at": "2026-07-16T00:00:00+00:00",
+            "ended_at": "2026-07-16T00:00:01+00:00",
+            "total_task_seconds": 1.0,
+            "model_calls": {},
+            "held_out": {"status": "PASS" if complete else "NOT_RUN"},
+            "resumability": {
+                "classification": (
+                    "COMPATIBLE_COMPLETE_RESULT" if complete else "RETRYABLE_TERMINAL_FAILURE"
+                ),
+                "skip_on_resume": complete,
+            },
+            "lane_result": {},
+        }
+        if not complete:
+            row.update(
+                {
+                    "route": {},
+                    "stage": "implementation",
+                    "failure_category": "truncated_response",
+                    "error": "retry budget exhausted",
+                    "retry_counts": {},
+                    "deterministic_verification": {"status": "NOT_RUN"},
+                    "reviewer_status": {"status": "NOT_RUN"},
+                }
+            )
+        (pair_root / f"{task.task_id}.json").write_text(json.dumps(row), encoding="utf-8")
+    manifest = _result_set_root(configuration) / "phases" / "phase2" / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        json.dumps({"status": "INCOMPLETE", "fingerprint": fingerprint}),
+        encoding="utf-8",
+    )
+    plan = selective_retry_plan(configuration, "phase2")
+    assert plan["mutations_performed"] is False
+    assert plan["counts"] == {
+        "retained_completed": 8,
+        "reset_for_retry": 24,
+        "unattempted": 0,
+        "untouched": 0,
+    }
+    retained = {item["task_id"] for item in plan["retained_completed_pairs"]}
+    retried = {item["task_id"] for item in plan["reset_for_retry_pairs"]}
+    assert retained.isdisjoint(retried)
+
+    non_retryable = pair_root / f"{tasks[-1].task_id}.json"
+    row = json.loads(non_retryable.read_text(encoding="utf-8"))
+    row["resumability"] = {
+        "classification": "NON_RETRYABLE_TERMINAL_FAILURE",
+        "skip_on_resume": True,
+    }
+    non_retryable.write_text(json.dumps(row), encoding="utf-8")
+    plan = selective_retry_plan(configuration, "phase2")
+    assert plan["counts"]["reset_for_retry"] == 23
+    assert plan["counts"]["untouched"] == 1
+    assert plan["untouched_pairs"][0]["reason"] == "non_retryable_existing_result"
 
 
 def test_phase_fingerprint_rejects_changed_benchmark_or_corpus() -> None:
@@ -1493,9 +1570,7 @@ def test_serving_preflight_validates_phase2_vllm_override(
     executable.chmod(0o755)
     python.chmod(0o755)
     monkeypatch.setenv("LAPLACE_VLLM_EXECUTABLE", str(executable))
-    result = validate_serving_environments(
-        CONFIG_PATH.parent, {"phase2_main"}, probe_cli=False
-    )
+    result = validate_serving_environments(CONFIG_PATH.parent, {"phase2_main"}, probe_cli=False)
     record = result["environments"][0]
     assert record["available"] is True
     assert record["environment_path"] == str(environment)

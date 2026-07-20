@@ -30,6 +30,17 @@ Schema-1 Phase-1 evidence remains preserved in the legacy output paths, while
 new results are written below a base-revision and `failure-accounting-v2`
 result-set directory.
 
+Qwen reasoning and final-answer channels are retained separately. First-pass
+implementation and RTL calls and their first response retry keep the model's
+default thinking mode. If both Qwen3.6 responses are rejected, the final
+bounded serialization retry uses an OpenAI JSON-schema constraint and disables
+thinking only for that retry so the completion budget is reserved for the
+deterministic replacement object.
+Reasoning text is never substituted for final content. Audit records retain
+final content, finish reason, token counts, and only a length/hash summary of
+reasoning. Because the constrained retry is non-thinking, the managed server
+does not require vLLM's `structured_outputs.enable_in_reasoning` startup option.
+
 The profiles contain exact official source revisions and loopback serving
 identities. Phase 1 uses the installed upstream Qwen AWQ artifact at revision
 `1ed0a6145da0ce550c628e8e8b678f51e695995d`. Phases 2 and 3 pin
@@ -127,6 +138,8 @@ scripts/manage_multilanguage_model_servers.sh start-phase1
 scripts/manage_multilanguage_model_servers.sh stop-phase1
 scripts/manage_multilanguage_model_servers.sh start-phase2
 .venv/bin/python -m research_workspace.multilanguage_ablation validate-runtime --phase phase2
+.venv/bin/python -m research_workspace.multilanguage_ablation smoke-runtime --phase phase2
+.venv/bin/python -m research_workspace.multilanguage_ablation selective-retry-plan --phase phase2
 .venv/bin/python -m research_workspace.multilanguage_ablation run-phase2
 .venv/bin/python -m research_workspace.multilanguage_ablation phase-status --phase phase2
 scripts/manage_multilanguage_model_servers.sh stop-phase2

@@ -342,6 +342,9 @@ class AuditedModelCaller:
         validator: ResponseValidator | None = None,
         requested_completion_tokens: int | None = None,
         compact_prompt: PromptCompactor | None = None,
+        response_schema: JsonObject | None = None,
+        schema_name: str | None = None,
+        enable_thinking: bool | None = None,
     ) -> RoutedCall:
         if not prompt.strip():
             raise EngineeringError("Model prompt cannot be empty")
@@ -392,6 +395,26 @@ class AuditedModelCaller:
             "compaction_reason": compaction_reason,
             "context_rejection_reason": None,
         }
+        structured_output: JsonObject = {
+            "requested": response_schema is not None,
+            "schema_name": schema_name if response_schema is not None else None,
+            "schema_sha256": (
+                hashlib.sha256(
+                    json.dumps(response_schema, sort_keys=True, separators=(",", ":")).encode(
+                        "utf-8"
+                    )
+                ).hexdigest()
+                if response_schema is not None
+                else None
+            ),
+        }
+        thinking_mode = (
+            "explicitly_enabled"
+            if enable_thinking is True
+            else "disabled_for_structured_serialization"
+            if enable_thinking is False
+            else "provider_default"
+        )
         path = self.audit_root / f"{created_at.replace(':', '')}_{call_id}.json"
 
         def write_audit(payload: JsonObject) -> None:
@@ -407,6 +430,8 @@ class AuditedModelCaller:
                 **budget,
                 "retry_index": retry_index,
                 "fallback_used": fallback_reason is not None,
+                "structured_output": structured_output,
+                "thinking_mode": thinking_mode,
                 **payload,
             }
             _write_json_atomic(path, record, readonly=True)
@@ -430,11 +455,21 @@ class AuditedModelCaller:
             )
             raise ContextBudgetError(message, budget=budget)
         try:
-            result = backend.generate(
-                effective_prompt,
-                context_tokens=context_limit,
-                max_tokens=effective_completion,
-            )
+            if response_schema is not None or enable_thinking is not None:
+                result = backend.generate(
+                    effective_prompt,
+                    context_tokens=context_limit,
+                    max_tokens=effective_completion,
+                    response_schema=response_schema,
+                    schema_name=schema_name,
+                    enable_thinking=enable_thinking,
+                )
+            else:
+                result = backend.generate(
+                    effective_prompt,
+                    context_tokens=context_limit,
+                    max_tokens=effective_completion,
+                )
         except ModelRequired as exc:
             elapsed = time.monotonic() - started
             category = getattr(exc, "category", "endpoint_unavailable")
@@ -453,27 +488,67 @@ class AuditedModelCaller:
             )
             raise
         elapsed = time.monotonic() - started
-        valid = bool(result.text.strip())
-        validation_error: str | None = None
+        has_final_content = bool(result.text.strip())
+        valid = has_final_content
+        schema_validation_error: str | None = None
         if validator is not None:
             try:
                 validator(result.text)
             except (EngineeringError, ValueError) as exc:
                 valid = False
-                validation_error = str(exc)
-        elif not valid:
-            validation_error = "Model response is empty"
+                schema_validation_error = str(exc)
+        validation_error = schema_validation_error
+        failure_category: str | None = None
+        if result.finish_reason == "length":
+            valid = False
+            failure_category = "truncated_response"
+            validation_error = "Model final response was truncated (finish_reason='length')"
+            if schema_validation_error:
+                validation_error += f"; validation rejection: {schema_validation_error}"
+        elif not has_final_content:
+            valid = False
+            failure_category = "empty_content"
+            validation_error = (
+                "Model final content is empty; separate reasoning output is not a submitted answer"
+                if result.reasoning_text
+                else schema_validation_error or "Model final content is empty"
+            )
+        elif schema_validation_error is not None:
+            lowered = schema_validation_error.lower()
+            failure_category = (
+                "malformed_json"
+                if "not valid json" in lowered
+                or "must be one json object" in lowered
+                or "fenced" in lowered
+                else "schema_mismatch"
+            )
+        elif result.finish_reason not in {None, "stop"}:
+            valid = False
+            failure_category = "incomplete_response"
+            validation_error = f"Model response ended with finish_reason={result.finish_reason!r}"
         write_audit(
             {
                 "server_reported_prompt_tokens": result.prompt_tokens,
                 "completion_tokens": result.completion_tokens,
+                "reasoning_tokens": result.reasoning_tokens,
                 "generation_seconds": elapsed,
                 "ttft_seconds": result.ttft_seconds,
                 "output_tokens_per_second": result.output_tokens_per_second,
+                "content": result.text,
+                "content_characters": len(result.text),
+                "reasoning_present": bool(result.reasoning_text),
+                "reasoning_characters": len(result.reasoning_text),
+                "reasoning_sha256": (
+                    hashlib.sha256(result.reasoning_text.encode("utf-8")).hexdigest()
+                    if result.reasoning_text
+                    else None
+                ),
+                "finish_reason": result.finish_reason,
                 "response_valid": valid,
                 "validation_error": validation_error,
+                "schema_validation_error": schema_validation_error,
                 "status": result.status,
-                "failure_category": None,
+                "failure_category": failure_category,
             }
         )
         return RoutedCall(

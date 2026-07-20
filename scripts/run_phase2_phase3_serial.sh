@@ -48,6 +48,10 @@ run_serial_phases() {
   echo "Verifying the fingerprint-compatible Phase 1 checkpoint."
   phase_complete phase1 || return "$?"
 
+  echo "Dry-running the selective Phase 2 resume plan. No result file is modified."
+  run_command "${PYTHON}" -m research_workspace.multilanguage_ablation \
+    selective-retry-plan --phase phase2 --config "${CONFIG}" || return "$?"
+
   echo "Running or resuming Phase 2. Compatible completed pairs will be skipped."
   run_command "${LAUNCHER}" phase2 managed
   PHASE_RESULT="$?"

@@ -48,6 +48,9 @@ class GenerationResult:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     input_tokens_per_second: float | None = None
+    reasoning_text: str = ""
+    finish_reason: str | None = None
+    reasoning_tokens: int | None = None
 
 
 class LocalGenerationBackend(Protocol):
@@ -59,6 +62,9 @@ class LocalGenerationBackend(Protocol):
         *,
         context_tokens: int = 8192,
         max_tokens: int | None = None,
+        response_schema: dict[str, object] | None = None,
+        schema_name: str | None = None,
+        enable_thinking: bool | None = None,
     ) -> GenerationResult:
         """Generate one bounded response through a local endpoint."""
 
@@ -79,6 +85,9 @@ class Provider:
         *,
         context_tokens: int = 8192,
         max_tokens: int | None = None,
+        response_schema: dict[str, object] | None = None,
+        schema_name: str | None = None,
+        enable_thinking: bool | None = None,
     ) -> GenerationResult:
         raise NotImplementedError
 
@@ -99,8 +108,11 @@ class MockProvider(Provider):
         *,
         context_tokens: int = 8192,
         max_tokens: int | None = None,
+        response_schema: dict[str, object] | None = None,
+        schema_name: str | None = None,
+        enable_thinking: bool | None = None,
     ) -> GenerationResult:
-        del max_tokens
+        del max_tokens, response_schema, schema_name, enable_thinking
         return GenerationResult("[MOCK] " + prompt[:200], "mock", 0.0, None, "mock")
 
     def token_count(self, prompt: str) -> int:
@@ -130,7 +142,11 @@ class OllamaProvider(Provider):
         *,
         context_tokens: int = 8192,
         max_tokens: int | None = None,
+        response_schema: dict[str, object] | None = None,
+        schema_name: str | None = None,
+        enable_thinking: bool | None = None,
     ) -> GenerationResult:
+        del response_schema, schema_name, enable_thinking
         effective_max_tokens = 512 if max_tokens is None else max_tokens
         payload = json.dumps(
             {
@@ -239,7 +255,14 @@ class OpenAICompatibleProvider(Provider):
         self.timeout_seconds = timeout_seconds
 
     def _request_payload(
-        self, prompt: str, *, stream: bool, max_tokens: int | None = None
+        self,
+        prompt: str,
+        *,
+        stream: bool,
+        max_tokens: int | None = None,
+        response_schema: dict[str, object] | None = None,
+        schema_name: str | None = None,
+        enable_thinking: bool | None = None,
     ) -> dict[str, object]:
         payload: dict[str, object] = {
             "model": self.model,
@@ -253,7 +276,45 @@ class OpenAICompatibleProvider(Provider):
             payload["seed"] = self.seed
         if stream:
             payload["stream_options"] = {"include_usage": True}
+        if response_schema is not None:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema_name or "laplace_structured_response",
+                    "schema": response_schema,
+                    "strict": True,
+                },
+            }
+        if enable_thinking is not None:
+            payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
         return payload
+
+    @staticmethod
+    def _reasoning_fragment(value: dict[str, object]) -> str:
+        """Read legacy and current vLLM reasoning fields without merging aliases."""
+        legacy = value.get("reasoning_content")
+        if isinstance(legacy, str):
+            return legacy
+        current = value.get("reasoning")
+        return current if isinstance(current, str) else ""
+
+    @staticmethod
+    def _usage_counts(value: object) -> tuple[int | None, int | None, int | None]:
+        if not isinstance(value, dict):
+            return None, None, None
+        raw_prompt_tokens = value.get("prompt_tokens")
+        raw_completion_tokens = value.get("completion_tokens")
+        reasoning_tokens: int | None = None
+        details = value.get("completion_tokens_details")
+        if isinstance(details, dict) and isinstance(details.get("reasoning_tokens"), int):
+            reasoning_tokens = details["reasoning_tokens"]
+        elif isinstance(value.get("reasoning_tokens"), int):
+            reasoning_tokens = value["reasoning_tokens"]
+        return (
+            raw_prompt_tokens if isinstance(raw_prompt_tokens, int) else None,
+            raw_completion_tokens if isinstance(raw_completion_tokens, int) else None,
+            reasoning_tokens,
+        )
 
     def generate(
         self,
@@ -261,10 +322,20 @@ class OpenAICompatibleProvider(Provider):
         *,
         context_tokens: int = 8192,
         max_tokens: int | None = None,
+        response_schema: dict[str, object] | None = None,
+        schema_name: str | None = None,
+        enable_thinking: bool | None = None,
     ) -> GenerationResult:
         del context_tokens
         payload = json.dumps(
-            self._request_payload(prompt, stream=False, max_tokens=max_tokens)
+            self._request_payload(
+                prompt,
+                stream=False,
+                max_tokens=max_tokens,
+                response_schema=response_schema,
+                schema_name=schema_name,
+                enable_thinking=enable_thinking,
+            )
         ).encode()
         request = urllib.request.Request(
             self.endpoint + "/v1/chat/completions",
@@ -285,17 +356,26 @@ class OpenAICompatibleProvider(Provider):
                 http_status=exc.code,
                 response_body=body,
             ) from exc
-        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+        except json.JSONDecodeError as exc:
+            raise ModelInvocationError(
+                f"Local OpenAI-compatible endpoint returned malformed JSON: {exc}",
+                category="malformed_response",
+            ) from exc
+        except (urllib.error.URLError, OSError) as exc:
             raise ModelInvocationError(
                 f"Local OpenAI-compatible endpoint unavailable: {exc}",
                 category=_endpoint_failure_category(exc),
             ) from exc
         elapsed = time.perf_counter() - started
         choices = value.get("choices", [])
-        text = str(choices[0].get("message", {}).get("content", "")) if choices else ""
-        usage = value.get("usage", {})
-        prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
-        tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
+        choice = choices[0] if isinstance(choices, list) and choices else None
+        message = choice.get("message") if isinstance(choice, dict) else None
+        raw_content = message.get("content") if isinstance(message, dict) else None
+        text = raw_content if isinstance(raw_content, str) else ""
+        reasoning = self._reasoning_fragment(message) if isinstance(message, dict) else ""
+        raw_finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+        finish_reason = raw_finish_reason if isinstance(raw_finish_reason, str) else None
+        prompt_tokens, tokens, reasoning_tokens = self._usage_counts(value.get("usage"))
         return GenerationResult(
             text,
             self.model,
@@ -305,14 +385,30 @@ class OpenAICompatibleProvider(Provider):
             prompt_tokens if isinstance(prompt_tokens, int) else None,
             tokens if isinstance(tokens, int) else None,
             None,
+            reasoning,
+            finish_reason,
+            reasoning_tokens,
         )
 
     def _generate_streaming(
-        self, prompt: str, *, max_tokens: int | None = None
+        self,
+        prompt: str,
+        *,
+        max_tokens: int | None = None,
+        response_schema: dict[str, object] | None = None,
+        schema_name: str | None = None,
+        enable_thinking: bool | None = None,
     ) -> GenerationResult:
         """Measure a loopback OpenAI stream using server-reported token counts."""
         payload = json.dumps(
-            self._request_payload(prompt, stream=True, max_tokens=max_tokens)
+            self._request_payload(
+                prompt,
+                stream=True,
+                max_tokens=max_tokens,
+                response_schema=response_schema,
+                schema_name=schema_name,
+                enable_thinking=enable_thinking,
+            )
         ).encode()
         request = urllib.request.Request(
             self.endpoint + "/v1/chat/completions",
@@ -321,9 +417,12 @@ class OpenAICompatibleProvider(Provider):
         )
         started = time.perf_counter()
         first_token_at: float | None = None
-        chunks: list[str] = []
+        content_chunks: list[str] = []
+        reasoning_chunks: list[str] = []
         prompt_tokens: int | None = None
         completion_tokens: int | None = None
+        reasoning_tokens: int | None = None
+        finish_reason: str | None = None
         try:
             with urllib.request.urlopen(  # nosec B310
                 request, timeout=self.timeout_seconds
@@ -340,27 +439,31 @@ class OpenAICompatibleProvider(Provider):
                         continue
                     choices = value.get("choices")
                     if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                        raw_finish_reason = choices[0].get("finish_reason")
+                        if isinstance(raw_finish_reason, str):
+                            finish_reason = raw_finish_reason
                         delta = choices[0].get("delta")
                         if isinstance(delta, dict):
-                            fragment = delta.get("content", delta.get("reasoning_content", ""))
-                            if isinstance(fragment, str) and fragment:
+                            raw_content = delta.get("content")
+                            content_fragment = raw_content if isinstance(raw_content, str) else ""
+                            reasoning_fragment = self._reasoning_fragment(delta)
+                            if content_fragment or reasoning_fragment:
                                 if first_token_at is None:
                                     first_token_at = time.perf_counter()
-                                chunks.append(fragment)
-                    usage = value.get("usage")
-                    if isinstance(usage, dict):
-                        raw_prompt_tokens = usage.get("prompt_tokens")
-                        raw_completion_tokens = usage.get("completion_tokens")
-                        prompt_tokens = (
-                            raw_prompt_tokens
-                            if isinstance(raw_prompt_tokens, int)
-                            else prompt_tokens
-                        )
-                        completion_tokens = (
-                            raw_completion_tokens
-                            if isinstance(raw_completion_tokens, int)
-                            else completion_tokens
-                        )
+                            if content_fragment:
+                                content_chunks.append(content_fragment)
+                            if reasoning_fragment:
+                                reasoning_chunks.append(reasoning_fragment)
+                    usage_prompt, usage_completion, usage_reasoning = self._usage_counts(
+                        value.get("usage")
+                    )
+                    prompt_tokens = usage_prompt if usage_prompt is not None else prompt_tokens
+                    completion_tokens = (
+                        usage_completion if usage_completion is not None else completion_tokens
+                    )
+                    reasoning_tokens = (
+                        usage_reasoning if usage_reasoning is not None else reasoning_tokens
+                    )
         except urllib.error.HTTPError as exc:
             body = exc.read(4000).decode("utf-8", errors="replace")
             raise ModelInvocationError(
@@ -369,7 +472,12 @@ class OpenAICompatibleProvider(Provider):
                 http_status=exc.code,
                 response_body=body,
             ) from exc
-        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+        except json.JSONDecodeError as exc:
+            raise ModelInvocationError(
+                f"Local OpenAI-compatible stream returned malformed JSON: {exc}",
+                category="malformed_response",
+            ) from exc
+        except (urllib.error.URLError, OSError) as exc:
             raise ModelInvocationError(
                 f"Local OpenAI-compatible endpoint unavailable: {exc}",
                 category=_endpoint_failure_category(exc),
@@ -378,7 +486,7 @@ class OpenAICompatibleProvider(Provider):
         ttft = first_token_at - started if first_token_at is not None else None
         decode_seconds = completed - first_token_at if first_token_at is not None else None
         return GenerationResult(
-            "".join(chunks),
+            "".join(content_chunks),
             self.model,
             ttft,
             float(completion_tokens) / decode_seconds
@@ -390,6 +498,9 @@ class OpenAICompatibleProvider(Provider):
             float(prompt_tokens) / ttft
             if prompt_tokens is not None and ttft is not None and ttft > 0
             else None,
+            "".join(reasoning_chunks),
+            finish_reason,
+            reasoning_tokens,
         )
 
     def token_count(self, prompt: str) -> int:
@@ -459,9 +570,18 @@ class VllmProvider(OpenAICompatibleProvider):
         *,
         context_tokens: int = 8192,
         max_tokens: int | None = None,
+        response_schema: dict[str, object] | None = None,
+        schema_name: str | None = None,
+        enable_thinking: bool | None = None,
     ) -> GenerationResult:
         del context_tokens
-        return self._generate_streaming(prompt, max_tokens=max_tokens)
+        return self._generate_streaming(
+            prompt,
+            max_tokens=max_tokens,
+            response_schema=response_schema,
+            schema_name=schema_name,
+            enable_thinking=enable_thinking,
+        )
 
     def model_identity(self) -> dict[str, str]:
         return {"backend": "vllm", "model": self.model, "endpoint": self.endpoint}

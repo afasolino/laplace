@@ -76,8 +76,15 @@ wait_for_managed_endpoint() {
       validate-runtime --phase "${PHASE}" --config "${CONFIG}"
     RESULT="$?"
     if [ "${RESULT}" -eq 0 ]; then
-      log_lifecycle "phase=${PHASE} endpoint_ready=true"
-      return 0
+      echo "CONTROL_COMMAND=$(printf '%q ' "${PYTHON}" -m research_workspace.multilanguage_ablation smoke-runtime --phase "${PHASE}" --config "${CONFIG}")"
+      "${PYTHON}" -m research_workspace.multilanguage_ablation \
+        smoke-runtime --phase "${PHASE}" --config "${CONFIG}"
+      RESULT="$?"
+      if [ "${RESULT}" -eq 0 ]; then
+        log_lifecycle "phase=${PHASE} endpoint_ready=true smoke_passed=true"
+        return 0
+      fi
+      log_lifecycle "phase=${PHASE} endpoint_ready=true smoke_passed=false"
     fi
     WAIT_NOW="$(date +%s)"
     WAIT_ELAPSED=$((WAIT_NOW - WAIT_STARTED))
@@ -102,6 +109,8 @@ run_external_phase_with_endpoint() {
   PHASE="$1"
   run_control "${PYTHON}" -m research_workspace.multilanguage_ablation \
     validate-runtime --phase "${PHASE}" --config "${CONFIG}" || return "$?"
+  run_control "${PYTHON}" -m research_workspace.multilanguage_ablation \
+    smoke-runtime --phase "${PHASE}" --config "${CONFIG}" || return "$?"
   run_phase_after_runtime_validation "${PHASE}"
 }
 

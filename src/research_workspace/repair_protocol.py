@@ -88,6 +88,50 @@ def source_state(root: Path, allowed_paths: list[str], domain: Domain) -> list[J
     return records
 
 
+def replacement_plan_json_schema(*, allowed_paths: list[str], domain: Domain) -> JsonObject:
+    """Return the strict request-time schema; worktree checks remain deterministic."""
+    normalized_paths = sorted(
+        {_safe_relative(path, label="allowed path").as_posix() for path in allowed_paths}
+    )
+    if not normalized_paths:
+        raise StructuredOutputError("Replacement schema requires at least one allowed path")
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["schema_version", "replacements"],
+        "properties": {
+            "schema_version": {"const": 1},
+            "replacements": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": len(normalized_paths),
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "path",
+                        "language",
+                        "kind",
+                        "expected_sha256",
+                        "content",
+                    ],
+                    "properties": {
+                        "path": {"enum": normalized_paths},
+                        "language": {"const": domain},
+                        "kind": {"enum": ["source", "testbench"]},
+                        "expected_sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$",
+                        },
+                        "content": {"type": "string", "minLength": 1},
+                    },
+                },
+            },
+        },
+    }
+
+
 def _single_json_object(model_text: str, *, label: str) -> JsonObject:
     text = model_text.strip()
     if not text:

@@ -49,7 +49,7 @@ from .governed_corpus import (
     prepare_corpus_overlay,
     validate_corpus_retrieval,
 )
-from .inference import gpu_memory_snapshot
+from .inference import backend_for, gpu_memory_snapshot
 from .model_artifacts import (
     validate_local_artifacts,
     validate_profile_alignment,
@@ -64,6 +64,7 @@ from .model_routing import (
     load_dual_model_configuration,
 )
 from .llm import ModelInvocationError, ModelRequired
+from .repair_protocol import parse_replacement_plan, replacement_plan_json_schema
 from .team_runner import (
     LocalTeamRunner,
     TeamWorkflowOptions,
@@ -1422,6 +1423,133 @@ def validate_runtime(
     }
 
 
+def smoke_runtime(
+    repository_root: Path, configuration: ExperimentConfiguration, phase_id: PhaseId
+) -> JsonObject:
+    """Generate minimal ordinary and constrained responses before any task pair runs."""
+    runtime = validate_runtime(repository_root, configuration, phase_id)
+    if runtime.get("status") != "RUNTIME_READY":
+        return {"status": "FAILED", "phase_id": phase_id, "runtime": runtime, "calls": []}
+    host_runner = LocalToolRunner(repository_root, configuration.output_root / "runtime_smoke_logs")
+    gpu_before = gpu_memory_snapshot(host_runner)
+    calls: list[JsonObject] = []
+    passed = True
+    smoke_directory = tempfile.TemporaryDirectory(prefix="laplace-runtime-smoke-")
+    smoke_root = Path(smoke_directory.name)
+    smoke_source = smoke_root / "smoke.py"
+    smoke_source.write_text("value = 0\n", encoding="utf-8")
+    smoke_digest = hashlib.sha256(smoke_source.read_bytes()).hexdigest()
+    schema = replacement_plan_json_schema(allowed_paths=["smoke.py"], domain="python")
+    structured_prompt = (
+        "Return exactly one replacement-plan JSON object for smoke.py. Set schema_version to 1, "
+        "language to python, kind to source, expected_sha256 to "
+        f"{smoke_digest}, and content to non-empty Python source containing value = 1."
+    )
+    for arm in _phase_arms(configuration, phase_id):
+        candidates = [("main", arm.models.main)]
+        if arm.worker_enabled and arm.models.rtl_worker is not None:
+            candidates.append(("rtl_worker", arm.models.rtl_worker))
+        for route, candidate in candidates:
+            backend = backend_for(candidate)
+            reasoning_expected = "qwen3.6" in candidate.model.lower()
+            try:
+                ordinary = backend.generate(
+                    "Reason briefly about whether two plus three equals five, then provide the "
+                    "single-word final answer READY.",
+                    context_tokens=candidate.context_tokens,
+                    max_tokens=candidate.max_output_tokens,
+                    enable_thinking=True if reasoning_expected else None,
+                )
+                structured = backend.generate(
+                    structured_prompt,
+                    context_tokens=candidate.context_tokens,
+                    max_tokens=min(candidate.max_output_tokens, 512),
+                    response_schema=schema,
+                    schema_name="laplace_runtime_smoke",
+                    enable_thinking=False if reasoning_expected else None,
+                )
+                parse_replacement_plan(
+                    structured.text,
+                    root=smoke_root,
+                    allowed_paths=["smoke.py"],
+                    domain="python",
+                )
+                structured_valid = True
+                ordinary_valid = bool(ordinary.text.strip()) and ordinary.finish_reason != "length"
+                separated = (
+                    bool(ordinary.reasoning_text) and bool(ordinary.text.strip())
+                    if reasoning_expected
+                    else not ordinary.reasoning_text
+                )
+                call_passed = ordinary_valid and structured_valid and separated
+                passed = passed and call_passed
+                calls.append(
+                    {
+                        "arm_id": arm.arm_id,
+                        "route": route,
+                        "model": candidate.model,
+                        "status": "PASS" if call_passed else "FAILED",
+                        "ordinary": {
+                            "content": ordinary.text,
+                            "content_characters": len(ordinary.text),
+                            "finish_reason": ordinary.finish_reason,
+                            "reasoning_present": bool(ordinary.reasoning_text),
+                            "reasoning_characters": len(ordinary.reasoning_text),
+                            "reasoning_sha256": (
+                                hashlib.sha256(ordinary.reasoning_text.encode("utf-8")).hexdigest()
+                                if ordinary.reasoning_text
+                                else None
+                            ),
+                            "prompt_tokens": ordinary.prompt_tokens,
+                            "completion_tokens": ordinary.completion_tokens,
+                            "reasoning_tokens": ordinary.reasoning_tokens,
+                        },
+                        "structured_repair": {
+                            "content": structured.text,
+                            "valid": structured_valid,
+                            "finish_reason": structured.finish_reason,
+                            "reasoning_present": bool(structured.reasoning_text),
+                            "structured_output_requested": True,
+                            "thinking_enabled": False if reasoning_expected else None,
+                            "prompt_tokens": structured.prompt_tokens,
+                            "completion_tokens": structured.completion_tokens,
+                        },
+                        "response_channels_separate": separated,
+                    }
+                )
+            except (EngineeringError, ModelRequired, json.JSONDecodeError, ValueError) as exc:
+                passed = False
+                calls.append(
+                    {
+                        "arm_id": arm.arm_id,
+                        "route": route,
+                        "model": candidate.model,
+                        "status": "FAILED",
+                        "error": str(exc),
+                    }
+                )
+    gpu_after = gpu_memory_snapshot(host_runner)
+    smoke_directory.cleanup()
+    report: JsonObject = {
+        "status": "RUNTIME_SMOKE_PASSED" if passed else "FAILED",
+        "phase_id": phase_id,
+        "runtime": runtime,
+        "calls": calls,
+        "gpu_memory": {
+            "before": gpu_before,
+            "after": gpu_after,
+            "note": "Observed pre/post snapshots are not claimed as peak VRAM.",
+        },
+    }
+    _write_json_atomic(
+        configuration.output_root
+        / "runtime_smoke_logs"
+        / f"{phase_id}_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json",
+        report,
+    )
+    return report
+
+
 def _corpus_snapshot_hashes(overlay_root: Path) -> dict[str, str]:
     return {
         domain: ReferenceLibrary(overlay_root, domain, shared=True).snapshot_hash()
@@ -1441,19 +1569,37 @@ def _pair_complete(
     path = _pair_result_path(configuration, arm_id, task_id)
     if not path.is_file():
         return False
-    value = _read_json(path)
     try:
+        value = _read_json(path)
         _validate_terminal_pair_result(value)
     except EngineeringError:
         return False
-    expected_phase = _phase_for_arm(arm_id)
+    return (
+        _pair_identity_compatible(
+            value,
+            configuration=configuration,
+            arm_id=arm_id,
+            held_out_manifest_sha256=held_out_manifest_sha256,
+            configuration_fingerprint=configuration_fingerprint,
+        )
+        and value.get("status") == "COMPLETE_EVALUATED"
+        and value.get("outcome_kind") == "candidate_result"
+    )
+
+
+def _pair_identity_compatible(
+    value: JsonObject,
+    *,
+    configuration: ExperimentConfiguration,
+    arm_id: str,
+    held_out_manifest_sha256: str | None,
+    configuration_fingerprint: JsonObject | None,
+) -> bool:
     return (
         value.get("schema_version") == RESULT_SCHEMA_VERSION
-        and value.get("status") == "COMPLETE_EVALUATED"
         and value.get("terminal") is True
-        and value.get("outcome_kind") == "candidate_result"
         and value.get("base_revision") == configuration.base_revision
-        and value.get("execution_phase") == expected_phase
+        and value.get("execution_phase") == _phase_for_arm(arm_id)
         and configuration_fingerprint is not None
         and value.get("configuration_fingerprint") == configuration_fingerprint
         and (
@@ -1569,6 +1715,98 @@ def phase_status(configuration: ExperimentConfiguration, phase_id: PhaseId) -> J
         "manifest_path": str(manifest_path),
         "manifest": manifest,
         "compatibility_errors": compatibility_errors,
+    }
+
+
+def selective_retry_plan(configuration: ExperimentConfiguration, phase_id: PhaseId) -> JsonObject:
+    """List resume actions without deleting, rewriting, or running any pair."""
+    status = phase_status(configuration, phase_id)
+    manifest = status.get("manifest")
+    fingerprint = manifest.get("fingerprint") if isinstance(manifest, dict) else None
+    compatible_fingerprint = (
+        cast(JsonObject, fingerprint)
+        if isinstance(fingerprint, dict) and not status.get("compatibility_errors")
+        else None
+    )
+    held_hash = (
+        compatible_fingerprint.get("held_out_manifest_sha256")
+        if isinstance(compatible_fingerprint, dict)
+        else None
+    )
+    retained: list[JsonObject] = []
+    reset_for_retry: list[JsonObject] = []
+    unattempted: list[JsonObject] = []
+    untouched: list[JsonObject] = []
+    for task in load_benchmark_manifest(configuration.manifest_path):
+        for arm_id in _phase(configuration, phase_id).arm_ids:
+            record: JsonObject = {"task_id": task.task_id, "arm_id": arm_id}
+            path = _pair_result_path(configuration, arm_id, task.task_id)
+            if not path.is_file():
+                unattempted.append({**record, "reason": "no_existing_result"})
+                continue
+            try:
+                row = _read_json(path)
+            except EngineeringError as exc:
+                untouched.append(
+                    {**record, "reason": "malformed_existing_result", "error": str(exc)}
+                )
+                continue
+            if not _pair_identity_compatible(
+                row,
+                configuration=configuration,
+                arm_id=arm_id,
+                held_out_manifest_sha256=held_hash if isinstance(held_hash, str) else None,
+                configuration_fingerprint=compatible_fingerprint,
+            ):
+                untouched.append({**record, "reason": "incompatible_existing_result"})
+                continue
+            resumability = row.get("resumability")
+            classification = (
+                resumability.get("classification") if isinstance(resumability, dict) else None
+            )
+            skip_on_resume = (
+                resumability.get("skip_on_resume") if isinstance(resumability, dict) else None
+            )
+            if (
+                row.get("status") == "COMPLETE_EVALUATED"
+                and classification == "COMPATIBLE_COMPLETE_RESULT"
+                and skip_on_resume is True
+            ):
+                retained.append({**record, "classification": classification})
+            elif (
+                row.get("status") == "TERMINAL_FAILURE"
+                and classification == "RETRYABLE_TERMINAL_FAILURE"
+                and skip_on_resume is False
+            ):
+                reset_for_retry.append(
+                    {
+                        **record,
+                        "classification": classification,
+                        "failure_category": row.get("failure_category"),
+                    }
+                )
+            else:
+                untouched.append(
+                    {
+                        **record,
+                        "reason": "non_retryable_existing_result",
+                        "classification": classification,
+                    }
+                )
+    return {
+        "status": "SELECTIVE_RETRY_DRY_RUN",
+        "phase_id": phase_id,
+        "mutations_performed": False,
+        "retained_completed_pairs": retained,
+        "reset_for_retry_pairs": reset_for_retry,
+        "unattempted_pairs": unattempted,
+        "untouched_pairs": untouched,
+        "counts": {
+            "retained_completed": len(retained),
+            "reset_for_retry": len(reset_for_retry),
+            "unattempted": len(unattempted),
+            "untouched": len(untouched),
+        },
     }
 
 
@@ -1961,6 +2199,11 @@ def _rejection_metrics(model_calls: JsonObject) -> JsonObject:
         str(item.get("validation_error") or item.get("error") or "").lower()
         for item in rejected_entries
     ]
+    categories = [
+        str(item["failure_category"])
+        for item in rejected_entries
+        if isinstance(item.get("failure_category"), str) and item.get("failure_category")
+    ]
     return {
         "rejected": len(rejected_entries),
         "malformed": sum(
@@ -1980,7 +2223,18 @@ def _rejection_metrics(model_calls: JsonObject) -> JsonObject:
         "duplicate_path": sum("duplicated" in error for error in errors),
         "no_op": sum("no source change" in error for error in errors),
         "out_of_scope": sum("outside task scope" in error for error in errors),
+        "failure_categories": {
+            category: categories.count(category) for category in sorted(set(categories))
+        },
+        "last_failure_category": categories[-1] if categories else None,
     }
+
+
+def _model_response_failure_category(model_calls: JsonObject) -> str:
+    """Use the last typed rejection instead of collapsing every failure to malformed."""
+    metrics = _rejection_metrics(model_calls)
+    category = metrics.get("last_failure_category")
+    return str(category) if isinstance(category, str) and category else "malformed_response"
 
 
 def _evaluate_held_out(
@@ -2642,6 +2896,29 @@ def run_phase(
             ):
                 resumed += 1
                 continue
+            if result_path.is_file():
+                try:
+                    existing_pair = _read_json(result_path)
+                except EngineeringError:
+                    incomplete += 1
+                    continue
+                existing_resumability = existing_pair.get("resumability")
+                retryable_existing = (
+                    _pair_identity_compatible(
+                        existing_pair,
+                        configuration=configuration,
+                        arm_id=arm.arm_id,
+                        held_out_manifest_sha256=held_out_manifest_sha256,
+                        configuration_fingerprint=configuration_fingerprint,
+                    )
+                    and existing_pair.get("status") == "TERMINAL_FAILURE"
+                    and isinstance(existing_resumability, dict)
+                    and existing_resumability.get("classification") == "RETRYABLE_TERMINAL_FAILURE"
+                    and existing_resumability.get("skip_on_resume") is False
+                )
+                if not retryable_existing:
+                    incomplete += 1
+                    continue
             pair_started = time.monotonic()
             pair_started_at = _now()
             lane_process = _run_lane_subprocess(repository_root, configuration, task, arm)
@@ -2749,7 +3026,7 @@ def run_phase(
             elif not verification:
                 terminal_stage = _task_failure_stage(task_value)
                 terminal_category = (
-                    "malformed_response"
+                    _model_response_failure_category(model_calls)
                     if model_calls.get("invalid_responses")
                     else "verification_infrastructure_failure"
                 )
@@ -3388,6 +3665,7 @@ def main(argv: list[str] | None = None) -> int:
             "validate-heldout",
             "preflight",
             "validate-runtime",
+            "smoke-runtime",
             "plan-only",
             "run-phase1",
             "run-phase2",
@@ -3396,6 +3674,7 @@ def main(argv: list[str] | None = None) -> int:
             "resume-phase2",
             "resume-phase3",
             "phase-status",
+            "selective-retry-plan",
             "run-pair",
             "merge-report",
         ),
@@ -3559,6 +3838,10 @@ def main(argv: list[str] | None = None) -> int:
             if arguments.phase is None:
                 raise EngineeringError("validate-runtime requires --phase phase1, phase2 or phase3")
             result = validate_runtime(root, configuration, cast(PhaseId, arguments.phase))
+        elif arguments.command == "smoke-runtime":
+            if arguments.phase is None:
+                raise EngineeringError("smoke-runtime requires --phase phase1, phase2 or phase3")
+            result = smoke_runtime(root, configuration, cast(PhaseId, arguments.phase))
         elif arguments.command in {
             "run-phase1",
             "resume-phase1",
@@ -3591,6 +3874,13 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 "phases": phase_results,
             }
+        elif arguments.command == "selective-retry-plan":
+            if arguments.phase is None:
+                raise EngineeringError(
+                    "selective-retry-plan requires --phase phase1, phase2 or phase3"
+                )
+            _require_base_revision(configuration)
+            result = selective_retry_plan(configuration, cast(PhaseId, arguments.phase))
         elif arguments.command == "run-pair":
             if arguments.request is None:
                 raise EngineeringError("run-pair requires an internal --request path")

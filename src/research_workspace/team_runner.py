@@ -50,6 +50,7 @@ from .repair_protocol import (
     file_sha256,
     parse_replacement_plan,
     parse_reviewer_verdict,
+    replacement_plan_json_schema,
     source_state,
 )
 from .rtl_contract import (
@@ -298,6 +299,10 @@ class LocalTeamRunner:
             "model": result.model,
             "status": result.status,
             "text": result.text,
+            "finish_reason": result.finish_reason,
+            "reasoning_present": bool(result.reasoning_text),
+            "reasoning_characters": len(result.reasoning_text),
+            "reasoning_tokens": result.reasoning_tokens,
             "ttft_seconds": result.ttft_seconds,
             "prompt_tokens": result.prompt_tokens,
             "completion_tokens": result.completion_tokens,
@@ -1178,6 +1183,14 @@ end endmodule
         response_retry: int,
     ) -> RoutedCall:
         allowed = _allowed_paths(task)
+        qwen_reasoning_repair = response_retry >= 2 and "qwen3.6" in (
+            self.model_configuration.main.model.lower()
+        )
+        response_schema = (
+            replacement_plan_json_schema(allowed_paths=allowed, domain=task.domain)
+            if qwen_reasoning_repair
+            else None
+        )
         eligibility = assess_rtl_worker_eligibility(metadata)
         can_use_worker = eligibility.eligible and self.rtl_worker_candidate is not None
         if not can_use_worker:
@@ -1200,6 +1213,9 @@ end endmodule
                     defect_report=latest_defect,
                     current_sources=current_sources,
                 ),
+                response_schema=response_schema,
+                schema_name="laplace_replacement_plan" if response_schema else None,
+                enable_thinking=False if qwen_reasoning_repair else None,
             )
 
         contract, contract_error = self._worker_contract(
@@ -1256,6 +1272,9 @@ end endmodule
                 defect_report=latest_defect,
                 current_sources=current_sources,
             ),
+            response_schema=response_schema,
+            schema_name="laplace_replacement_plan" if response_schema else None,
+            enable_thinking=False if qwen_reasoning_repair else None,
         )
 
     @staticmethod
@@ -1394,6 +1413,10 @@ end endmodule
                     "ttft_seconds": generated.ttft_seconds,
                     "prompt_tokens": generated.prompt_tokens,
                     "completion_tokens": generated.completion_tokens,
+                    "reasoning_tokens": generated.reasoning_tokens,
+                    "reasoning_present": bool(generated.reasoning_text),
+                    "reasoning_characters": len(generated.reasoning_text),
+                    "finish_reason": generated.finish_reason,
                     "generation_seconds": generated_call.generation_seconds,
                     "response_valid": generated_call.response_valid,
                     "validation_error": generated_call.validation_error,
