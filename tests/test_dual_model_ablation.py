@@ -1630,6 +1630,21 @@ def test_server_shutdown_requires_pid_command_and_orchestration_ownership() -> N
     assert script.index('*"${MODEL_PATH}"*"--host 127.0.0.1"*"--port ${PORT}"*') < signal_index
 
 
+def test_phase3_server_manager_profiles_worker_before_main() -> None:
+    script = (REPOSITORY_ROOT / "scripts/manage_multilanguage_model_servers.sh").read_text(
+        encoding="utf-8"
+    )
+    function_start = script.index("start_phase3_profiles()")
+    function_end = script.index('\n}\n\nACTION="${1:-help}"', function_start)
+    function = script[function_start:function_end]
+    worker_start = function.index("start_profile phase2_rtl_worker")
+    main_start = function.index("start_profile phase2_main")
+    assert worker_start < main_start
+    assert "stop_profile phase2_main || return 2" in function
+    assert function.index("stop_profile phase2_main || return 2") < worker_start
+    assert "stop_profile phase2_rtl_worker" in function
+
+
 def test_managed_launcher_stops_polling_when_server_process_dies() -> None:
     script = (REPOSITORY_ROOT / "scripts/run_multilanguage_dual_model_ablation.sh").read_text(
         encoding="utf-8"

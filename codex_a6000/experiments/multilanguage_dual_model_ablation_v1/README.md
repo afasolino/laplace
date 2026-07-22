@@ -177,8 +177,9 @@ scripts/run_multilanguage_dual_model_ablation.sh merge
 
 Individual commands default to externally managed servers. Append `managed`
 to let the safe PID/model/address/port/token lifecycle start and stop that
-phase. Bare `all` defaults to managed serialized execution and reuses the
-identical Qwen3.6 server from Phase 2 while starting CodeV for Phase 3:
+phase. Bare `all` defaults to managed serialized execution. Phase 3 starts the
+CodeV worker before Qwen3.6 (restarting an owned Phase-2 Qwen process when
+needed) so vLLM profiles their shared GPU memory deterministically:
 
 ```bash
 scripts/run_multilanguage_dual_model_ablation.sh phase2 external

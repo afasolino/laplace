@@ -190,6 +190,25 @@ command_profile() {
   return 0
 }
 
+start_phase3_profiles() {
+  # vLLM profiles non-KV memory independently for each process. On a shared
+  # GPU, the smaller worker must reserve its KV cache before the main model;
+  # otherwise the worker can observe the already-resident main allocation as
+  # its own profiling overhead and reject a configuration that fits jointly.
+  if pid_is_owned phase2_main; then
+    echo "Restarting owned phase2_main after the RTL worker for deterministic Phase 3 memory profiling."
+    stop_profile phase2_main || return 2
+  fi
+  start_profile phase2_rtl_worker || return 2
+  start_profile phase2_main
+  PHASE3_MAIN_STATUS="$?"
+  if [ "${PHASE3_MAIN_STATUS}" -ne 0 ]; then
+    stop_profile phase2_rtl_worker
+    return "${PHASE3_MAIN_STATUS}"
+  fi
+  return 0
+}
+
 ACTION="${1:-help}"
 ACTION_STATUS=2
 case "${ACTION}" in
@@ -199,14 +218,7 @@ case "${ACTION}" in
   start-phase2-worker) start_profile phase2_rtl_worker; ACTION_STATUS="$?" ;;
   start-phase3-main) start_profile phase2_main; ACTION_STATUS="$?" ;;
   start-phase3-worker) start_profile phase2_rtl_worker; ACTION_STATUS="$?" ;;
-  start-phase3)
-    start_profile phase2_main
-    ACTION_STATUS="$?"
-    if [ "${ACTION_STATUS}" -eq 0 ]; then
-      start_profile phase2_rtl_worker
-      ACTION_STATUS="$?"
-    fi
-    ;;
+  start-phase3) start_phase3_profiles; ACTION_STATUS="$?" ;;
   command-phase1) command_profile phase1_main; ACTION_STATUS="$?" ;;
   command-phase2-main) command_profile phase2_main; ACTION_STATUS="$?" ;;
   command-phase2-worker) command_profile phase2_rtl_worker; ACTION_STATUS="$?" ;;

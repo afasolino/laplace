@@ -240,7 +240,8 @@ run_all_managed() {
       manage_server stop-phase2
       return "${RESULT}"
     fi
-    # start-phase3 reuses a matching owned Qwen3.6 process and starts CodeV.
+    # start-phase3 initializes CodeV before Qwen3.6 so vLLM profiles the shared
+    # GPU memory deterministically; an owned Phase-2 Qwen process is restarted.
     manage_server start-phase3
     RESULT="$?"
     if [ "${RESULT}" -eq 0 ]; then
