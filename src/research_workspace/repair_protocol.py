@@ -19,6 +19,8 @@ class StructuredOutputError(EngineeringError):
 
 ReplacementKind = Literal["source", "testbench"]
 ReviewerDecision = Literal["approve", "request_changes", "block"]
+MIN_STRUCTURED_REPLACEMENT_CONTENT_CHARACTERS = 4096
+MAX_STRUCTURED_REPLACEMENT_CONTENT_CHARACTERS = 24_576
 
 
 @dataclass(frozen=True)
@@ -88,25 +90,93 @@ def source_state(root: Path, allowed_paths: list[str], domain: Domain) -> list[J
     return records
 
 
-def replacement_plan_json_schema(*, allowed_paths: list[str], domain: Domain) -> JsonObject:
+def replacement_content_character_limits(source_records: object) -> dict[str, int]:
+    """Bound each generated file while leaving room for concise implementation growth."""
+    if not isinstance(source_records, list) or not source_records:
+        raise StructuredOutputError("Replacement schema requires complete source records")
+    limits: dict[str, int] = {}
+    for index, raw in enumerate(source_records):
+        if not isinstance(raw, dict):
+            raise StructuredOutputError(f"Source record {index} is not an object")
+        path = raw.get("path")
+        content = raw.get("content")
+        if not isinstance(path, str) or not isinstance(content, str):
+            raise StructuredOutputError(f"Source record {index} is incomplete")
+        normalized = _safe_relative(path, label="source record path").as_posix()
+        if normalized in limits:
+            raise StructuredOutputError(f"Source record path is duplicated: {normalized}")
+        growth_limit = max(
+            MIN_STRUCTURED_REPLACEMENT_CONTENT_CHARACTERS,
+            len(content) + MIN_STRUCTURED_REPLACEMENT_CONTENT_CHARACTERS,
+            len(content) * 2,
+        )
+        limits[normalized] = max(
+            len(content), min(MAX_STRUCTURED_REPLACEMENT_CONTENT_CHARACTERS, growth_limit)
+        )
+    return limits
+
+
+def replacement_plan_json_schema(
+    *,
+    allowed_paths: list[str],
+    domain: Domain,
+    source_records: object | None = None,
+) -> JsonObject:
     """Return the strict request-time schema; worktree checks remain deterministic."""
     normalized_paths = sorted(
         {_safe_relative(path, label="allowed path").as_posix() for path in allowed_paths}
     )
     if not normalized_paths:
         raise StructuredOutputError("Replacement schema requires at least one allowed path")
-    return {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
+    item_schema: JsonObject = {
         "type": "object",
         "additionalProperties": False,
-        "required": ["schema_version", "replacements"],
+        "required": [
+            "path",
+            "language",
+            "kind",
+            "expected_sha256",
+            "content",
+        ],
         "properties": {
-            "schema_version": {"const": 1},
-            "replacements": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": len(normalized_paths),
-                "items": {
+            "path": {"enum": normalized_paths},
+            "language": {"const": domain},
+            "kind": {"enum": ["source", "testbench"]},
+            "expected_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+            },
+            "content": {"type": "string", "minLength": 1},
+        },
+    }
+    maximum_items = len(normalized_paths)
+    if source_records is not None:
+        if not isinstance(source_records, list):
+            raise StructuredOutputError("Replacement schema requires source records as a list")
+        records: list[object] = source_records
+        limits = replacement_content_character_limits(source_records)
+        allowed = set(normalized_paths)
+        variants: list[JsonObject] = []
+        for index, raw in enumerate(records):
+            if not isinstance(raw, dict):
+                raise StructuredOutputError(f"Source record {index} is not an object")
+            path = raw.get("path")
+            language = raw.get("language")
+            kind = raw.get("kind")
+            digest = raw.get("sha256")
+            if not isinstance(path, str):
+                raise StructuredOutputError(f"Source record {index} path is invalid")
+            normalized = _safe_relative(path, label="source record path").as_posix()
+            if normalized not in allowed:
+                raise StructuredOutputError(
+                    f"Source record path is outside replacement scope: {normalized}"
+                )
+            if language != domain or kind != _expected_kind(normalized):
+                raise StructuredOutputError(f"Source record {normalized} metadata is invalid")
+            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise StructuredOutputError(f"Source record {normalized} sha256 is invalid")
+            variants.append(
+                {
                     "type": "object",
                     "additionalProperties": False,
                     "required": [
@@ -117,16 +187,34 @@ def replacement_plan_json_schema(*, allowed_paths: list[str], domain: Domain) ->
                         "content",
                     ],
                     "properties": {
-                        "path": {"enum": normalized_paths},
+                        "path": {"const": normalized},
                         "language": {"const": domain},
-                        "kind": {"enum": ["source", "testbench"]},
-                        "expected_sha256": {
+                        "kind": {"const": kind},
+                        "expected_sha256": {"const": digest},
+                        "content": {
                             "type": "string",
-                            "pattern": "^[0-9a-f]{64}$",
+                            "minLength": 1,
+                            "maxLength": limits[normalized],
                         },
-                        "content": {"type": "string", "minLength": 1},
                     },
-                },
+                }
+            )
+        if not variants:
+            raise StructuredOutputError("Replacement schema requires source records in scope")
+        item_schema = {"oneOf": variants}
+        maximum_items = len(variants)
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["schema_version", "replacements"],
+        "properties": {
+            "schema_version": {"const": 1},
+            "replacements": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": maximum_items,
+                "items": item_schema,
             },
         },
     }

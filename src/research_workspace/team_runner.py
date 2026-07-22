@@ -53,6 +53,7 @@ from .repair_protocol import (
     file_sha256,
     parse_replacement_plan,
     parse_reviewer_verdict,
+    replacement_content_character_limits,
     replacement_plan_json_schema,
     source_state,
 )
@@ -1008,14 +1009,17 @@ end endmodule
             if isinstance(latest_defect, dict)
             else "Earlier response did not satisfy the replacement protocol."
         )
+        content_limits = replacement_content_character_limits(source_records)
         return (
             "Return exactly one JSON object matching the supplied strict replacement schema. "
             "Do not return Markdown, prose, a diff, partial snippets, deletions, duplicate paths, "
             "or unchanged files. Each replacement content field must contain the complete file. "
             "Copy each authoritative sha256 value into expected_sha256. Use only the exact path, "
-            "language, and kind values below.\n"
+            "language, and kind values below. Keep implementations concise and never repeat "
+            "tokens, declarations, comments, or prose. Stop once each complete file is emitted.\n"
             f"Task specification: {json.dumps(task.specification, sort_keys=True, separators=(',', ':'))}\n"
             f"Allowed paths: {json.dumps(_allowed_paths(task), separators=(',', ':'))}\n"
+            f"Maximum content characters by path: {json.dumps(content_limits, sort_keys=True, separators=(',', ':'))}\n"
             f"Current validation rejection: {json.dumps(str(rejection), separators=(',', ':'))}\n"
             "Authoritative source records: "
             + json.dumps(
@@ -1243,7 +1247,11 @@ end endmodule
             )
         )
         response_schema = (
-            replacement_plan_json_schema(allowed_paths=allowed, domain=task.domain)
+            replacement_plan_json_schema(
+                allowed_paths=allowed,
+                domain=task.domain,
+                source_records=source_records,
+            )
             if qwen_reasoning_repair
             else None
         )

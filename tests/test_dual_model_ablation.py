@@ -117,15 +117,34 @@ def test_serving_profiles_are_loopback_only_and_decoding_is_configurable() -> No
     assert candidate.to_json()["max_output_tokens"] == 512
     assert candidate.structured_serialization_max_output_tokens == 512
     legacy_profile = candidate.to_json()
-    legacy_profile.pop("structured_serialization_max_output_tokens")
+    for field in (
+        "structured_serialization_max_output_tokens",
+        "structured_serialization_temperature",
+        "structured_serialization_top_p",
+        "structured_serialization_top_k",
+        "structured_serialization_presence_penalty",
+    ):
+        legacy_profile.pop(field)
     legacy_candidate = serving_candidate_from_json(legacy_profile)
     assert legacy_candidate.max_output_tokens == 512
     assert legacy_candidate.structured_serialization_max_output_tokens == 512
+    assert legacy_candidate.structured_serialization_temperature == candidate.temperature
+    assert legacy_candidate.structured_serialization_top_p == candidate.top_p
+    assert legacy_candidate.structured_serialization_top_k is None
+    assert legacy_candidate.structured_serialization_presence_penalty == 0.0
     configured_profile = candidate.to_json()
     configured_profile["structured_serialization_max_output_tokens"] = 8192
+    configured_profile["structured_serialization_temperature"] = 0.7
+    configured_profile["structured_serialization_top_p"] = 0.8
+    configured_profile["structured_serialization_top_k"] = 20
+    configured_profile["structured_serialization_presence_penalty"] = 1.5
     configured_candidate = serving_candidate_from_json(configured_profile)
     assert configured_candidate.max_output_tokens == 512
     assert configured_candidate.structured_serialization_max_output_tokens == 8192
+    assert configured_candidate.structured_serialization_temperature == 0.7
+    assert configured_candidate.structured_serialization_top_p == 0.8
+    assert configured_candidate.structured_serialization_top_k == 20
+    assert configured_candidate.structured_serialization_presence_penalty == 1.5
     configured_profile["structured_serialization_max_output_tokens"] = 8193
     with pytest.raises(ValueError, match="between 1 and 8192"):
         serving_candidate_from_json(configured_profile)

@@ -185,6 +185,18 @@ class RoutingDecision:
             "structured_serialization_max_output_tokens": (
                 self.candidate.structured_serialization_max_output_tokens
             ),
+            "structured_serialization_temperature": (
+                self.candidate.structured_serialization_temperature
+            ),
+            "structured_serialization_top_p": (
+                self.candidate.structured_serialization_top_p
+            ),
+            "structured_serialization_top_k": (
+                self.candidate.structured_serialization_top_k
+            ),
+            "structured_serialization_presence_penalty": (
+                self.candidate.structured_serialization_presence_penalty
+            ),
             "temperature": self.candidate.temperature,
             "top_p": self.candidate.top_p,
             "seed": self.candidate.seed,
@@ -461,6 +473,35 @@ class AuditedModelCaller:
             "compaction_reason": compaction_reason,
             "context_rejection_reason": None,
         }
+        structured_sampling = call_policy == "structured_replacement_serialization"
+        sampling_parameters: JsonObject = {
+            "policy": (
+                "qwen3.6_non_thinking_structured_serialization"
+                if structured_sampling
+                else "candidate_default"
+            ),
+            "temperature": (
+                decision.candidate.structured_serialization_temperature
+                if structured_sampling
+                else decision.candidate.temperature
+            ),
+            "top_p": (
+                decision.candidate.structured_serialization_top_p
+                if structured_sampling
+                else decision.candidate.top_p
+            ),
+            "top_k": (
+                decision.candidate.structured_serialization_top_k
+                if structured_sampling
+                else None
+            ),
+            "presence_penalty": (
+                decision.candidate.structured_serialization_presence_penalty
+                if structured_sampling
+                else 0.0
+            ),
+            "seed": decision.candidate.seed,
+        }
         structured_output: JsonObject = {
             "requested": response_schema is not None,
             "schema_name": schema_name if response_schema is not None else None,
@@ -498,6 +539,7 @@ class AuditedModelCaller:
                 "fallback_used": fallback_reason is not None,
                 "structured_output": structured_output,
                 "thinking_mode": thinking_mode,
+                "sampling_parameters": sampling_parameters,
                 **payload,
             }
             _write_json_atomic(path, record, readonly=True)
@@ -548,7 +590,22 @@ class AuditedModelCaller:
             )
             raise ContextBudgetError(message, budget=budget)
         try:
-            if response_schema is not None or enable_thinking is not None:
+            if structured_sampling:
+                result = backend.generate(
+                    effective_prompt,
+                    context_tokens=context_limit,
+                    max_tokens=effective_completion,
+                    response_schema=response_schema,
+                    schema_name=schema_name,
+                    enable_thinking=enable_thinking,
+                    temperature=decision.candidate.structured_serialization_temperature,
+                    top_p=decision.candidate.structured_serialization_top_p,
+                    top_k=decision.candidate.structured_serialization_top_k,
+                    presence_penalty=(
+                        decision.candidate.structured_serialization_presence_penalty
+                    ),
+                )
+            elif response_schema is not None or enable_thinking is not None:
                 result = backend.generate(
                     effective_prompt,
                     context_tokens=context_limit,
@@ -687,6 +744,10 @@ def serving_candidate_from_json(value: object) -> ServingCandidate:
         "minimum_completion_tokens",
         "reviewer_max_output_tokens",
         "structured_serialization_max_output_tokens",
+        "structured_serialization_temperature",
+        "structured_serialization_top_p",
+        "structured_serialization_top_k",
+        "structured_serialization_presence_penalty",
     }
     unexpected = sorted(set(value) - allowed)
     if unexpected:
@@ -724,12 +785,36 @@ def serving_candidate_from_json(value: object) -> ServingCandidate:
         )
     temperature = value.get("temperature", 0.0)
     top_p = value.get("top_p", 1.0)
+    structured_temperature = value.get("structured_serialization_temperature", temperature)
+    structured_top_p = value.get("structured_serialization_top_p", top_p)
+    structured_top_k = value.get("structured_serialization_top_k")
+    structured_presence_penalty = value.get(
+        "structured_serialization_presence_penalty", 0.0
+    )
     seed = value.get("seed", 0)
     model_path = value.get("model_path")
     if not isinstance(temperature, (int, float)) or isinstance(temperature, bool):
         raise ValueError("Serving profile temperature must be numeric")
     if not isinstance(top_p, (int, float)) or isinstance(top_p, bool):
         raise ValueError("Serving profile top_p must be numeric")
+    if not isinstance(structured_temperature, (int, float)) or isinstance(
+        structured_temperature, bool
+    ):
+        raise ValueError("Serving profile structured_serialization_temperature must be numeric")
+    if not isinstance(structured_top_p, (int, float)) or isinstance(structured_top_p, bool):
+        raise ValueError("Serving profile structured_serialization_top_p must be numeric")
+    if structured_top_k is not None and (
+        not isinstance(structured_top_k, int) or isinstance(structured_top_k, bool)
+    ):
+        raise ValueError(
+            "Serving profile structured_serialization_top_k must be an integer or null"
+        )
+    if not isinstance(structured_presence_penalty, (int, float)) or isinstance(
+        structured_presence_penalty, bool
+    ):
+        raise ValueError(
+            "Serving profile structured_serialization_presence_penalty must be numeric"
+        )
     if seed is not None and (not isinstance(seed, int) or isinstance(seed, bool)):
         raise ValueError("Serving profile seed must be an integer or null")
     if model_path is not None and (not isinstance(model_path, str) or not model_path.strip()):
@@ -756,6 +841,10 @@ def serving_candidate_from_json(value: object) -> ServingCandidate:
         minimum_completion_tokens=integers["minimum_completion_tokens"],
         reviewer_max_output_tokens=integers["reviewer_max_output_tokens"],
         structured_serialization_max_output_tokens=raw_structured_cap,
+        structured_serialization_temperature=float(structured_temperature),
+        structured_serialization_top_p=float(structured_top_p),
+        structured_serialization_top_k=structured_top_k,
+        structured_serialization_presence_penalty=float(structured_presence_penalty),
     )
 
 

@@ -42,6 +42,12 @@ requests at 4096 tokens and configure
 deterministic full-source JSON-size estimate plus bounded headroom, never more
 than 8192 tokens. If the estimated replacement itself cannot fit, generation is
 rejected before inference as `structured_serialization_capacity_exceeded`.
+Its schema binds paths to their current hashes and enforces deterministic
+per-file character limits. Only this non-thinking Qwen3.6 call uses the model's
+recommended instruct sampling (`temperature=0.7`, `top_p=0.8`, `top_k=20`,
+`presence_penalty=1.5`) to avoid the endless repetitions caused by greedy
+decoding; ordinary implementation, retry, reviewer, and RTL-worker calls retain
+their configured decoding settings.
 Reasoning text is never substituted for final content. Audit records retain
 final content, finish reason, token counts, and only a length/hash summary of
 reasoning. Because the constrained retry is non-thinking, the managed server

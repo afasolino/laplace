@@ -897,14 +897,23 @@ def _sha256_file(path: Path) -> str:
 
 
 def _model_configuration_compatibility_sha256(path: Path) -> str:
-    """Ignore only the terminal-fallback cap when matching already accepted pair results."""
+    """Ignore terminal-serializer-only fields when matching accepted pair results."""
     value = _read_json(path)
     changed = False
+    serializer_only_fields = {
+        "structured_serialization_max_output_tokens",
+        "structured_serialization_temperature",
+        "structured_serialization_top_p",
+        "structured_serialization_top_k",
+        "structured_serialization_presence_penalty",
+    }
     for route in ("main", "rtl_worker"):
         candidate = value.get(route)
-        if isinstance(candidate, dict) and "structured_serialization_max_output_tokens" in candidate:
-            candidate.pop("structured_serialization_max_output_tokens")
-            changed = True
+        if isinstance(candidate, dict):
+            for field in serializer_only_fields:
+                if field in candidate:
+                    candidate.pop(field)
+                    changed = True
     if not changed:
         return _sha256_file(path)
     legacy_bytes = (json.dumps(value, indent=2) + "\n").encode("utf-8")
@@ -2072,6 +2081,18 @@ def _write_phase_manifest(
                 "max_output_tokens": arm.models.main.max_output_tokens,
                 "structured_serialization_max_output_tokens": (
                     arm.models.main.structured_serialization_max_output_tokens
+                ),
+                "structured_serialization_temperature": (
+                    arm.models.main.structured_serialization_temperature
+                ),
+                "structured_serialization_top_p": (
+                    arm.models.main.structured_serialization_top_p
+                ),
+                "structured_serialization_top_k": (
+                    arm.models.main.structured_serialization_top_k
+                ),
+                "structured_serialization_presence_penalty": (
+                    arm.models.main.structured_serialization_presence_penalty
                 ),
                 "context_tokens": arm.models.main.context_tokens,
             }

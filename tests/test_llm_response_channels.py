@@ -22,6 +22,7 @@ from research_workspace.multilanguage_ablation import _model_response_failure_ca
 from research_workspace.repair_protocol import (
     estimate_replacement_plan_tokens,
     parse_replacement_plan,
+    replacement_content_character_limits,
     replacement_plan_json_schema,
 )
 from research_workspace.team_runner import LocalTeamRunner, Worktree
@@ -169,6 +170,10 @@ def test_schema_constrained_json_request_is_valid_and_disables_only_that_call(
         response_schema=schema,
         schema_name="smoke",
         enable_thinking=False,
+        temperature=0.7,
+        top_p=0.8,
+        top_k=20,
+        presence_penalty=1.5,
     )
     assert json.loads(result.text) == {"status": "READY"}
     assert requests[0]["response_format"] == {
@@ -176,6 +181,10 @@ def test_schema_constrained_json_request_is_valid_and_disables_only_that_call(
         "json_schema": {"name": "smoke", "schema": schema, "strict": True},
     }
     assert requests[0]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert requests[0]["temperature"] == 0.7
+    assert requests[0]["top_p"] == 0.8
+    assert requests[0]["top_k"] == 20
+    assert requests[0]["presence_penalty"] == 1.5
 
 
 class _ResultBackend:
@@ -195,6 +204,10 @@ class _ResultBackend:
         response_schema: dict[str, object] | None = None,
         schema_name: str | None = None,
         enable_thinking: bool | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        presence_penalty: float | None = None,
     ) -> GenerationResult:
         self.options.append(
             {
@@ -204,6 +217,10 @@ class _ResultBackend:
                 "response_schema": response_schema,
                 "schema_name": schema_name,
                 "enable_thinking": enable_thinking,
+                "temperature": temperature,
+                "top_p": top_p,
+                "top_k": top_k,
+                "presence_penalty": presence_penalty,
             }
         )
         return self.results.pop(0)
@@ -234,6 +251,10 @@ def _candidate(
         context_tokens=32768,
         max_output_tokens=4096,
         structured_serialization_max_output_tokens=structured_cap,
+        structured_serialization_temperature=0.7,
+        structured_serialization_top_p=0.8,
+        structured_serialization_top_k=20,
+        structured_serialization_presence_penalty=1.5,
     )
 
 
@@ -254,6 +275,24 @@ def _source_context(source: Path, *, domain: str = "python") -> dict[str, object
             }
         ],
     }
+
+
+def test_final_schema_binds_source_identity_and_bounds_content(tmp_path: Path) -> None:
+    source = tmp_path / "candidate.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    records = _source_context(source)["current_worktree_sources"]
+    schema = replacement_plan_json_schema(
+        allowed_paths=["candidate.py"], domain="python", source_records=records
+    )
+    replacements = schema["properties"]["replacements"]
+    variant = replacements["items"]["oneOf"][0]
+    properties = variant["properties"]
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    assert properties["path"] == {"const": "candidate.py"}
+    assert properties["expected_sha256"] == {"const": digest}
+    assert properties["kind"] == {"const": "source"}
+    assert properties["content"]["maxLength"] == 4106
+    assert replacement_content_character_limits(records) == {"candidate.py": 4106}
 
 
 def test_empty_final_content_after_reasoning_is_not_accepted(tmp_path: Path) -> None:
@@ -435,10 +474,18 @@ def test_structured_repair_retry_eventually_succeeds(tmp_path: Path) -> None:
     assert backend.options[0]["max_tokens"] == 4096
     assert backend.options[1]["max_tokens"] == 4096
     assert backend.options[2]["response_schema"] == replacement_plan_json_schema(
-        allowed_paths=["candidate.py"], domain="python"
+        allowed_paths=["candidate.py"],
+        domain="python",
+        source_records=current_sources["current_worktree_sources"],
     )
     assert backend.options[2]["enable_thinking"] is False
     assert backend.options[2]["max_tokens"] == 8192
+    assert backend.options[0]["temperature"] is None
+    assert backend.options[1]["temperature"] is None
+    assert backend.options[2]["temperature"] == 0.7
+    assert backend.options[2]["top_p"] == 0.8
+    assert backend.options[2]["top_k"] == 20
+    assert backend.options[2]["presence_penalty"] == 1.5
 
 
 def test_primary_and_ordinary_qwen_retry_remain_capped_at_4096(tmp_path: Path) -> None:
@@ -494,6 +541,15 @@ def test_structured_override_uses_dedicated_cap_without_raising_normal_cap(
     assert call.budget["normal_output_cap"] == 4096
     assert call.budget["structured_serialization_max_output_tokens"] == 8192
     assert call.budget["selected_output_cap"] == 7000
+    audit = json.loads(Path(call.audit_path).read_text(encoding="utf-8"))
+    assert audit["sampling_parameters"] == {
+        "policy": "qwen3.6_non_thinking_structured_serialization",
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "top_k": 20,
+        "presence_penalty": 1.5,
+        "seed": 0,
+    }
 
 
 def test_non_qwen_final_attempt_remains_standard(tmp_path: Path) -> None:
@@ -584,6 +640,10 @@ def test_phase3_worker_route_cannot_inherit_qwen_serializer_policy(tmp_path: Pat
     )
     assert normal.decision.selected == "rtl_worker"
     assert worker_backend.options[0]["max_tokens"] == 4096
+    assert worker_backend.options[0]["temperature"] is None
+    assert worker_backend.options[0]["top_p"] is None
+    assert worker_backend.options[0]["top_k"] is None
+    assert worker_backend.options[0]["presence_penalty"] is None
     with pytest.raises(EngineeringError, match="routed Qwen3.6 main model"):
         caller.generate(
             "incorrect serializer routing",

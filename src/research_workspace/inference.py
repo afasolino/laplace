@@ -42,6 +42,10 @@ class ServingCandidate:
     minimum_completion_tokens: int = 256
     reviewer_max_output_tokens: int = 768
     structured_serialization_max_output_tokens: int | None = None
+    structured_serialization_temperature: float | None = None
+    structured_serialization_top_p: float | None = None
+    structured_serialization_top_k: int | None = None
+    structured_serialization_presence_penalty: float = 0.0
 
     def __post_init__(self) -> None:
         parsed = urlparse(self.endpoint)
@@ -61,10 +65,34 @@ class ServingCandidate:
             raise ValueError(
                 "Structured serialization max output must be between 1 and 8192"
             )
+        structured_temperature = self.structured_serialization_temperature
+        if structured_temperature is None:
+            structured_temperature = self.temperature
+            object.__setattr__(
+                self, "structured_serialization_temperature", structured_temperature
+            )
+        structured_top_p = self.structured_serialization_top_p
+        if structured_top_p is None:
+            structured_top_p = self.top_p
+            object.__setattr__(self, "structured_serialization_top_p", structured_top_p)
         if self.temperature < 0.0 or self.temperature > 2.0:
             raise ValueError("Serving temperature must be between 0 and 2")
         if self.top_p <= 0.0 or self.top_p > 1.0:
             raise ValueError("Serving top_p must be greater than 0 and at most 1")
+        if structured_temperature < 0.0 or structured_temperature > 2.0:
+            raise ValueError("Structured serialization temperature must be between 0 and 2")
+        if structured_top_p <= 0.0 or structured_top_p > 1.0:
+            raise ValueError(
+                "Structured serialization top_p must be greater than 0 and at most 1"
+            )
+        if self.structured_serialization_top_k is not None and not (
+            1 <= self.structured_serialization_top_k <= 1000
+        ):
+            raise ValueError("Structured serialization top_k must be between 1 and 1000")
+        if not -2.0 <= self.structured_serialization_presence_penalty <= 2.0:
+            raise ValueError(
+                "Structured serialization presence penalty must be between -2 and 2"
+            )
         if self.request_timeout_seconds < 1 or self.request_timeout_seconds > 1800:
             raise ValueError("Serving request timeout must be between 1 and 1800 seconds")
         if self.context_safety_margin_tokens < 64 or self.context_safety_margin_tokens > 4096:
@@ -100,6 +128,14 @@ class ServingCandidate:
             "reviewer_max_output_tokens": self.reviewer_max_output_tokens,
             "structured_serialization_max_output_tokens": (
                 self.structured_serialization_max_output_tokens
+            ),
+            "structured_serialization_temperature": (
+                self.structured_serialization_temperature
+            ),
+            "structured_serialization_top_p": self.structured_serialization_top_p,
+            "structured_serialization_top_k": self.structured_serialization_top_k,
+            "structured_serialization_presence_penalty": (
+                self.structured_serialization_presence_penalty
             ),
         }
 

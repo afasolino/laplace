@@ -65,6 +65,10 @@ class LocalGenerationBackend(Protocol):
         response_schema: dict[str, object] | None = None,
         schema_name: str | None = None,
         enable_thinking: bool | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        presence_penalty: float | None = None,
     ) -> GenerationResult:
         """Generate one bounded response through a local endpoint."""
 
@@ -88,6 +92,10 @@ class Provider:
         response_schema: dict[str, object] | None = None,
         schema_name: str | None = None,
         enable_thinking: bool | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        presence_penalty: float | None = None,
     ) -> GenerationResult:
         raise NotImplementedError
 
@@ -111,8 +119,21 @@ class MockProvider(Provider):
         response_schema: dict[str, object] | None = None,
         schema_name: str | None = None,
         enable_thinking: bool | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        presence_penalty: float | None = None,
     ) -> GenerationResult:
-        del max_tokens, response_schema, schema_name, enable_thinking
+        del (
+            max_tokens,
+            response_schema,
+            schema_name,
+            enable_thinking,
+            temperature,
+            top_p,
+            top_k,
+            presence_penalty,
+        )
         return GenerationResult("[MOCK] " + prompt[:200], "mock", 0.0, None, "mock")
 
     def token_count(self, prompt: str) -> int:
@@ -145,8 +166,20 @@ class OllamaProvider(Provider):
         response_schema: dict[str, object] | None = None,
         schema_name: str | None = None,
         enable_thinking: bool | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        presence_penalty: float | None = None,
     ) -> GenerationResult:
-        del response_schema, schema_name, enable_thinking
+        del (
+            response_schema,
+            schema_name,
+            enable_thinking,
+            temperature,
+            top_p,
+            top_k,
+            presence_penalty,
+        )
         effective_max_tokens = 512 if max_tokens is None else max_tokens
         payload = json.dumps(
             {
@@ -263,12 +296,18 @@ class OpenAICompatibleProvider(Provider):
         response_schema: dict[str, object] | None = None,
         schema_name: str | None = None,
         enable_thinking: bool | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        presence_penalty: float | None = None,
     ) -> dict[str, object]:
+        effective_temperature = self.temperature if temperature is None else temperature
+        effective_top_p = self.top_p if top_p is None else top_p
         payload: dict[str, object] = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": self.temperature,
-            "top_p": self.top_p,
+            "temperature": effective_temperature,
+            "top_p": effective_top_p,
             "max_tokens": self.max_tokens if max_tokens is None else max_tokens,
             "stream": stream,
         }
@@ -287,6 +326,10 @@ class OpenAICompatibleProvider(Provider):
             }
         if enable_thinking is not None:
             payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
+        if top_k is not None:
+            payload["top_k"] = top_k
+        if presence_penalty is not None:
+            payload["presence_penalty"] = presence_penalty
         return payload
 
     @staticmethod
@@ -325,6 +368,10 @@ class OpenAICompatibleProvider(Provider):
         response_schema: dict[str, object] | None = None,
         schema_name: str | None = None,
         enable_thinking: bool | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        presence_penalty: float | None = None,
     ) -> GenerationResult:
         del context_tokens
         payload = json.dumps(
@@ -335,6 +382,10 @@ class OpenAICompatibleProvider(Provider):
                 response_schema=response_schema,
                 schema_name=schema_name,
                 enable_thinking=enable_thinking,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                presence_penalty=presence_penalty,
             )
         ).encode()
         request = urllib.request.Request(
@@ -398,6 +449,10 @@ class OpenAICompatibleProvider(Provider):
         response_schema: dict[str, object] | None = None,
         schema_name: str | None = None,
         enable_thinking: bool | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        presence_penalty: float | None = None,
     ) -> GenerationResult:
         """Measure a loopback OpenAI stream using server-reported token counts."""
         payload = json.dumps(
@@ -408,6 +463,10 @@ class OpenAICompatibleProvider(Provider):
                 response_schema=response_schema,
                 schema_name=schema_name,
                 enable_thinking=enable_thinking,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                presence_penalty=presence_penalty,
             )
         ).encode()
         request = urllib.request.Request(
@@ -573,6 +632,10 @@ class VllmProvider(OpenAICompatibleProvider):
         response_schema: dict[str, object] | None = None,
         schema_name: str | None = None,
         enable_thinking: bool | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        presence_penalty: float | None = None,
     ) -> GenerationResult:
         del context_tokens
         return self._generate_streaming(
@@ -581,6 +644,10 @@ class VllmProvider(OpenAICompatibleProvider):
             response_schema=response_schema,
             schema_name=schema_name,
             enable_thinking=enable_thinking,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            presence_penalty=presence_penalty,
         )
 
     def model_identity(self) -> dict[str, str]:
