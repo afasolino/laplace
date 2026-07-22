@@ -41,6 +41,7 @@ class ServingCandidate:
     context_safety_margin_tokens: int = 512
     minimum_completion_tokens: int = 256
     reviewer_max_output_tokens: int = 768
+    structured_serialization_max_output_tokens: int | None = None
 
     def __post_init__(self) -> None:
         parsed = urlparse(self.endpoint)
@@ -52,6 +53,14 @@ class ServingCandidate:
             raise ValueError("Serving context_tokens must be between 1024 and 262144")
         if self.max_output_tokens < 1 or self.max_output_tokens > 8192:
             raise ValueError("Serving max_output_tokens must be between 1 and 8192")
+        structured_cap = self.structured_serialization_max_output_tokens
+        if structured_cap is None:
+            structured_cap = self.max_output_tokens
+            object.__setattr__(self, "structured_serialization_max_output_tokens", structured_cap)
+        if structured_cap < 1 or structured_cap > 8192:
+            raise ValueError(
+                "Structured serialization max output must be between 1 and 8192"
+            )
         if self.temperature < 0.0 or self.temperature > 2.0:
             raise ValueError("Serving temperature must be between 0 and 2")
         if self.top_p <= 0.0 or self.top_p > 1.0:
@@ -89,6 +98,9 @@ class ServingCandidate:
             "context_safety_margin_tokens": self.context_safety_margin_tokens,
             "minimum_completion_tokens": self.minimum_completion_tokens,
             "reviewer_max_output_tokens": self.reviewer_max_output_tokens,
+            "structured_serialization_max_output_tokens": (
+                self.structured_serialization_max_output_tokens
+            ),
         }
 
 

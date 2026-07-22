@@ -56,15 +56,23 @@ from .model_artifacts import (
     validate_serving_environments,
 )
 from .model_routing import (
+    AuditedModelCaller,
     ContextBudgetError,
     DualModelConfiguration,
+    RoleRouter,
     RtlScope,
     RoutingTaskMetadata,
+    STRUCTURED_SERIALIZATION_SAFETY_MARGIN_TOKENS,
+    StructuredSerializationCapacityError,
     assess_rtl_worker_eligibility,
     load_dual_model_configuration,
 )
 from .llm import ModelInvocationError, ModelRequired
-from .repair_protocol import parse_replacement_plan, replacement_plan_json_schema
+from .repair_protocol import (
+    estimate_replacement_plan_tokens,
+    parse_replacement_plan,
+    replacement_plan_json_schema,
+)
 from .team_runner import (
     LocalTeamRunner,
     TeamWorkflowOptions,
@@ -888,6 +896,21 @@ def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _model_configuration_compatibility_sha256(path: Path) -> str:
+    """Ignore only the terminal-fallback cap when matching already accepted pair results."""
+    value = _read_json(path)
+    changed = False
+    for route in ("main", "rtl_worker"):
+        candidate = value.get(route)
+        if isinstance(candidate, dict) and "structured_serialization_max_output_tokens" in candidate:
+            candidate.pop("structured_serialization_max_output_tokens")
+            changed = True
+    if not changed:
+        return _sha256_file(path)
+    legacy_bytes = (json.dumps(value, indent=2) + "\n").encode("utf-8")
+    return hashlib.sha256(legacy_bytes).hexdigest()
+
+
 def _git_worktree_clean(repository_root: Path) -> bool:
     git = shutil.which("git")
     if git is None:
@@ -981,7 +1004,8 @@ def _configuration_fingerprint(
         "experiment_sha256": _sha256_file(configuration.path),
         "model_artifacts_sha256": _sha256_file(configuration.model_artifacts_path),
         "model_configuration_hashes": {
-            arm.arm_id: _sha256_file(arm.models_path) for arm in configuration.arms
+            arm.arm_id: _model_configuration_compatibility_sha256(arm.models_path)
+            for arm in configuration.arms
         },
         "corpus_hashes": corpus_hashes or {},
         "held_out_manifest_sha256": held_out_manifest_sha256,
@@ -1426,7 +1450,7 @@ def validate_runtime(
 def smoke_runtime(
     repository_root: Path, configuration: ExperimentConfiguration, phase_id: PhaseId
 ) -> JsonObject:
-    """Generate minimal ordinary and constrained responses before any task pair runs."""
+    """Verify normal caps and a >4096-token strict Qwen replacement before task execution."""
     runtime = validate_runtime(repository_root, configuration, phase_id)
     if runtime.get("status") != "RUNTIME_READY":
         return {"status": "FAILED", "phase_id": phase_id, "runtime": runtime, "calls": []}
@@ -1437,14 +1461,6 @@ def smoke_runtime(
     smoke_directory = tempfile.TemporaryDirectory(prefix="laplace-runtime-smoke-")
     smoke_root = Path(smoke_directory.name)
     smoke_source = smoke_root / "smoke.py"
-    smoke_source.write_text("value = 0\n", encoding="utf-8")
-    smoke_digest = hashlib.sha256(smoke_source.read_bytes()).hexdigest()
-    schema = replacement_plan_json_schema(allowed_paths=["smoke.py"], domain="python")
-    structured_prompt = (
-        "Return exactly one replacement-plan JSON object for smoke.py. Set schema_version to 1, "
-        "language to python, kind to source, expected_sha256 to "
-        f"{smoke_digest}, and content to non-empty Python source containing value = 1."
-    )
     for arm in _phase_arms(configuration, phase_id):
         candidates = [("main", arm.models.main)]
         if arm.worker_enabled and arm.models.rtl_worker is not None:
@@ -1453,28 +1469,143 @@ def smoke_runtime(
             backend = backend_for(candidate)
             reasoning_expected = "qwen3.6" in candidate.model.lower()
             try:
-                ordinary = backend.generate(
-                    "Reason briefly about whether two plus three equals five, then provide the "
-                    "single-word final answer READY.",
-                    context_tokens=candidate.context_tokens,
-                    max_tokens=candidate.max_output_tokens,
-                    enable_thinking=True if reasoning_expected else None,
+                smoke_caller = AuditedModelCaller(
+                    RoleRouter(DualModelConfiguration(main=candidate)),
+                    configuration.output_root / "runtime_smoke_logs" / "model_calls",
                 )
-                structured = backend.generate(
-                    structured_prompt,
-                    context_tokens=candidate.context_tokens,
-                    max_tokens=min(candidate.max_output_tokens, 512),
-                    response_schema=schema,
-                    schema_name="laplace_runtime_smoke",
-                    enable_thinking=False if reasoning_expected else None,
-                )
-                parse_replacement_plan(
-                    structured.text,
-                    root=smoke_root,
-                    allowed_paths=["smoke.py"],
+                metadata = RoutingTaskMetadata.single_model(
+                    task_id=f"runtime_smoke_{phase_id}_{arm.arm_id}_{route}",
+                    experiment_arm=arm.arm_id,
                     domain="python",
                 )
-                structured_valid = True
+                ordinary_call = smoke_caller.generate(
+                    "Reason briefly about whether two plus three equals five, then provide the "
+                    "single-word final answer READY.",
+                    role="general_implementation",
+                    metadata=metadata,
+                    enable_thinking=True if reasoning_expected else None,
+                )
+                ordinary = ordinary_call.result
+                synthetic_response_tokens: int | None = None
+                if reasoning_expected:
+                    expected_text: str | None = None
+                    expected_value: JsonObject | None = None
+                    current_content = ""
+                    replacement_content = ""
+                    for line_count in range(600, 1201, 50):
+                        current_content = "".join(
+                            f"value_{index:04d} = 0\n" for index in range(line_count)
+                        )
+                        replacement_content = "".join(
+                            f"value_{index:04d} = 1\n" for index in range(line_count)
+                        )
+                        smoke_source.write_text(current_content, encoding="utf-8")
+                        smoke_digest = hashlib.sha256(smoke_source.read_bytes()).hexdigest()
+                        expected_value = {
+                            "schema_version": 1,
+                            "replacements": [
+                                {
+                                    "path": "smoke.py",
+                                    "language": "python",
+                                    "kind": "source",
+                                    "expected_sha256": smoke_digest,
+                                    "content": replacement_content,
+                                }
+                            ],
+                        }
+                        expected_text = json.dumps(
+                            expected_value, ensure_ascii=False, separators=(",", ":")
+                        )
+                        synthetic_response_tokens = backend.token_count(expected_text)
+                        if 4600 <= synthetic_response_tokens <= 6500:
+                            break
+                    if (
+                        expected_text is None
+                        or expected_value is None
+                        or synthetic_response_tokens is None
+                        or not 4096 < synthetic_response_tokens <= 8192
+                    ):
+                        raise EngineeringError(
+                            "Could not construct a bounded >4096-token serialization smoke payload"
+                        )
+                    schema = replacement_plan_json_schema(
+                        allowed_paths=["smoke.py"], domain="python"
+                    )
+                    properties = schema.get("properties")
+                    replacements_schema = (
+                        properties.get("replacements") if isinstance(properties, dict) else None
+                    )
+                    item_schema = (
+                        replacements_schema.get("items")
+                        if isinstance(replacements_schema, dict)
+                        else None
+                    )
+                    item_properties = (
+                        item_schema.get("properties") if isinstance(item_schema, dict) else None
+                    )
+                    if not isinstance(item_properties, dict):
+                        raise EngineeringError("Synthetic replacement schema is malformed")
+                    item_properties["kind"] = {"const": "source"}
+                    item_properties["expected_sha256"] = {
+                        "type": "string",
+                        "const": smoke_digest,
+                    }
+                    item_properties["content"] = {
+                        "type": "string",
+                        "const": replacement_content,
+                    }
+                    source_records = [
+                        {
+                            "path": "smoke.py",
+                            "language": "python",
+                            "kind": "source",
+                            "sha256": smoke_digest,
+                            "content": current_content,
+                        }
+                    ]
+                    estimated_tokens = estimate_replacement_plan_tokens(source_records)
+                    structured_call = smoke_caller.generate(
+                        "Return the one replacement object required by the strict supplied schema.",
+                        role="general_implementation",
+                        metadata=metadata,
+                        validator=lambda text: parse_replacement_plan(
+                            text,
+                            root=smoke_root,
+                            allowed_paths=["smoke.py"],
+                            domain="python",
+                        ),
+                        response_schema=schema,
+                        schema_name="laplace_replacement_plan",
+                        enable_thinking=False,
+                        call_policy="structured_replacement_serialization",
+                        estimated_serialization_tokens=estimated_tokens,
+                        serialization_safety_margin_tokens=(
+                            STRUCTURED_SERIALIZATION_SAFETY_MARGIN_TOKENS
+                        ),
+                    )
+                    structured = structured_call.result
+                    structured_valid = structured_call.response_valid
+                else:
+                    smoke_source.write_text("value = 0\n", encoding="utf-8")
+                    smoke_digest = hashlib.sha256(smoke_source.read_bytes()).hexdigest()
+                    schema = replacement_plan_json_schema(
+                        allowed_paths=["smoke.py"], domain="python"
+                    )
+                    structured = backend.generate(
+                        "Return one valid replacement-plan JSON object for smoke.py with expected_sha256 "
+                        f"{smoke_digest} and non-empty Python content.",
+                        context_tokens=candidate.context_tokens,
+                        max_tokens=min(candidate.max_output_tokens, 512),
+                        response_schema=schema,
+                        schema_name="laplace_runtime_smoke",
+                    )
+                    parse_replacement_plan(
+                        structured.text,
+                        root=smoke_root,
+                        allowed_paths=["smoke.py"],
+                        domain="python",
+                    )
+                    structured_valid = True
                 ordinary_valid = bool(ordinary.text.strip()) and ordinary.finish_reason != "length"
                 separated = (
                     bool(ordinary.reasoning_text) and bool(ordinary.text.strip())
@@ -1503,9 +1634,18 @@ def smoke_runtime(
                             "prompt_tokens": ordinary.prompt_tokens,
                             "completion_tokens": ordinary.completion_tokens,
                             "reasoning_tokens": ordinary.reasoning_tokens,
+                            "requested_cap": ordinary_call.budget[
+                                "requested_completion_tokens"
+                            ],
+                            "effective_cap": ordinary_call.budget[
+                                "effective_completion_token_cap"
+                            ],
                         },
                         "structured_repair": {
-                            "content": structured.text,
+                            "content_characters": len(structured.text),
+                            "content_sha256": hashlib.sha256(
+                                structured.text.encode("utf-8")
+                            ).hexdigest(),
                             "valid": structured_valid,
                             "finish_reason": structured.finish_reason,
                             "reasoning_present": bool(structured.reasoning_text),
@@ -1513,6 +1653,25 @@ def smoke_runtime(
                             "thinking_enabled": False if reasoning_expected else None,
                             "prompt_tokens": structured.prompt_tokens,
                             "completion_tokens": structured.completion_tokens,
+                            "synthetic_response_tokens": synthetic_response_tokens,
+                            "requested_cap": (
+                                structured_call.budget["requested_completion_tokens"]
+                                if reasoning_expected
+                                else min(candidate.max_output_tokens, 512)
+                            ),
+                            "effective_cap": (
+                                structured_call.budget["effective_completion_token_cap"]
+                                if reasoning_expected
+                                else min(candidate.max_output_tokens, 512)
+                            ),
+                            "call_policy": (
+                                structured_call.budget["call_policy"]
+                                if reasoning_expected
+                                else "standard"
+                            ),
+                            "audit_path": (
+                                structured_call.audit_path if reasoning_expected else None
+                            ),
                         },
                         "response_channels_separate": separated,
                     }
@@ -1911,6 +2070,9 @@ def _write_phase_manifest(
                 "top_p": arm.models.main.top_p,
                 "seed": arm.models.main.seed,
                 "max_output_tokens": arm.models.main.max_output_tokens,
+                "structured_serialization_max_output_tokens": (
+                    arm.models.main.structured_serialization_max_output_tokens
+                ),
                 "context_tokens": arm.models.main.context_tokens,
             }
             for arm in _phase_arms(configuration, phase_id)
@@ -2392,6 +2554,8 @@ def _task_failure_stage(task_value: JsonObject | None) -> str:
 def _exception_failure_category(exc: Exception) -> str:
     if isinstance(exc, ContextBudgetError):
         return "context_overflow"
+    if isinstance(exc, StructuredSerializationCapacityError):
+        return "structured_serialization_capacity_exceeded"
     if isinstance(exc, ModelInvocationError):
         return exc.category
     if isinstance(exc, ModelRequired):

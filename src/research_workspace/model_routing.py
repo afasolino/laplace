@@ -34,6 +34,8 @@ ModelRole = Literal[
     "bounded_rtl_repair",
     "review",
 ]
+ModelCallPolicy = Literal["standard", "structured_replacement_serialization"]
+STRUCTURED_SERIALIZATION_SAFETY_MARGIN_TOKENS = 8192
 TaskKind = Literal["implementation", "repair", "integration"]
 RtlScope = Literal[
     "bounded_module",
@@ -180,6 +182,9 @@ class RoutingDecision:
             "quantization": self.candidate.quantization,
             "context_tokens": self.candidate.context_tokens,
             "max_output_tokens": self.candidate.max_output_tokens,
+            "structured_serialization_max_output_tokens": (
+                self.candidate.structured_serialization_max_output_tokens
+            ),
             "temperature": self.candidate.temperature,
             "top_p": self.candidate.top_p,
             "seed": self.candidate.seed,
@@ -254,6 +259,15 @@ class ContextBudgetError(ModelRequired):
         self.budget = budget
 
 
+class StructuredSerializationCapacityError(ModelRequired):
+    """The bounded structured replacement cannot fit before generation starts."""
+
+    def __init__(self, message: str, *, budget: JsonObject) -> None:
+        super().__init__(message)
+        self.category = "structured_serialization_capacity_exceeded"
+        self.budget = budget
+
+
 _ROLE_COMPLETION_CAPS: dict[ModelRole, int | None] = {
     "planning_supervision": 1536,
     "retrieval_interpretation": 1024,
@@ -314,14 +328,33 @@ class AuditedModelCaller:
 
     @staticmethod
     def _requested_completion_tokens(
-        decision: RoutingDecision, role: ModelRole, override: int | None
+        decision: RoutingDecision,
+        role: ModelRole,
+        override: int | None,
+        call_policy: ModelCallPolicy,
+        estimated_serialization_tokens: int | None,
+        serialization_safety_margin_tokens: int,
     ) -> int:
-        configured = decision.candidate.max_output_tokens
+        normal_cap = decision.candidate.max_output_tokens
+        structured_cap = decision.candidate.structured_serialization_max_output_tokens
+        if structured_cap is None:
+            structured_cap = normal_cap
+        configured = (
+            structured_cap
+            if call_policy == "structured_replacement_serialization"
+            else normal_cap
+        )
         role_cap = (
             decision.candidate.reviewer_max_output_tokens
             if role == "review"
             else _ROLE_COMPLETION_CAPS[role]
         )
+        if call_policy == "structured_replacement_serialization" and override is None:
+            estimated = estimated_serialization_tokens or 0
+            override = min(
+                structured_cap,
+                max(normal_cap, estimated + serialization_safety_margin_tokens),
+            )
         values = [configured]
         if role_cap is not None:
             values.append(role_cap)
@@ -345,6 +378,9 @@ class AuditedModelCaller:
         response_schema: JsonObject | None = None,
         schema_name: str | None = None,
         enable_thinking: bool | None = None,
+        call_policy: ModelCallPolicy = "standard",
+        estimated_serialization_tokens: int | None = None,
+        serialization_safety_margin_tokens: int = 0,
     ) -> RoutedCall:
         if not prompt.strip():
             raise EngineeringError("Model prompt cannot be empty")
@@ -353,11 +389,33 @@ class AuditedModelCaller:
             if fallback_reason is not None
             else self.router.select(role, metadata)
         )
+        if estimated_serialization_tokens is not None and estimated_serialization_tokens < 1:
+            raise EngineeringError("Estimated serialization tokens must be positive")
+        if serialization_safety_margin_tokens < 0:
+            raise EngineeringError("Serialization safety margin cannot be negative")
+        if call_policy == "structured_replacement_serialization" and (
+            response_schema is None
+            or schema_name != "laplace_replacement_plan"
+            or enable_thinking is not False
+            or decision.selected != "main"
+            or "qwen3.6" not in decision.candidate.model.lower()
+        ):
+            raise EngineeringError(
+                "Structured replacement serialization requires the routed Qwen3.6 main model, "
+                "the strict replacement schema, and thinking explicitly disabled"
+            )
         backend = self._backend(decision.candidate)
         call_id = uuid.uuid4().hex
         started = time.monotonic()
         created_at = datetime.now(UTC).isoformat()
-        requested = self._requested_completion_tokens(decision, role, requested_completion_tokens)
+        requested = self._requested_completion_tokens(
+            decision,
+            role,
+            requested_completion_tokens,
+            call_policy,
+            estimated_serialization_tokens,
+            serialization_safety_margin_tokens,
+        )
         context_limit = decision.candidate.context_tokens
         safety_margin = decision.candidate.context_safety_margin_tokens
         minimum_completion = min(requested, decision.candidate.minimum_completion_tokens)
@@ -383,6 +441,14 @@ class AuditedModelCaller:
                 capacity = max(0, context_limit - safety_margin - prompt_tokens)
                 effective_completion = min(requested, capacity)
         budget: JsonObject = {
+            "call_policy": call_policy,
+            "normal_output_cap": decision.candidate.max_output_tokens,
+            "structured_serialization_max_output_tokens": (
+                decision.candidate.structured_serialization_max_output_tokens
+            ),
+            "estimated_serialization_tokens": estimated_serialization_tokens,
+            "serialization_safety_margin_tokens": serialization_safety_margin_tokens,
+            "selected_output_cap": requested,
             "prompt_tokens": prompt_tokens,
             "prompt_token_count_method": token_count_method,
             "tokenizer_error": tokenizer_error,
@@ -436,6 +502,33 @@ class AuditedModelCaller:
             }
             _write_json_atomic(path, record, readonly=True)
 
+        structured_cap = decision.candidate.structured_serialization_max_output_tokens
+        if structured_cap is None:
+            structured_cap = decision.candidate.max_output_tokens
+        if call_policy == "structured_replacement_serialization" and (
+            estimated_serialization_tokens is not None
+            and (
+                estimated_serialization_tokens > structured_cap
+                or estimated_serialization_tokens > effective_completion
+            )
+        ):
+            elapsed = time.monotonic() - started
+            message = (
+                "Estimated strict replacement serialization requires "
+                f"{estimated_serialization_tokens} tokens but the bounded effective cap is "
+                f"{effective_completion} (configured maximum {structured_cap})"
+            )
+            write_audit(
+                {
+                    "completion_tokens": None,
+                    "generation_seconds": elapsed,
+                    "response_valid": False,
+                    "status": "STRUCTURED_SERIALIZATION_CAPACITY_REJECTED",
+                    "failure_category": "structured_serialization_capacity_exceeded",
+                    "error": message,
+                }
+            )
+            raise StructuredSerializationCapacityError(message, budget=budget)
         if effective_completion < minimum_completion:
             budget["context_rejection_reason"] = (
                 f"prompt={prompt_tokens} + safety={safety_margin} leaves "
@@ -593,6 +686,7 @@ def serving_candidate_from_json(value: object) -> ServingCandidate:
         "context_safety_margin_tokens",
         "minimum_completion_tokens",
         "reviewer_max_output_tokens",
+        "structured_serialization_max_output_tokens",
     }
     unexpected = sorted(set(value) - allowed)
     if unexpected:
@@ -621,6 +715,13 @@ def serving_candidate_from_json(value: object) -> ServingCandidate:
         if not isinstance(raw, int) or isinstance(raw, bool):
             raise ValueError(f"Serving profile {key} must be an integer")
         integers[key] = raw
+    raw_structured_cap = value.get(
+        "structured_serialization_max_output_tokens", integers["max_output_tokens"]
+    )
+    if not isinstance(raw_structured_cap, int) or isinstance(raw_structured_cap, bool):
+        raise ValueError(
+            "Serving profile structured_serialization_max_output_tokens must be an integer"
+        )
     temperature = value.get("temperature", 0.0)
     top_p = value.get("top_p", 1.0)
     seed = value.get("seed", 0)
@@ -654,6 +755,7 @@ def serving_candidate_from_json(value: object) -> ServingCandidate:
         context_safety_margin_tokens=integers["context_safety_margin_tokens"],
         minimum_completion_tokens=integers["minimum_completion_tokens"],
         reviewer_max_output_tokens=integers["reviewer_max_output_tokens"],
+        structured_serialization_max_output_tokens=raw_structured_cap,
     )
 
 

@@ -38,15 +38,18 @@ from .llm import ModelRequired
 from .model_routing import (
     AuditedModelCaller,
     DualModelConfiguration,
+    ModelCallPolicy,
     ModelRole,
     RoleRouter,
     RoutedCall,
     RoutingTaskMetadata,
+    STRUCTURED_SERIALIZATION_SAFETY_MARGIN_TOKENS,
     assess_rtl_worker_eligibility,
 )
 from .repair_protocol import (
     StructuredOutputError,
     build_local_patch,
+    estimate_replacement_plan_tokens,
     file_sha256,
     parse_replacement_plan,
     parse_reviewer_verdict,
@@ -989,6 +992,40 @@ end endmodule
             f"Repair status: {repair}"
         )
 
+    def _structured_serialization_prompt(
+        self,
+        task: AgentTask,
+        *,
+        current_sources: JsonObject,
+        latest_defect: JsonObject | None,
+    ) -> str:
+        """Keep only authoritative inputs needed for the bounded final JSON serialization."""
+        source_records = current_sources.get("current_worktree_sources")
+        if not isinstance(source_records, list) or not source_records:
+            raise EngineeringError("Structured serialization requires complete source state")
+        rejection = (
+            latest_defect.get("observed_result")
+            if isinstance(latest_defect, dict)
+            else "Earlier response did not satisfy the replacement protocol."
+        )
+        return (
+            "Return exactly one JSON object matching the supplied strict replacement schema. "
+            "Do not return Markdown, prose, a diff, partial snippets, deletions, duplicate paths, "
+            "or unchanged files. Each replacement content field must contain the complete file. "
+            "Copy each authoritative sha256 value into expected_sha256. Use only the exact path, "
+            "language, and kind values below.\n"
+            f"Task specification: {json.dumps(task.specification, sort_keys=True, separators=(',', ':'))}\n"
+            f"Allowed paths: {json.dumps(_allowed_paths(task), separators=(',', ':'))}\n"
+            f"Current validation rejection: {json.dumps(str(rejection), separators=(',', ':'))}\n"
+            "Authoritative source records: "
+            + json.dumps(
+                source_records,
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+
     @staticmethod
     def _review_prompt(task: AgentTask, evidence: JsonObject, verification: JsonObject) -> str:
         schema = {
@@ -1181,10 +1218,29 @@ end endmodule
         current_sources: JsonObject,
         latest_defect: JsonObject | None,
         response_retry: int,
+        call_policy: ModelCallPolicy = "standard",
     ) -> RoutedCall:
         allowed = _allowed_paths(task)
-        qwen_reasoning_repair = response_retry >= 2 and "qwen3.6" in (
-            self.model_configuration.main.model.lower()
+        qwen_reasoning_repair = call_policy == "structured_replacement_serialization" and (
+            "qwen3.6" in self.model_configuration.main.model.lower()
+        )
+        source_records = current_sources.get("current_worktree_sources")
+        estimated_serialization_tokens = (
+            estimate_replacement_plan_tokens(source_records) if qwen_reasoning_repair else None
+        )
+        main_prompt = (
+            self._structured_serialization_prompt(
+                task,
+                current_sources=current_sources,
+                latest_defect=latest_defect,
+            )
+            if qwen_reasoning_repair
+            else self._prompt(
+                task,
+                evidence,
+                defect_report=latest_defect,
+                current_sources=current_sources,
+            )
         )
         response_schema = (
             replacement_plan_json_schema(allowed_paths=allowed, domain=task.domain)
@@ -1195,27 +1251,37 @@ end endmodule
         can_use_worker = eligibility.eligible and self.rtl_worker_candidate is not None
         if not can_use_worker:
             return caller.generate(
-                self._prompt(
-                    task,
-                    evidence,
-                    defect_report=latest_defect,
-                    current_sources=current_sources,
-                ),
+                main_prompt,
                 role="general_implementation",
                 metadata=metadata,
                 retry_index=response_retry,
                 validator=self._replacement_validator(
                     worktree=worktree, allowed_paths=allowed, domain=task.domain
                 ),
-                compact_prompt=lambda: self._prompt(
-                    task,
-                    self._compact_evidence_for_prompt(evidence),
-                    defect_report=latest_defect,
-                    current_sources=current_sources,
+                compact_prompt=(
+                    None
+                    if qwen_reasoning_repair
+                    else lambda: self._prompt(
+                        task,
+                        self._compact_evidence_for_prompt(evidence),
+                        defect_report=latest_defect,
+                        current_sources=current_sources,
+                    )
                 ),
                 response_schema=response_schema,
                 schema_name="laplace_replacement_plan" if response_schema else None,
                 enable_thinking=False if qwen_reasoning_repair else None,
+                call_policy=(
+                    "structured_replacement_serialization"
+                    if qwen_reasoning_repair
+                    else "standard"
+                ),
+                estimated_serialization_tokens=estimated_serialization_tokens,
+                serialization_safety_margin_tokens=(
+                    STRUCTURED_SERIALIZATION_SAFETY_MARGIN_TOKENS
+                    if qwen_reasoning_repair
+                    else 0
+                ),
             )
 
         contract, contract_error = self._worker_contract(
@@ -1251,12 +1317,7 @@ end endmodule
                     return worker_call
                 worker_error = worker_call.validation_error or "invalid worker replacement"
         return caller.generate(
-            self._prompt(
-                task,
-                evidence,
-                defect_report=latest_defect,
-                current_sources=current_sources,
-            ),
+            main_prompt,
             role="bounded_rtl_repair"
             if latest_defect is not None
             else "bounded_rtl_implementation",
@@ -1266,15 +1327,28 @@ end endmodule
             validator=self._replacement_validator(
                 worktree=worktree, allowed_paths=allowed, domain=task.domain
             ),
-            compact_prompt=lambda: self._prompt(
-                task,
-                self._compact_evidence_for_prompt(evidence),
-                defect_report=latest_defect,
-                current_sources=current_sources,
+            compact_prompt=(
+                None
+                if qwen_reasoning_repair
+                else lambda: self._prompt(
+                    task,
+                    self._compact_evidence_for_prompt(evidence),
+                    defect_report=latest_defect,
+                    current_sources=current_sources,
+                )
             ),
             response_schema=response_schema,
             schema_name="laplace_replacement_plan" if response_schema else None,
             enable_thinking=False if qwen_reasoning_repair else None,
+            call_policy=(
+                "structured_replacement_serialization" if qwen_reasoning_repair else "standard"
+            ),
+            estimated_serialization_tokens=estimated_serialization_tokens,
+            serialization_safety_margin_tokens=(
+                STRUCTURED_SERIALIZATION_SAFETY_MARGIN_TOKENS
+                if qwen_reasoning_repair
+                else 0
+            ),
         )
 
     @staticmethod
@@ -1394,6 +1468,11 @@ end endmodule
             current_sources = self._current_source_context(worktree, allowed, task.domain)
             patch_applied = False
             for response_retry in range(invalid_response_limit):
+                call_policy: ModelCallPolicy = (
+                    "structured_replacement_serialization"
+                    if response_retry == invalid_response_limit - 1
+                    else "standard"
+                )
                 generated_call = self._generate_implementation_call(
                     caller,
                     task,
@@ -1403,6 +1482,7 @@ end endmodule
                     current_sources,
                     latest_defect,
                     response_retry,
+                    call_policy,
                 )
                 generated = generated_call.result
                 response_entry: JsonObject = {

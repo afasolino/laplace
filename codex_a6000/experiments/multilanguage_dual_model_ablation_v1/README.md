@@ -36,6 +36,12 @@ default thinking mode. If both Qwen3.6 responses are rejected, the final
 bounded serialization retry uses an OpenAI JSON-schema constraint and disables
 thinking only for that retry so the completion budget is reserved for the
 deterministic replacement object.
+The Qwen3.6 main profiles keep ordinary implementation and response-retry
+requests at 4096 tokens and configure
+`structured_serialization_max_output_tokens=8192`. The final serializer uses a
+deterministic full-source JSON-size estimate plus bounded headroom, never more
+than 8192 tokens. If the estimated replacement itself cannot fit, generation is
+rejected before inference as `structured_serialization_capacity_exceeded`.
 Reasoning text is never substituted for final content. Audit records retain
 final content, finish reason, token counts, and only a length/hash summary of
 reasoning. Because the constrained retry is non-thinking, the managed server

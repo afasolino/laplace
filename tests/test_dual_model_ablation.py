@@ -46,6 +46,7 @@ from research_workspace.multilanguage_ablation import (
     _assert_phase_manifest_compatible,
     _configuration_fingerprint,
     _execute_task_lane,
+    _model_configuration_compatibility_sha256,
     _result_set_root,
     _run_lane_subprocess,
     _task_spec,
@@ -114,6 +115,20 @@ def test_serving_profiles_are_loopback_only_and_decoding_is_configurable() -> No
     candidate = _candidate(8102, "main")
     assert candidate.context_tokens == 4096
     assert candidate.to_json()["max_output_tokens"] == 512
+    assert candidate.structured_serialization_max_output_tokens == 512
+    legacy_profile = candidate.to_json()
+    legacy_profile.pop("structured_serialization_max_output_tokens")
+    legacy_candidate = serving_candidate_from_json(legacy_profile)
+    assert legacy_candidate.max_output_tokens == 512
+    assert legacy_candidate.structured_serialization_max_output_tokens == 512
+    configured_profile = candidate.to_json()
+    configured_profile["structured_serialization_max_output_tokens"] = 8192
+    configured_candidate = serving_candidate_from_json(configured_profile)
+    assert configured_candidate.max_output_tokens == 512
+    assert configured_candidate.structured_serialization_max_output_tokens == 8192
+    configured_profile["structured_serialization_max_output_tokens"] = 8193
+    with pytest.raises(ValueError, match="between 1 and 8192"):
+        serving_candidate_from_json(configured_profile)
     with pytest.raises(ValueError, match="loopback"):
         ServingCandidate(
             engine="vllm",
@@ -131,6 +146,16 @@ def test_serving_profiles_are_loopback_only_and_decoding_is_configurable() -> No
     invalid_profile["unexpected"] = True
     with pytest.raises(ValueError, match="unexpected fields"):
         serving_candidate_from_json(invalid_profile)
+
+
+def test_serializer_cap_preserves_historical_model_configuration_fingerprints() -> None:
+    experiment = CONFIG_PATH.parent
+    assert _model_configuration_compatibility_sha256(experiment / "arm_b_models.json") == (
+        "1076607086d725e3edbedc0e8b694ecdcfb8ec52a2227067ca11cbc18868a9d2"
+    )
+    assert _model_configuration_compatibility_sha256(experiment / "arm_c_models.json") == (
+        "43ebf5cd4981e8634b2c13b780b2f6fded040bdc1566ecc0dc86cb999d145677"
+    )
 
 
 def test_openai_compatible_health_requires_exact_served_model_identity(

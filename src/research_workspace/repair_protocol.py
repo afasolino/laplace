@@ -132,6 +132,46 @@ def replacement_plan_json_schema(*, allowed_paths: list[str], domain: Domain) ->
     }
 
 
+def estimate_replacement_plan_tokens(source_records: object) -> int:
+    """Conservatively estimate a full-source replacement JSON payload without a model call."""
+    if not isinstance(source_records, list) or not source_records:
+        raise StructuredOutputError("Serialization estimate requires complete source records")
+    replacements: list[JsonObject] = []
+    for index, raw in enumerate(source_records):
+        if not isinstance(raw, dict):
+            raise StructuredOutputError(f"Source record {index} is not an object")
+        path = raw.get("path")
+        language = raw.get("language")
+        kind = raw.get("kind")
+        digest = raw.get("sha256")
+        content = raw.get("content")
+        if (
+            not isinstance(path, str)
+            or language not in {"python", "c", "verilog", "systemverilog"}
+            or kind not in {"source", "testbench"}
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or not isinstance(content, str)
+        ):
+            raise StructuredOutputError(f"Source record {index} is incomplete")
+        replacements.append(
+            {
+                "path": path,
+                "language": language,
+                "kind": kind,
+                "expected_sha256": digest,
+                "content": content,
+            }
+        )
+    serialized = json.dumps(
+        {"schema_version": 1, "replacements": replacements},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    # UTF-8 bytes / 3 is a deterministic conservative approximation for code JSON.
+    return max(1, (len(serialized) + 2) // 3)
+
+
 def _single_json_object(model_text: str, *, label: str) -> JsonObject:
     text = model_text.strip()
     if not text:
