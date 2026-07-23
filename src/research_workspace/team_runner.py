@@ -14,7 +14,7 @@ import sys
 import time
 import uuid
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -59,8 +59,9 @@ from .repair_protocol import (
 )
 from .rtl_contract import (
     RtlWorkerContract,
-    parse_rtl_worker_contract,
-    rtl_contract_prompt,
+    build_rtl_worker_contract,
+    codev_replacement_plan,
+    parse_codev_rtl_answer,
     rtl_worker_prompt,
 )
 
@@ -290,6 +291,7 @@ class LocalTeamRunner:
         retry_index: int = 0,
     ) -> JsonObject:
         """Record a real local-model role contribution without granting it tool authority."""
+        qwen3_main = "qwen3" in caller.router.configuration.main.model.lower()
         call = caller.generate(
             prompt,
             role=role,
@@ -297,6 +299,18 @@ class LocalTeamRunner:
             validator=validator,
             compact_prompt=compact_prompt,
             retry_index=retry_index,
+            enable_thinking=(
+                False
+                if qwen3_main
+                and role
+                in {
+                    "planning_supervision",
+                    "retrieval_interpretation",
+                    "rtl_contract_generation",
+                    "review",
+                }
+                else None
+            ),
         )
         result = call.result
         return {
@@ -1132,13 +1146,13 @@ end endmodule
 
     def _worker_contract(
         self,
-        caller: AuditedModelCaller,
         task: AgentTask,
         metadata: RoutingTaskMetadata,
         worktree: Worktree,
         current_sources: JsonObject,
         latest_defect: JsonObject | None,
     ) -> tuple[RtlWorkerContract | None, str | None]:
+        """Build the worker handoff from trusted source state, without a model round trip."""
         editable_path = metadata.editable_sources[0]
         states = current_sources.get("current_worktree_sources")
         source_record = (
@@ -1155,62 +1169,46 @@ end endmodule
         )
         if not isinstance(source_record, dict):
             return None, "worker editable source is absent from the current source state"
-
-        parsed: RtlWorkerContract | None = None
-
-        def validate_contract(model_text: str) -> None:
-            nonlocal parsed
-            parsed = parse_rtl_worker_contract(
-                model_text,
+        try:
+            contract = build_rtl_worker_contract(
                 root=worktree.root,
                 task_id=task.task_id,
-                language=task.domain,
+                task_specification=task.specification,
+                current_source=dict(source_record),
                 editable_path=editable_path,
-                require_diagnostics=latest_defect is not None,
+                language="verilog" if task.domain == "verilog" else "systemverilog",
+                defect_report=latest_defect,
             )
-
-        failures: list[str] = []
-        for retry in range(caller.router.configuration.worker_contract_retries + 1):
-            call = caller.generate(
-                rtl_contract_prompt(
-                    task_specification=task.specification,
-                    current_source=dict(source_record),
-                    editable_path=editable_path,
-                    language="verilog" if task.domain == "verilog" else "systemverilog",
-                    defect_report=latest_defect,
-                ),
-                role="rtl_contract_generation",
-                metadata=metadata,
-                retry_index=retry,
-                validator=validate_contract,
+        except StructuredOutputError as exc:
+            reason = str(exc)
+            self._append_artifact_history(
+                task.task_id,
+                role="implementer",
+                name="implementation_report",
+                entry={
+                    "status": "RTL_WORKER_CONTRACT_REJECTED",
+                    "contract_origin": "deterministic_task_metadata_and_source",
+                    "error": reason,
+                    "fallback": (
+                        "main_model"
+                        if self.model_configuration.fallback_to_main
+                        else "disabled"
+                    ),
+                },
             )
-            if call.response_valid and parsed is not None:
-                self._append_artifact_history(
-                    task.task_id,
-                    role="implementer",
-                    name="implementation_report",
-                    entry={
-                        "status": "RTL_WORKER_CONTRACT_ACCEPTED",
-                        "contract": parsed.to_json(),
-                        "routing": call.decision.to_json(),
-                        "audit_path": call.audit_path,
-                        "retry_index": retry,
-                    },
-                )
-                return parsed, None
-            failures.append(call.validation_error or "invalid RTL contract")
-        reason = "; ".join(failures)
+            return None, reason
         self._append_artifact_history(
             task.task_id,
             role="implementer",
             name="implementation_report",
             entry={
-                "status": "RTL_WORKER_CONTRACT_REJECTED",
-                "error": reason,
-                "fallback": "main_model",
+                "status": "RTL_WORKER_CONTRACT_ACCEPTED",
+                "contract_origin": "deterministic_task_metadata_and_source",
+                "contract": contract.to_json(),
+                "retry_index": 0,
             },
         )
-        return None, reason
+        return contract, None
 
     def _generate_implementation_call(
         self,
@@ -1293,7 +1291,6 @@ end endmodule
             )
 
         contract, contract_error = self._worker_contract(
-            caller,
             task,
             metadata,
             worktree,
@@ -1306,23 +1303,39 @@ end endmodule
                 "bounded_rtl_repair" if latest_defect is not None else "bounded_rtl_implementation"
             )
             for retry in range(caller.router.configuration.worker_response_retries + 1):
+                normalized_plan: str | None = None
+
+                def validate_worker_response(model_text: str) -> None:
+                    nonlocal normalized_plan
+                    parse_codev_rtl_answer(model_text, contract=contract)
+                    normalized_plan = codev_replacement_plan(model_text, contract=contract)
+                    parse_replacement_plan(
+                        normalized_plan,
+                        root=worktree.root,
+                        allowed_paths=[contract.editable_path],
+                        domain=task.domain,
+                    )
+
                 try:
                     worker_call = caller.generate(
-                        rtl_worker_prompt(contract),
+                        rtl_worker_prompt(
+                            contract,
+                            retry_index=retry,
+                            prior_error=worker_error,
+                        ),
                         role=role,
                         metadata=metadata,
                         retry_index=retry,
-                        validator=self._replacement_validator(
-                            worktree=worktree,
-                            allowed_paths=[contract.editable_path],
-                            domain=task.domain,
-                        ),
+                        validator=validate_worker_response,
                     )
                 except ModelRequired as exc:
                     worker_error = f"worker endpoint failed during generation: {exc}"
                     break
-                if worker_call.response_valid:
-                    return worker_call
+                if worker_call.response_valid and normalized_plan is not None:
+                    return replace(
+                        worker_call,
+                        result=replace(worker_call.result, text=normalized_plan),
+                    )
                 worker_error = worker_call.validation_error or "invalid worker replacement"
         return caller.generate(
             main_prompt,

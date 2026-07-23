@@ -281,13 +281,13 @@ class StructuredSerializationCapacityError(ModelRequired):
 
 
 _ROLE_COMPLETION_CAPS: dict[ModelRole, int | None] = {
-    "planning_supervision": 1536,
-    "retrieval_interpretation": 1024,
+    "planning_supervision": 4096,
+    "retrieval_interpretation": 4096,
     "general_implementation": None,
-    "rtl_contract_generation": 2048,
+    "rtl_contract_generation": 4096,
     "bounded_rtl_implementation": None,
     "bounded_rtl_repair": None,
-    "review": 768,
+    "review": 2048,
 }
 
 
@@ -474,30 +474,42 @@ class AuditedModelCaller:
             "context_rejection_reason": None,
         }
         structured_sampling = call_policy == "structured_replacement_serialization"
+        qwen_family = "qwen" in decision.candidate.model.lower()
+        qwen3_thinking_sampling = (
+            "qwen3" in decision.candidate.model.lower() and enable_thinking is True
+        )
+        qwen_non_thinking_sampling = qwen_family and enable_thinking is False
+        controlled_sampling = structured_sampling or qwen_non_thinking_sampling
         sampling_parameters: JsonObject = {
             "policy": (
                 "qwen3.6_non_thinking_structured_serialization"
                 if structured_sampling
+                else "qwen_non_thinking_machine_stage"
+                if qwen_non_thinking_sampling
+                else "qwen3_thinking"
+                if qwen3_thinking_sampling
                 else "candidate_default"
             ),
             "temperature": (
                 decision.candidate.structured_serialization_temperature
-                if structured_sampling
+                if controlled_sampling
                 else decision.candidate.temperature
             ),
             "top_p": (
                 decision.candidate.structured_serialization_top_p
-                if structured_sampling
+                if controlled_sampling
                 else decision.candidate.top_p
             ),
             "top_k": (
                 decision.candidate.structured_serialization_top_k
-                if structured_sampling
+                if controlled_sampling
+                else 20
+                if qwen3_thinking_sampling
                 else None
             ),
             "presence_penalty": (
                 decision.candidate.structured_serialization_presence_penalty
-                if structured_sampling
+                if controlled_sampling
                 else 0.0
             ),
             "seed": decision.candidate.seed,
@@ -519,6 +531,8 @@ class AuditedModelCaller:
             "explicitly_enabled"
             if enable_thinking is True
             else "disabled_for_structured_serialization"
+            if enable_thinking is False and structured_sampling
+            else "explicitly_disabled"
             if enable_thinking is False
             else "provider_default"
         )
@@ -590,7 +604,7 @@ class AuditedModelCaller:
             )
             raise ContextBudgetError(message, budget=budget)
         try:
-            if structured_sampling:
+            if controlled_sampling:
                 result = backend.generate(
                     effective_prompt,
                     context_tokens=context_limit,
@@ -604,6 +618,18 @@ class AuditedModelCaller:
                     presence_penalty=(
                         decision.candidate.structured_serialization_presence_penalty
                     ),
+                )
+            elif qwen3_thinking_sampling:
+                result = backend.generate(
+                    effective_prompt,
+                    context_tokens=context_limit,
+                    max_tokens=effective_completion,
+                    response_schema=response_schema,
+                    schema_name=schema_name,
+                    enable_thinking=enable_thinking,
+                    temperature=decision.candidate.temperature,
+                    top_p=decision.candidate.top_p,
+                    top_k=20,
                 )
             elif response_schema is not None or enable_thinking is not None:
                 result = backend.generate(
