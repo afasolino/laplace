@@ -91,7 +91,7 @@
       </section>
 
       <section id="live-run" class="view" data-title="Live run evidence">
-        <div class="section-intro"><div><p class="eyebrow">Append-only state</p><h2>Execution timeline</h2></div><label>Run ID<input id="live-run-id" placeholder="run-…"></label></div>
+        <div class="section-intro"><div><p class="eyebrow">Append-only state</p><h2>Execution timeline</h2></div><form id="live-run-form" class="inline-form"><label>Run ID<input id="live-run-id" name="run_id" placeholder="run-…" required></label><button class="button secondary" type="submit">Inspect run</button></form></div>
         <div class="split-grid">
           <article class="panel"><h3>State machine</h3><ol id="event-timeline" class="timeline"></ol></article>
           <article class="panel"><h3>Run record</h3><pre id="run-record">Choose a run to inspect.</pre></article>

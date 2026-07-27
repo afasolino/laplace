@@ -196,6 +196,25 @@ async function prepareRun(form) {
   await loadDashboard();
 }
 
+async function inspectRun(form) {
+  const runId = new FormData(form).get("run_id");
+  const result = await api(`/api/v1/runs/${encodeURIComponent(runId)}`);
+  byId("run-record").textContent = JSON.stringify(result, null, 2);
+  const terminal = result.terminal_result || {};
+  const verification = terminal.verification || {};
+  const matrix = verification.gate_matrix || [];
+  byId("gate-matrix").replaceChildren(...matrix.map((gate) => {
+    const item = text("article", "", `mini-card ${gate.status === "PASS" ? "pass" : "fail"}`);
+    item.append(
+      text("strong", gate.gate_id),
+      text("p", `${gate.status} · ${gate.tool} · executed ${gate.executed === true ? "yes" : "no"}`)
+    );
+    return item;
+  }));
+  if (!matrix.length) byId("gate-matrix").textContent = "No verification gate matrix recorded.";
+  announce(`Loaded immutable run evidence for ${runId}`);
+}
+
 async function inspectArtifact(form) {
   const path = new FormData(form).get("path");
   const result = await api(`/api/v1/artifacts?path=${encodeURIComponent(path)}`);
@@ -328,6 +347,7 @@ function bindEvents() {
   byId("hardware-refresh").addEventListener("click", loadHardware);
   byId("approvals-refresh").addEventListener("click", loadApprovals);
   byId("run-form").addEventListener("submit", (event) => { event.preventDefault(); prepareRun(event.currentTarget).catch((error) => warn(error.message)); });
+  byId("live-run-form").addEventListener("submit", (event) => { event.preventDefault(); inspectRun(event.currentTarget).catch((error) => warn(error.message)); });
   byId("artifact-form").addEventListener("submit", (event) => { event.preventDefault(); inspectArtifact(event.currentTarget).catch((error) => warn(error.message)); });
   byId("artifact-download").addEventListener("click", async (event) => {
     event.preventDefault();

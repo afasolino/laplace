@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterator, Mapping, TypeAlias
+from typing import Callable, Iterator, Mapping, Sequence, TypeAlias
 
 JsonObject: TypeAlias = dict[str, object]
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9._-]{1,160}$")
@@ -32,6 +32,10 @@ class RunIdentityConflict(ExecutionRecordError):
     def __init__(self, evidence: JsonObject) -> None:
         super().__init__("run_identity_conflict: existing project identity is incompatible")
         self.evidence = evidence
+
+
+class StageWorkflowInterrupted(ExecutionRecordError):
+    """A deterministic fixture interruption occurred after a durable stage."""
 
 
 def utc_now() -> str:
@@ -316,6 +320,79 @@ class AppendOnlyEventLog:
                 handle.flush()
                 os.fsync(handle.fileno())
             return event
+
+
+class ResumableStageWorkflow:
+    """Run ordered deterministic stages once and resume from durable outputs."""
+
+    def __init__(
+        self,
+        root: Path,
+        *,
+        run_id: str,
+        task_id: str,
+        arm_id: str,
+        stages: Sequence[str],
+    ) -> None:
+        if not stages or len(set(stages)) != len(stages):
+            raise ExecutionRecordError("Workflow stages must be non-empty and unique")
+        if any(not _IDENTIFIER.fullmatch(stage) for stage in stages):
+            raise ExecutionRecordError("Workflow stage name is unsafe")
+        self.root = root.resolve()
+        self.stages = tuple(stages)
+        self.outputs = self.root / "stage_outputs"
+        self.projection_path = self.root / "projection.json"
+        self.events = AppendOnlyEventLog(
+            self.root / "events.jsonl",
+            run_id=run_id,
+            task_id=task_id,
+            arm_id=arm_id,
+        )
+
+    @staticmethod
+    def _read_object(path: Path) -> JsonObject:
+        try:
+            value: object = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ExecutionRecordError(f"Stage output is malformed: {path}") from exc
+        if not isinstance(value, dict):
+            raise ExecutionRecordError(f"Stage output is not an object: {path}")
+        return dict(value)
+
+    def run(
+        self,
+        handlers: Mapping[str, Callable[[JsonObject], JsonObject]],
+        *,
+        interrupt_after: str | None = None,
+    ) -> JsonObject:
+        if set(handlers) != set(self.stages):
+            raise ExecutionRecordError("Stage handlers do not match the frozen workflow")
+        if interrupt_after is not None and interrupt_after not in self.stages:
+            raise ExecutionRecordError("Interruption stage is not in the workflow")
+        projection: JsonObject = {}
+        for index, stage in enumerate(self.stages):
+            output_path = self.outputs / f"{index:02d}_{stage}.json"
+            if output_path.is_file():
+                output = self._read_object(output_path)
+            else:
+                output = handlers[stage](dict(projection))
+                if not isinstance(output, dict):
+                    raise ExecutionRecordError(f"Stage {stage} did not return an object")
+                _atomic_json(output_path, output)
+            prior_stage = self.stages[index - 1] if index else None
+            self.events.append(
+                attempt=0,
+                event_type="stage_completed",
+                from_state=prior_stage,
+                to_state=stage,
+                source_state_fingerprint=None,
+                payload={"stage": stage, "output_sha256": canonical_sha256(output)},
+            )
+            projection[stage] = output
+            if interrupt_after == stage:
+                raise StageWorkflowInterrupted(f"interrupted_after:{stage}")
+        _atomic_json(self.projection_path, projection)
+        return projection
 
 
 @dataclass

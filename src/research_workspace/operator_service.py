@@ -572,8 +572,13 @@ class OperatorService:
                 run_id, failure, state="FAILED", actor_role="admin"
             )
             raise
+        terminal_state = (
+            "FAILED"
+            if terminal.get("status") in {"FAILED", "TERMINAL_FAILURE"}
+            else "COMPLETE"
+        )
         return self.finalize_run(
-            run_id, terminal, state="COMPLETE", actor_role="admin"
+            run_id, terminal, state=terminal_state, actor_role="admin"
         )
 
     def finalize_run(
@@ -698,8 +703,16 @@ class OperatorService:
         if row is None:
             raise OperatorServiceError("run_not_found", {"run_id": run_id})
         result = _row_object(row)
-        result.pop("configuration_json", None)
-        result.pop("terminal_result_json", None)
+        configuration_raw = result.pop("configuration_json", None)
+        terminal_raw = result.pop("terminal_result_json", None)
+        if isinstance(configuration_raw, str):
+            configuration: object = json.loads(configuration_raw)
+            if isinstance(configuration, dict):
+                result["configuration"] = configuration
+        if isinstance(terminal_raw, str):
+            terminal: object = json.loads(terminal_raw)
+            if isinstance(terminal, dict):
+                result["terminal_result"] = terminal
         return result
 
     def events(

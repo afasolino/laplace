@@ -9,9 +9,11 @@ from research_workspace.execution_records import (
     AppendOnlyEventLog,
     ExecutionRecordError,
     LocalTraceRecorder,
+    ResumableStageWorkflow,
     RunIdentity,
     RunIdentityConflict,
     RunIdentityStore,
+    StageWorkflowInterrupted,
     canonical_sha256,
 )
 
@@ -109,3 +111,62 @@ def test_trace_export_is_local_bounded_and_noop_supported(tmp_path: Path) -> Non
     with pytest.raises(ExecutionRecordError):
         with recorder.span("review", attributes={"full_prompt": "secret"}):
             pass
+
+
+@pytest.mark.parametrize(
+    "interrupt_after", ("retrieval", "implementation", "verification")
+)
+def test_resumable_stages_do_not_repeat_model_patch_or_eda_side_effects(
+    tmp_path: Path, interrupt_after: str
+) -> None:
+    stages = ("retrieval", "implementation", "verification", "review")
+    counts = {stage: 0 for stage in stages}
+
+    def handler(stage: str):
+        def execute(projection: dict[str, object]) -> dict[str, object]:
+            counts[stage] += 1
+            return {
+                "stage": stage,
+                "prior_stages": sorted(projection),
+                "side_effect_id": f"{stage}-effect-1",
+            }
+
+        return execute
+
+    handlers = {stage: handler(stage) for stage in stages}
+    workflow = ResumableStageWorkflow(
+        tmp_path / "interrupted",
+        run_id="resume-run",
+        task_id="sv_elastic_buffer2",
+        arm_id="C",
+        stages=stages,
+    )
+    with pytest.raises(StageWorkflowInterrupted):
+        workflow.run(handlers, interrupt_after=interrupt_after)
+    resumed = workflow.run(handlers)
+
+    uninterrupted_counts = {stage: 0 for stage in stages}
+
+    def uninterrupted_handler(stage: str):
+        def execute(projection: dict[str, object]) -> dict[str, object]:
+            uninterrupted_counts[stage] += 1
+            return {
+                "stage": stage,
+                "prior_stages": sorted(projection),
+                "side_effect_id": f"{stage}-effect-1",
+            }
+
+        return execute
+
+    uninterrupted = ResumableStageWorkflow(
+        tmp_path / "uninterrupted",
+        run_id="reference-run",
+        task_id="sv_elastic_buffer2",
+        arm_id="C",
+        stages=stages,
+    ).run({stage: uninterrupted_handler(stage) for stage in stages})
+
+    assert resumed == uninterrupted
+    assert counts == {stage: 1 for stage in stages}
+    assert uninterrupted_counts == {stage: 1 for stage in stages}
+    assert len(workflow.events.read()) == len(stages)

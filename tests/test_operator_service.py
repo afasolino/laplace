@@ -116,6 +116,35 @@ def test_same_run_id_with_different_configuration_is_conflict(
     assert "existing_configuration_sha256" in caught.value.evidence
 
 
+def test_failed_executor_result_marks_operator_run_failed(tmp_path: Path) -> None:
+    service = OperatorService(
+        ROOT,
+        tmp_path,
+        model_servers=_ModelServers(),  # type: ignore[arg-type]
+    )
+    service.prepare_run(
+        _configuration(gpu=False), actor_role="operate", run_id="failed-run"
+    )
+    result = service.start_run(
+        "failed-run",
+        approval_id=None,
+        actor_role="operate",
+        executor=lambda *_args: {
+            "status": "TERMINAL_FAILURE",
+            "failure_category": "verification_failure",
+        },
+    )
+
+    assert result["status"] == "FAILED"
+    record = service.get_run("failed-run", actor_role="read")
+    assert record["state"] == "FAILED"
+    assert record["configuration"]["task_id"] == "rtl_counter"
+    assert record["terminal_result"] == {
+        "status": "TERMINAL_FAILURE",
+        "failure_category": "verification_failure",
+    }
+
+
 def test_approvals_and_actions_are_idempotent_and_evented(tmp_path: Path) -> None:
     model_servers = _ModelServers()
     service = OperatorService(
@@ -159,4 +188,3 @@ def test_read_role_cannot_mutate_and_summary_is_machine_readable(
     assert summary["status"] == "OK"
     assert summary["local_only"] is True
     assert summary["event_count"] == 0
-
