@@ -64,6 +64,10 @@ from .rtl_contract import (
     parse_codev_rtl_answer,
     rtl_worker_prompt,
 )
+from .verification_gates import (
+    VerificationGateRegistry,
+    classify_no_effect_correction,
+)
 
 
 class PatchValidationError(EngineeringError):
@@ -334,14 +338,21 @@ class LocalTeamRunner:
 
     @staticmethod
     def _required_quality_gates(task: AgentTask) -> frozenset[str]:
-        """Return only explicitly declared deterministic gates for this task."""
+        """Validate the normalized contract against the authoritative registry."""
         quality_contract = task.specification.get("quality_contract")
         if not isinstance(quality_contract, dict):
-            return frozenset()
+            return frozenset(VerificationGateRegistry.required_gates(task.domain))
         raw = quality_contract.get("required_gates")
         if not isinstance(raw, list):
-            return frozenset()
-        return frozenset(item for item in raw if isinstance(item, str))
+            return frozenset(VerificationGateRegistry.required_gates(task.domain))
+        declared = tuple(item for item in raw if isinstance(item, str))
+        authoritative = VerificationGateRegistry.required_gates(task.domain)
+        if declared != authoritative:
+            raise EngineeringError(
+                "Task verification gates drift from the authoritative registry: "
+                f"declared={declared}, authoritative={authoritative}"
+            )
+        return frozenset(authoritative)
 
     @classmethod
     def _requires_verilator_simulation(cls, task: AgentTask) -> bool:
@@ -356,36 +367,7 @@ class LocalTeamRunner:
             if isinstance(requirements, list)
             else []
         )
-        if task.domain == "python":
-            checks = [
-                "required_public_fixture_test",
-                "adversarial_negative_path_test",
-                "ruff_format",
-                "ruff",
-                "strict_mypy",
-                "task_public_pytest",
-                "task_public_coverage_pytest",
-                "bandit",
-            ]
-        elif task.domain == "c":
-            checks = [
-                "self_checking_public_unit_tests",
-                "gcc_or_clang_warnings",
-                "cmake_build",
-                "ctest",
-                "address_sanitizer",
-                "undefined_behavior_sanitizer",
-            ]
-        else:
-            checks = [
-                "public_self_checking_simulation",
-                "adversarial_protocol_simulation",
-                "verilator_lint",
-                "iverilog_compile",
-                "vvp_simulation",
-                "yosys_synthesis",
-            ]
-        return [{"requirement": item, "required_evidence": checks} for item in requirement_text]
+        return VerificationGateRegistry.acceptance_matrix(task.domain, requirement_text)
 
     @staticmethod
     def _current_source_context(
@@ -1089,11 +1071,41 @@ end endmodule
         *,
         prior_reviewer_error: str | None = None,
     ) -> str:
+        verification_sha256 = hashlib.sha256(
+            json.dumps(
+                verification,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        source_fingerprint = str(current_sources.get("source_state_fingerprint", ""))
+        records = current_sources.get("current_worktree_sources")
+        source_identity = [
+            {"path": item.get("path"), "sha256": item.get("sha256")}
+            for item in records
+            if isinstance(item, dict)
+        ] if isinstance(records, list) else []
+        gate_matrix = verification.get("gate_matrix")
+        concise_gates = [
+            {
+                "gate_id": item.get("gate_id"),
+                "tool": item.get("tool"),
+                "status": item.get("status"),
+                "returncode": item.get("returncode"),
+            }
+            for item in gate_matrix
+            if isinstance(item, dict)
+        ] if isinstance(gate_matrix, list) else []
         schema = {
-            "schema_version": 1,
+            "schema_version": 2,
             "verdict": "approve|request_changes|block",
             "reason": "specific evidence-based reason",
+            "source_state_fingerprint": source_fingerprint,
+            "verification_report_sha256": verification_sha256,
+            "quoted_source_fragments": ["exact current-source fragments relied upon"],
             "missing_evidence": ["items"],
+            "violated_requirements": ["concrete failed gate or requirement identifiers"],
         }
         retry_notice = (
             "Your prior verdict was rejected as stale or ungrounded: "
@@ -1102,6 +1114,12 @@ end endmodule
             else ""
         )
         return (
+            f"Authoritative current source: {json.dumps(current_sources, sort_keys=True)}\n"
+            f"Authoritative source paths and SHA-256: {json.dumps(source_identity, sort_keys=True)}\n"
+            f"Source-state fingerprint: {source_fingerprint}\n"
+            f"Verification-report SHA-256: {verification_sha256}\n"
+            f"Required gate matrix: {json.dumps(gate_matrix, sort_keys=True)}\n"
+            f"Concise gate results: {json.dumps(concise_gates, sort_keys=True)}\n"
             "You are the operational Laplace reviewer. Return exactly one JSON object and no Markdown or "
             "prose. The required JSON shape is "
             + json.dumps(schema, separators=(",", ":"))
@@ -1113,7 +1131,6 @@ end endmodule
             "Block only for a non-repairable scope, policy, or environment defect. Do not infer hidden tests "
             "and do not edit code.\n"
             f"{retry_notice}"
-            f"Authoritative current source: {json.dumps(current_sources, sort_keys=True)}\n"
             f"Task: {json.dumps(task.specification, sort_keys=True)}\n"
             f"Acceptance matrix: {json.dumps(LocalTeamRunner._acceptance_matrix(task), sort_keys=True)}\n"
             f"Reference evidence: {json.dumps(evidence, sort_keys=True)}\n"
@@ -1126,29 +1143,72 @@ end endmodule
         current_sources: JsonObject,
         verification: JsonObject,
     ) -> str | None:
-        """Reject reviewer claims that quote source text absent from the verified revision."""
-        if verification.get("passed") is not True:
-            return None
-        reason = verdict.get("reason")
-        if not isinstance(reason, str):
-            return None
+        """Reject stale hashes, absent quotes, and evidence-contradicting verdicts."""
+        expected_source = current_sources.get("source_state_fingerprint")
+        if verdict.get("source_state_fingerprint") != expected_source:
+            return "reviewer_stale_evidence: source-state fingerprint does not match"
+        expected_verification = hashlib.sha256(
+            json.dumps(
+                verification,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        if verdict.get("verification_report_sha256") != expected_verification:
+            return "reviewer_stale_evidence: verification-report hash does not match"
         records = current_sources.get("current_worktree_sources")
         if not isinstance(records, list):
             return "reviewer_stale_evidence: authoritative current source is unavailable"
         source_text = "\n".join(
             str(item.get("content", "")) for item in records if isinstance(item, dict)
         )
-        stale_fragments = []
-        for fragment in re.findall(r"`([^`\n]+)`", reason):
-            normalized = fragment.strip()
-            if len(normalized) >= 8 and normalized not in source_text:
-                stale_fragments.append(normalized)
+        quoted = verdict.get("quoted_source_fragments")
+        if not isinstance(quoted, list):
+            return "reviewer_stale_evidence: quoted_source_fragments is unavailable"
+        stale_fragments = [
+            fragment.strip()
+            for fragment in quoted
+            if isinstance(fragment, str)
+            and fragment.strip()
+            and fragment.strip() not in source_text
+        ]
         if not stale_fragments:
-            return None
-        return (
-            "reviewer_stale_evidence: quoted source text is absent from the authoritative "
-            f"current revision: {stale_fragments[:3]}"
-        )
+            reason = verdict.get("reason")
+            if isinstance(reason, str):
+                stale_fragments = [
+                    fragment.strip()
+                    for fragment in re.findall(r"`([^`\n]+)`", reason)
+                    if len(fragment.strip()) >= 8 and fragment.strip() not in source_text
+                ]
+        if stale_fragments:
+            return (
+                "reviewer_stale_evidence: quoted source text is absent from the authoritative "
+                f"current revision: {stale_fragments[:3]}"
+            )
+        passed = verification.get("passed") is True
+        review_verdict = verdict.get("verdict")
+        if not passed and review_verdict == "approve":
+            return "reviewer_deterministic_conflict: approval contradicts failed gates"
+        if passed and review_verdict != "approve":
+            raw_gate_matrix = verification.get("gate_matrix")
+            gate_matrix = raw_gate_matrix if isinstance(raw_gate_matrix, list) else []
+            failed_gates = {
+                str(item.get("gate_id"))
+                for item in gate_matrix
+                if isinstance(item, dict) and item.get("status") != "PASS"
+            }
+            concrete: set[str] = set()
+            for key in ("missing_evidence", "violated_requirements"):
+                raw_items = verdict.get(key)
+                if isinstance(raw_items, list):
+                    concrete.update(str(item) for item in raw_items)
+            if not failed_gates.intersection(concrete):
+                return (
+                    "reviewer_deterministic_conflict: non-approval has no concrete "
+                    "failed deterministic gate"
+                )
+        return None
 
     def _defect_report(
         self,
@@ -1590,23 +1650,83 @@ end endmodule
         for meaningful_attempt in range(3):
             current_sources = self._current_source_context(worktree, allowed, task.domain)
             patch_applied = False
+            terminal_no_effect: JsonObject | None = None
             for response_retry in range(invalid_response_limit):
                 call_policy: ModelCallPolicy = (
                     "structured_replacement_serialization"
                     if response_retry == invalid_response_limit - 1
                     else "standard"
                 )
-                generated_call = self._generate_implementation_call(
-                    caller,
-                    task,
-                    task_metadata,
-                    worktree,
-                    evidence_raw,
-                    current_sources,
-                    latest_defect,
-                    response_retry,
-                    call_policy,
-                )
+                try:
+                    generated_call = self._generate_implementation_call(
+                        caller,
+                        task,
+                        task_metadata,
+                        worktree,
+                        evidence_raw,
+                        current_sources,
+                        latest_defect,
+                        response_retry,
+                        call_policy,
+                    )
+                except ModelRequired as exc:
+                    category = getattr(exc, "category", None)
+                    if category != "no_effect_correction":
+                        raise
+                    prior_verdict_raw = (
+                        latest_defect.get("reviewer_verdict")
+                        if isinstance(latest_defect, dict)
+                        else None
+                    )
+                    prior_verdict = (
+                        prior_verdict_raw
+                        if isinstance(prior_verdict_raw, dict)
+                        else {}
+                    )
+                    source_records = current_sources.get("current_worktree_sources")
+                    source_text = "\n".join(
+                        str(item.get("content", ""))
+                        for item in source_records
+                        if isinstance(item, dict)
+                    ) if isinstance(source_records, list) else ""
+                    quoted = prior_verdict.get("quoted_source_fragments")
+                    quoted_fragments = (
+                        [str(item) for item in quoted if isinstance(item, str) and item]
+                        if isinstance(quoted, list)
+                        else []
+                    )
+                    already_present = bool(quoted_fragments) and all(
+                        item in source_text for item in quoted_fragments
+                    )
+                    disposition = classify_no_effect_correction(
+                        verification_passed=(
+                            isinstance(latest_verification, dict)
+                            and latest_verification.get("passed") is True
+                        ),
+                        reviewer_verdict=str(prior_verdict.get("verdict", "")),
+                        reviewer_change_already_present=already_present,
+                    )
+                    terminal_no_effect = {
+                        "status": disposition.classification.upper(),
+                        "classification": disposition.classification,
+                        "model_quality_failure": (
+                            disposition.classification == "no_effect_correction"
+                        ),
+                        "meaningful_attempt": meaningful_attempt,
+                        "response_retry": response_retry,
+                        "source_state": current_sources,
+                        "verification": latest_verification,
+                        "reviewer_verdict": prior_verdict,
+                        "error": str(exc),
+                    }
+                    self._append_artifact_history(
+                        task.task_id,
+                        role="implementer",
+                        name="implementation_report",
+                        entry=terminal_no_effect,
+                    )
+                    last_error = disposition.classification
+                    break
                 generated = generated_call.result
                 response_entry: JsonObject = {
                     "status": "MODEL_OUTPUT_RECEIVED",
@@ -1675,6 +1795,52 @@ end endmodule
                 )
                 patch_applied = True
                 break
+            if terminal_no_effect is not None:
+                classification = str(terminal_no_effect["classification"])
+                if classification == "converged_no_change":
+                    task = self._transition(
+                        task,
+                        "bounded_correction",
+                        "Byte-identical correction matched passing evidence and approved review",
+                    )
+                    task = self._transition(
+                        task, "final_report", "Converged without a source change"
+                    )
+                    self.store.write_artifact(
+                        task.task_id,
+                        role="supervisor",
+                        name="final_report",
+                        payload={
+                            "status": "COMPLETE",
+                            "classification": "converged_no_change",
+                            "task_id": task.task_id,
+                            "worktree": str(worktree.root),
+                            "base_commit": worktree.base_commit,
+                            "verification": latest_verification,
+                            "review": terminal_no_effect.get("reviewer_verdict"),
+                        },
+                    )
+                    return {
+                        "status": "COMPLETE",
+                        "classification": "converged_no_change",
+                        "task": self.store.load(task.task_id).to_json(),
+                        "worktree": str(worktree.root),
+                    }
+                if classification == "reviewer_state_conflict":
+                    task = self._transition(
+                        task,
+                        "blocked",
+                        "reviewer_state_conflict: review reconciliation is required; "
+                        "no repeated implementation prompt was issued",
+                    )
+                    return {
+                        "status": "REVIEWER_STATE_CONFLICT",
+                        "classification": classification,
+                        "task": task.to_json(),
+                        "worktree": str(worktree.root),
+                        "evidence": terminal_no_effect,
+                    }
+                break
             if not patch_applied:
                 last_error = (
                     f"Structured model-output retry budget exhausted after {invalid_response_limit} "
@@ -1737,12 +1903,46 @@ end endmodule
                 worktree, allowed, task.domain
             )
             verification["adversarial"] = adversarial
-            verification["acceptance_matrix"] = self._acceptance_matrix(task)
             verification["source_state"] = review_source_state
-            verification["passed"] = bool(verification.get("passed")) and (
-                adversarial.get("status") == "PASS"
-                or adversarial.get("status") == "SKIPPED_BY_ABLATION"
-            )
+            if task.domain in {"verilog", "systemverilog"}:
+                raw_gate_results = verification.get("gate_results")
+                gate_results: dict[str, JsonObject] = (
+                    {
+                        str(key): dict(value)
+                        for key, value in raw_gate_results.items()
+                        if isinstance(key, str) and isinstance(value, dict)
+                    }
+                    if isinstance(raw_gate_results, dict)
+                    else {}
+                )
+                gate_results["adversarial_protocol_simulation"] = {
+                    **adversarial,
+                    "tool": "vvp",
+                    "gate": "adversarial_protocol_simulation",
+                }
+                missing_public = verification.get("missing_tools")
+                missing_names = (
+                    {str(item) for item in missing_public if isinstance(item, str)}
+                    if isinstance(missing_public, list)
+                    else set()
+                )
+                available = {
+                    tool: tool not in missing_names
+                    for tool in VerificationGateRegistry.required_tools(task.domain)
+                }
+                final_summary = VerificationGateRegistry.evaluate(
+                    task.domain,
+                    gate_results,
+                    available_tools=available,
+                )
+                verification["gate_results"] = gate_results
+                verification.update(final_summary.to_json())
+            else:
+                verification["passed"] = bool(verification.get("passed")) and (
+                    adversarial.get("status") == "PASS"
+                    or adversarial.get("status") == "SKIPPED_BY_ABLATION"
+                )
+            verification["acceptance_matrix"] = self._acceptance_matrix(task)
             verification["meaningful_attempt"] = meaningful_attempt
             latest_verification = verification
             self._append_artifact_history(
@@ -1753,15 +1953,31 @@ end endmodule
             )
             task = self._transition(task, "review", "Verifier emitted immutable command evidence")
 
+            compact_verification = self._compact_verification_for_review(verification)
+            verification_report_sha256 = hashlib.sha256(
+                json.dumps(
+                    compact_verification,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            source_state_fingerprint = str(
+                review_source_state.get("source_state_fingerprint", "")
+            )
             reviewer_contribution: JsonObject = {
                 "status": "SKIPPED_FOR_DIRECT_ABLATION",
                 "reason": "One-agent direct mode omits reviewer generation.",
             }
             reviewer_verdict: JsonObject = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "verdict": "approve",
                 "reason": "Deterministic verifier controls direct-mode approval.",
+                "source_state_fingerprint": source_state_fingerprint,
+                "verification_report_sha256": verification_report_sha256,
+                "quoted_source_fragments": [],
                 "missing_evidence": [],
+                "violated_requirements": [],
             }
             reviewer_required = (
                 self.options.role_mode == "five_role" and self.options.reviewer_invariants
@@ -1771,7 +1987,6 @@ end endmodule
                 prior_reviewer_error: str | None = None
                 for reviewer_retry in range(2):
                     compact_evidence = self._compact_evidence_for_prompt(evidence_raw)
-                    compact_verification = self._compact_verification_for_review(verification)
                     reviewer_contribution = self._role_generation(
                         caller,
                         task_metadata,
@@ -1796,7 +2011,7 @@ end endmodule
                         continue
                     candidate_verdict = parsed_verdict.to_json()
                     stale_error = self._stale_reviewer_evidence(
-                        candidate_verdict, review_source_state, verification
+                        candidate_verdict, review_source_state, compact_verification
                     )
                     if stale_error is not None:
                         prior_reviewer_error = stale_error
@@ -1806,35 +2021,22 @@ end endmodule
                     reviewer_verdict["response_retry"] = reviewer_retry
                     break
                 else:
-                    stale_only = bool(reviewer_errors) and all(
-                        item.startswith("reviewer_stale_evidence:")
-                        for item in reviewer_errors
-                    )
-                    if verification.get("passed") is True and stale_only:
-                        reviewer_verdict = {
-                            "schema_version": 1,
-                            "verdict": "approve",
-                            "reason": (
-                                "All required deterministic and adversarial gates passed; "
-                                "bounded reviewer outputs were rejected because they cited "
-                                "source text absent from the authoritative current revision."
-                            ),
-                            "missing_evidence": [],
-                            "reviewer_stale_evidence": reviewer_errors,
-                            "response_retry": 1,
-                        }
-                        reviewer_contribution = {
-                            **reviewer_contribution,
-                            "status": "REJECTED_STALE_EVIDENCE",
-                            "stale_evidence_errors": reviewer_errors,
-                        }
-                    else:
-                        reviewer_verdict = {
-                            "schema_version": 1,
-                            "verdict": "request_changes",
-                            "reason": "Reviewer output remained invalid after bounded retries.",
-                            "missing_evidence": reviewer_errors,
-                        }
+                    reviewer_verdict = {
+                        "schema_version": 2,
+                        "verdict": "request_changes",
+                        "reason": "Reviewer output remained invalid after one bounded retry.",
+                        "source_state_fingerprint": source_state_fingerprint,
+                        "verification_report_sha256": verification_report_sha256,
+                        "quoted_source_fragments": [],
+                        "missing_evidence": reviewer_errors,
+                        "violated_requirements": [],
+                        "response_retry": 1,
+                    }
+                    reviewer_contribution = {
+                        **reviewer_contribution,
+                        "status": "REJECTED_UNGROUNDED_REVIEW",
+                        "grounding_errors": reviewer_errors,
+                    }
 
             task = self.store.load(task.task_id)
             evidence_complete = verification.get("passed") is True
@@ -1853,6 +2055,8 @@ end endmodule
                 "reviewer_model_contribution": reviewer_contribution,
                 "reviewer_errors": reviewer_errors,
                 "source_state": review_source_state,
+                "source_state_fingerprint": source_state_fingerprint,
+                "verification_report_sha256": verification_report_sha256,
                 "meaningful_attempt": meaningful_attempt,
             }
             self._append_artifact_history(

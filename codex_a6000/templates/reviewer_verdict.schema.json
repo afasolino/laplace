@@ -4,11 +4,24 @@
   "title": "Operational reviewer verdict",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "verdict", "reason", "missing_evidence"],
+  "required": [
+    "schema_version",
+    "verdict",
+    "reason",
+    "source_state_fingerprint",
+    "verification_report_sha256",
+    "quoted_source_fragments",
+    "missing_evidence",
+    "violated_requirements"
+  ],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "verdict": {"enum": ["approve", "request_changes", "block"]},
     "reason": {"type": "string", "minLength": 1},
-    "missing_evidence": {"type": "array", "items": {"type": "string"}}
+    "source_state_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "verification_report_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "quoted_source_fragments": {"type": "array", "items": {"type": "string"}},
+    "missing_evidence": {"type": "array", "items": {"type": "string"}},
+    "violated_requirements": {"type": "array", "items": {"type": "string"}}
   }
 }

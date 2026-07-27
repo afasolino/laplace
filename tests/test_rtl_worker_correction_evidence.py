@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable, cast
@@ -26,6 +28,14 @@ from research_workspace.rtl_contract import (
     rtl_worker_prompt,
 )
 from research_workspace.team_runner import LocalTeamRunner
+
+
+def _canonical_sha256(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _candidate() -> ServingCandidate:
@@ -294,13 +304,16 @@ def test_standalone_lane_reuses_verified_governed_corpus(
     assert result["preparation"] is None
 
 
-def test_verilator_simulation_is_required_only_when_declared() -> None:
+def test_verilator_simulation_is_required_by_authoritative_domain_registry() -> None:
     without_simulation = cast(
         AgentTask,
         SimpleNamespace(
+            domain="verilog",
             specification={
                 "quality_contract": {
                     "required_gates": [
+                        "self_checking_public_simulation",
+                        "adversarial_protocol_simulation",
                         "verilator_lint",
                         "iverilog_compile",
                         "vvp_simulation",
@@ -313,11 +326,17 @@ def test_verilator_simulation_is_required_only_when_declared() -> None:
     with_simulation = cast(
         AgentTask,
         SimpleNamespace(
+            domain="systemverilog",
             specification={
                 "quality_contract": {
                     "required_gates": [
+                        "self_checking_public_simulation",
+                        "adversarial_protocol_simulation",
                         "verilator_lint",
                         "verilator_simulation",
+                        "iverilog_compile",
+                        "vvp_simulation",
+                        "yosys_synthesis",
                     ]
                 }
             }
@@ -344,13 +363,19 @@ def test_reviewer_stale_source_quote_is_rejected() -> None:
         "source_state_fingerprint": "b" * 64,
     }
     verdict = {
-        "schema_version": 1,
+        "schema_version": 2,
         "verdict": "block",
         "reason": (
             "The stale expression "
             "`data_q[0]<=count_q==1?in_data:data_q[1];` still loses data."
         ),
+        "source_state_fingerprint": "b" * 64,
+        "verification_report_sha256": _canonical_sha256({"passed": True}),
+        "quoted_source_fragments": [
+            "data_q[0]<=count_q==1?in_data:data_q[1];"
+        ],
         "missing_evidence": [],
+        "violated_requirements": [],
     }
 
     error = LocalTeamRunner._stale_reviewer_evidence(
@@ -369,13 +394,20 @@ def test_reviewer_current_source_quote_is_not_rejected() -> None:
                 "sha256": "a" * 64,
                 "content": "assign in_ready = (count_q < 2) || out_ready;\n",
             }
-        ]
+        ],
+        "source_state_fingerprint": "b" * 64,
     }
     verdict = {
-        "schema_version": 1,
-        "verdict": "request_changes",
-        "reason": "Inspect `assign in_ready = (count_q < 2) || out_ready;`.",
+        "schema_version": 2,
+        "verdict": "approve",
+        "reason": "Current readiness expression is present.",
+        "source_state_fingerprint": "b" * 64,
+        "verification_report_sha256": _canonical_sha256({"passed": True}),
+        "quoted_source_fragments": [
+            "assign in_ready = (count_q < 2) || out_ready;"
+        ],
         "missing_evidence": [],
+        "violated_requirements": [],
     }
 
     assert (
@@ -403,7 +435,8 @@ def test_review_prompt_frontloads_authoritative_source() -> None:
                 "sha256": "a" * 64,
                 "content": "module elastic; endmodule\n",
             }
-        ]
+        ],
+        "source_state_fingerprint": "b" * 64,
     }
 
     prompt = LocalTeamRunner._review_prompt(
@@ -457,6 +490,7 @@ def _fake_eda_run(
             mdir = Path(command[command.index("--Mdir") + 1])
             mdir.mkdir(parents=True, exist_ok=True)
             (mdir / "simv").write_text("simulator", encoding="utf-8")
+            (mdir / "simv").chmod(0o755)
         return ToolResult(
             tool=tool,
             command=tuple(command),

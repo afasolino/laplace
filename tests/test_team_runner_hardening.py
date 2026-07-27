@@ -178,10 +178,14 @@ def test_reviewer_verdict_is_machine_readable_and_invalid_output_never_approves(
     verdict = parse_reviewer_verdict(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "verdict": "approve",
                 "reason": "All deterministic evidence passed.",
+                "source_state_fingerprint": "a" * 64,
+                "verification_report_sha256": "b" * 64,
+                "quoted_source_fragments": [],
                 "missing_evidence": [],
+                "violated_requirements": [],
             }
         )
     )
@@ -192,10 +196,14 @@ def test_reviewer_verdict_is_machine_readable_and_invalid_output_never_approves(
         parse_reviewer_verdict(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "verdict": "approve",
                     "reason": "Fine",
+                    "source_state_fingerprint": "a" * 64,
+                    "verification_report_sha256": "b" * 64,
+                    "quoted_source_fragments": [],
                     "missing_evidence": [],
+                    "violated_requirements": [],
                     "unexpected": True,
                 }
             )

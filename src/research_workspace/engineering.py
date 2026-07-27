@@ -29,6 +29,7 @@ import yaml
 
 from .documents import _chunks, _db
 from .retrieval import embed
+from .verification_gates import VerificationGateRegistry
 
 
 JsonValue: TypeAlias = object
@@ -327,17 +328,8 @@ def normalize_task_spec(repository_root: Path, domain: Domain, raw: JsonObject) 
         if isinstance(requirements, list)
         else []
     )
+    gates = list(VerificationGateRegistry.required_gates(domain))
     if domain == "python":
-        gates = [
-            "explicit_public_fixture_test",
-            "adversarial_negative_path_test",
-            "ruff_format_check",
-            "ruff_lint",
-            "strict_mypy",
-            "pytest",
-            "coverage_pytest",
-            "bandit",
-        ]
         focus = [
             "public interfaces and compatibility",
             "input and error behavior",
@@ -345,15 +337,6 @@ def normalize_task_spec(repository_root: Path, domain: Domain, raw: JsonObject) 
             "type constraints and negative-path behavior",
         ]
     elif domain == "c":
-        gates = [
-            "self_checking_public_unit_tests",
-            "gcc_or_clang_warnings",
-            "cmake_build",
-            "ctest",
-            "address_sanitizer",
-            "undefined_behavior_sanitizer",
-            "static_analysis_when_available",
-        ]
         focus = [
             "public interfaces and ABI compatibility",
             "memory ownership, lifetime and cleanup",
@@ -361,16 +344,6 @@ def normalize_task_spec(repository_root: Path, domain: Domain, raw: JsonObject) 
             "error paths, partial I/O and deterministic resource release",
         ]
     else:
-        gates = [
-            "self_checking_public_simulation",
-            "adversarial_protocol_simulation",
-            "verilator_lint",
-            "iverilog_compile",
-            "vvp_simulation",
-            "yosys_synthesis",
-        ]
-        if domain == "systemverilog":
-            gates.insert(3, "verilator_simulation")
         focus = [
             f"explicit {domain} microarchitecture before RTL",
             "clock/reset and CDC assumptions",
@@ -1089,9 +1062,33 @@ class ToolResult:
         }
 
 
+def resolve_eda_executable(name: str) -> str | None:
+    """Resolve a pinned local EDA tool before falling back to ``PATH``.
+
+    The optional root is configuration, not a workstation path.  The
+    environment containing the active Python is also checked because Laplace's
+    bootstrap installs its pinned toolchain beside that environment.
+    """
+    if not re.fullmatch(r"[a-z0-9_+-]+", name):
+        raise ToolExecutionError("EDA executable name is unsafe")
+    configured_root = os.getenv("LAPLACE_EDA_TOOL_ROOT")
+    roots: list[Path] = []
+    if configured_root:
+        configured = Path(configured_root).expanduser()
+        if not configured.is_absolute():
+            raise ToolExecutionError("LAPLACE_EDA_TOOL_ROOT must be absolute")
+        roots.append(configured)
+    roots.append(Path(sys.prefix).resolve().parent / ".tools" / "multilanguage")
+    for root in roots:
+        candidate = root / "bin" / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return shutil.which(name)
+
+
 def verilator_simulation_available() -> bool:
     """Return whether the installed Verilator supports timed ``--binary`` testbenches."""
-    executable = shutil.which("verilator")
+    executable = resolve_eda_executable("verilator")
     if executable is None:
         return False
     try:
@@ -1293,10 +1290,20 @@ class LocalToolRunner:
         top_module: str | None = None,
         testbench: str | None = None,
         language: Literal["verilog", "systemverilog"] = "systemverilog",
-        require_verilator_simulation: bool = False,
+        require_verilator_simulation: bool | None = None,
         required_tools: tuple[str, ...] = (),
         timeout_seconds: int = 300,
+        run_id: str | None = None,
+        task_id: str | None = None,
+        attempt: int = 0,
+        success_marker: str = "PASS",
     ) -> JsonObject:
+        """Execute an immutable public RTL verification flow.
+
+        ``required_tools`` is accepted for compatibility with existing task
+        manifests but cannot add or remove requirements.  The authoritative
+        registry supplies the tool and gate sets.
+        """
         if not source_files:
             raise ToolExecutionError("At least one SystemVerilog source is required")
         sources = self._target_paths(source_files)
@@ -1317,91 +1324,245 @@ class LocalToolRunner:
             simulation_sources.append(testbench_path)
         if top_module is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", top_module):
             raise ToolExecutionError("Top module name is unsafe")
-        results: list[JsonObject] = []
-        missing_tools: list[str] = []
-        for tool in required_tools:
-            executable = "verilator" if tool == "verilator_simulation" else tool
-            if tool == "verilator_simulation":
-                available = verilator_simulation_available()
-            else:
-                available = shutil.which(executable) is not None
-            if not available:
-                missing_tools.append(tool)
-        if require_verilator_simulation and language == "systemverilog" and testbench is not None:
-            if not verilator_simulation_available():
-                missing_tools.append("verilator_simulation")
-        missing_tools = sorted(set(missing_tools))
-        if shutil.which("verilator"):
-            language_flag = "1364-2001" if language == "verilog" else "1800-2017"
-            results.append(
-                self.run(
-                    "verilator",
-                    [
-                        "verilator",
-                        "--lint-only",
-                        "--Wall",
-                        "--language",
-                        language_flag,
-                        *sources,
-                    ],
-                    timeout_seconds=timeout_seconds,
-                ).to_json()
+        if not success_marker or len(success_marker) > 200:
+            raise ToolExecutionError("Simulation success marker must contain 1 to 200 characters")
+        authoritative_tools = VerificationGateRegistry.required_tools(
+            language, scope="public"
+        )
+        normalized_declared = tuple(
+            dict.fromkeys(
+                "verilator" if item == "verilator_simulation" else item
+                for item in required_tools
             )
+        )
+        unexpected_declared = sorted(set(normalized_declared).difference(authoritative_tools))
+        if unexpected_declared:
+            raise ToolExecutionError(
+                "Task declares tools outside the verification registry: "
+                + ", ".join(unexpected_declared)
+            )
+        registry_requires_simulation = (
+            "verilator_simulation"
+            in VerificationGateRegistry.required_gates(language, scope="public")
+        )
+        if (
+            require_verilator_simulation is not None
+            and require_verilator_simulation != registry_requires_simulation
+        ):
+            raise ToolExecutionError(
+                "require_verilator_simulation conflicts with the authoritative gate registry"
+            )
+        source_records = [
+            {
+                "path": value,
+                "sha256": hashlib.sha256(
+                    _inside(self.repository_root, self.repository_root / value).read_bytes()
+                ).hexdigest(),
+            }
+            for value in simulation_sources
+        ]
+        source_state_fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "language": language,
+                    "top_module": top_module,
+                    "sources": source_records,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        results: list[JsonObject] = []
+        gate_results: dict[str, JsonObject] = {}
+        available_tools = {
+            tool: (
+                verilator_simulation_available()
+                if tool == "verilator" and registry_requires_simulation
+                else resolve_eda_executable(tool) is not None
+            )
+            for tool in authoritative_tools
+        }
+        verilator_version: str | None = None
+        verilator_executable_path = resolve_eda_executable("verilator")
+        if verilator_executable_path:
+            language_flag = "1364-2001" if language == "verilog" else "1800-2017"
+            version_result = self.run(
+                "verilator",
+                [verilator_executable_path, "--version"],
+                timeout_seconds=min(timeout_seconds, 30),
+            )
+            verilator_version = (version_result.stdout or version_result.stderr).strip()
+            lint = self.run(
+                "verilator",
+                [
+                    verilator_executable_path,
+                    "--lint-only",
+                    "--Wall",
+                    "--language",
+                    language_flag,
+                    *sources,
+                ],
+                timeout_seconds=timeout_seconds,
+            ).to_json()
+            lint["gate"] = "verilator_lint"
+            lint["source_state_fingerprint"] = source_state_fingerprint
+            lint["verilator_version"] = verilator_version
+            results.append(lint)
+            gate_results["verilator_lint"] = lint
             if (
                 language == "systemverilog"
                 and testbench is not None
-                and require_verilator_simulation
-                and "verilator_simulation" not in missing_tools
+                and registry_requires_simulation
+                and available_tools.get("verilator") is True
             ):
                 verilator_top = Path(testbench).stem
-                verilator_root = self.log_root / f"verilator_sim_{uuid.uuid4().hex}"
-                results.append(
-                    self.run(
-                        "verilator",
-                        [
-                            "verilator",
-                            "--binary",
-                            "--timing",
-                            "--Wall",
-                            "-Wno-fatal",
-                            "--language",
-                            language_flag,
-                            "--top-module",
-                            verilator_top,
-                            "--Mdir",
-                            str(verilator_root),
-                            "-o",
-                            "simv",
-                            *simulation_sources,
-                        ],
-                        timeout_seconds=timeout_seconds,
-                    ).to_json()
+                identity = "_".join(
+                    re.sub(r"[^A-Za-z0-9_.-]", "_", value)[:80]
+                    for value in (
+                        run_id or "standalone",
+                        task_id or top_module or "rtl",
+                        f"attempt-{attempt}",
+                    )
                 )
+                verilator_root = (
+                    self.log_root
+                    / "verilator_builds"
+                    / f"{identity}_{source_state_fingerprint[:12]}_{uuid.uuid4().hex[:12]}"
+                )
+                verilator_root.mkdir(parents=True, exist_ok=False)
+                build_command = [
+                    verilator_executable_path,
+                    "--binary",
+                    "--timing",
+                    "--Wall",
+                    "-Wno-fatal",
+                    "--language",
+                    language_flag,
+                    "--top-module",
+                    verilator_top,
+                    "--Mdir",
+                    str(verilator_root),
+                    "-o",
+                    "simv",
+                    *simulation_sources,
+                ]
+                build = self.run(
+                    "verilator",
+                    build_command,
+                    timeout_seconds=timeout_seconds,
+                ).to_json()
+                build["phase"] = "verilator_build"
+                build["source_state_fingerprint"] = source_state_fingerprint
+                build["verilator_version"] = verilator_version
+                results.append(build)
                 verilator_executable = verilator_root / "simv"
-                if results[-1]["status"] == "PASS" and verilator_executable.is_file():
-                    results.append(
-                        self.run(
+                simulation: JsonObject | None = None
+                if build["status"] == "PASS":
+                    if not verilator_executable.is_file():
+                        simulation = {
+                            "tool": "verilator_simulation",
+                            "gate": "verilator_simulation",
+                            "status": "FAILED",
+                            "returncode": 127,
+                            "command": [str(verilator_executable)],
+                            "stdout": "",
+                            "stderr": "Verilator build passed but the expected binary is missing.",
+                            "log_path": None,
+                            "executed": False,
+                        }
+                    elif not os.access(verilator_executable, os.X_OK):
+                        simulation = {
+                            "tool": "verilator_simulation",
+                            "gate": "verilator_simulation",
+                            "status": "FAILED",
+                            "returncode": 126,
+                            "command": [str(verilator_executable)],
+                            "stdout": "",
+                            "stderr": "Verilator binary exists but is not executable.",
+                            "log_path": None,
+                            "executed": False,
+                        }
+                    else:
+                        executed = self.run(
                             "verilator_simulation",
                             [str(verilator_executable)],
                             timeout_seconds=timeout_seconds,
                         ).to_json()
+                        executed["executed"] = True
+                        marker_present = success_marker in str(executed.get("stdout", ""))
+                        if executed.get("status") == "PASS" and not marker_present:
+                            executed["status"] = "FAILED"
+                            executed["returncode"] = 3
+                            executed["stderr"] = (
+                                str(executed.get("stderr", ""))
+                                + f"\nExpected self-checking marker is absent: {success_marker!r}"
+                            ).strip()
+                        simulation = executed
+                    simulation.update(
+                        {
+                            "tool": "verilator_simulation",
+                            "gate": "verilator_simulation",
+                            "binary_path": str(verilator_executable),
+                            "build_log_path": build.get("log_path"),
+                            "simulation_log_path": simulation.get("log_path"),
+                            "source_state_fingerprint": source_state_fingerprint,
+                            "verilator_version": verilator_version,
+                            "success_marker": success_marker,
+                            "success_marker_present": (
+                                success_marker in str(simulation.get("stdout", ""))
+                            ),
+                        }
                     )
+                    record_path = (
+                        self.log_root
+                        / f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%fZ')}"
+                        "_verilator_simulation_record.json"
+                    )
+                    _write_json_atomic(record_path, simulation, readonly=True)
+                    simulation["record_path"] = str(record_path)
+                    results.append(simulation)
+                    gate_results["verilator_simulation"] = simulation
         output = self.log_root / f"eda_{uuid.uuid4().hex}.vvp"
-        if shutil.which("iverilog"):
+        iverilog_executable = resolve_eda_executable("iverilog")
+        if iverilog_executable:
             generation = "-g2001" if language == "verilog" else "-g2012"
-            compile_command = ["iverilog", generation, "-o", str(output)]
+            compile_command = [iverilog_executable, generation, "-o", str(output)]
             simulation_top = Path(testbench).stem if testbench is not None else top_module
             if simulation_top:
                 compile_command.extend(["-s", simulation_top])
             compile_command.extend(simulation_sources)
-            results.append(
-                self.run("iverilog", compile_command, timeout_seconds=timeout_seconds).to_json()
-            )
-            if testbench and results[-1]["status"] == "PASS" and shutil.which("vvp"):
-                results.append(
-                    self.run("vvp", ["vvp", str(output)], timeout_seconds=timeout_seconds).to_json()
-                )
-        if shutil.which("yosys") and top_module:
+            compile_result = self.run(
+                "iverilog", compile_command, timeout_seconds=timeout_seconds
+            ).to_json()
+            compile_result["gate"] = "iverilog_compile"
+            compile_result["source_state_fingerprint"] = source_state_fingerprint
+            results.append(compile_result)
+            gate_results["iverilog_compile"] = compile_result
+            vvp_executable = resolve_eda_executable("vvp")
+            if testbench and compile_result["status"] == "PASS" and vvp_executable:
+                vvp_result = self.run(
+                    "vvp", [vvp_executable, str(output)], timeout_seconds=timeout_seconds
+                ).to_json()
+                marker_present = success_marker in str(vvp_result.get("stdout", ""))
+                if vvp_result.get("status") == "PASS" and not marker_present:
+                    vvp_result["status"] = "FAILED"
+                    vvp_result["returncode"] = 3
+                    vvp_result["stderr"] = (
+                        str(vvp_result.get("stderr", ""))
+                        + f"\nExpected self-checking marker is absent: {success_marker!r}"
+                    ).strip()
+                vvp_result["gate"] = "vvp_simulation"
+                vvp_result["success_marker"] = success_marker
+                vvp_result["success_marker_present"] = marker_present
+                vvp_result["source_state_fingerprint"] = source_state_fingerprint
+                results.append(vvp_result)
+                gate_results["vvp_simulation"] = vvp_result
+                gate_results["self_checking_public_simulation"] = {
+                    **vvp_result,
+                    "gate": "self_checking_public_simulation",
+                }
+        yosys_executable = resolve_eda_executable("yosys")
+        if yosys_executable and top_module:
             script = self.log_root / f"synth_{uuid.uuid4().hex}.ys"
             _write_json_atomic(
                 script.with_suffix(".json"), {"sources": sources, "top_module": top_module}
@@ -1411,39 +1572,33 @@ class LocalToolRunner:
                 f"hierarchy -check -top {top_module}\nsynth -top {top_module}\n",
                 encoding="utf-8",
             )
-            results.append(
-                self.run(
-                    "yosys", ["yosys", "-s", str(script)], timeout_seconds=timeout_seconds
-                ).to_json()
-            )
-        executed_tools = sorted(
-            {
-                str(item.get("tool"))
-                for item in results
-                if isinstance(item.get("tool"), str)
-            }
+            yosys_result = self.run(
+                "yosys", [yosys_executable, "-s", str(script)], timeout_seconds=timeout_seconds
+            ).to_json()
+            yosys_result["gate"] = "yosys_synthesis"
+            yosys_result["source_state_fingerprint"] = source_state_fingerprint
+            results.append(yosys_result)
+            gate_results["yosys_synthesis"] = yosys_result
+        summary = VerificationGateRegistry.evaluate(
+            language,
+            gate_results,
+            scope="public",
+            available_tools=available_tools,
         )
-        required_results = set(required_tools)
-        if require_verilator_simulation:
-            required_results.add("verilator_simulation")
-        missing_required_results = sorted(required_results.difference(executed_tools))
-        verilator_simulation_executed = "verilator_simulation" in executed_tools
         return {
             "operation": "run_eda_flow",
             "language": language,
-            "require_verilator_simulation": require_verilator_simulation,
-            "verilator_simulation_executed": verilator_simulation_executed,
-            "required_tools": list(required_tools),
-            "executed_tools": executed_tools,
+            "require_verilator_simulation": registry_requires_simulation,
+            "verilator_simulation_executed": (
+                gate_results.get("verilator_simulation", {}).get("executed") is True
+            ),
             "sources": sources,
             "top_module": top_module,
             "results": results,
-            "missing_tools": missing_tools,
-            "missing_required_results": missing_required_results,
-            "passed": not missing_tools
-            and not missing_required_results
-            and bool(results)
-            and all(item["status"] == "PASS" for item in results),
+            "gate_results": gate_results,
+            "source_state_fingerprint": source_state_fingerprint,
+            "verilator_version": verilator_version,
+            **summary.to_json(),
             "created_at": _now(),
         }
 

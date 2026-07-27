@@ -43,14 +43,22 @@ class ReviewerVerdict:
     schema_version: int
     verdict: ReviewerDecision
     reason: str
+    source_state_fingerprint: str
+    verification_report_sha256: str
+    quoted_source_fragments: tuple[str, ...]
     missing_evidence: tuple[str, ...]
+    violated_requirements: tuple[str, ...]
 
     def to_json(self) -> JsonObject:
         return {
             "schema_version": self.schema_version,
             "verdict": self.verdict,
             "reason": self.reason,
+            "source_state_fingerprint": self.source_state_fingerprint,
+            "verification_report_sha256": self.verification_report_sha256,
+            "quoted_source_fragments": list(self.quoted_source_fragments),
             "missing_evidence": list(self.missing_evidence),
+            "violated_requirements": list(self.violated_requirements),
         }
 
 
@@ -415,23 +423,52 @@ def parse_reviewer_verdict(model_text: str) -> ReviewerVerdict:
     value = _single_json_object(model_text, label="Reviewer")
     _require_exact_keys(
         value,
-        {"schema_version", "verdict", "reason", "missing_evidence"},
+        {
+            "schema_version",
+            "verdict",
+            "reason",
+            "source_state_fingerprint",
+            "verification_report_sha256",
+            "quoted_source_fragments",
+            "missing_evidence",
+            "violated_requirements",
+        },
         label="Reviewer verdict",
     )
-    if value.get("schema_version") != 1:
-        raise StructuredOutputError("Reviewer schema_version must equal 1")
+    if value.get("schema_version") != 2:
+        raise StructuredOutputError("Reviewer schema_version must equal 2")
     verdict = value.get("verdict")
     if verdict not in {"approve", "request_changes", "block"}:
         raise StructuredOutputError("Reviewer verdict is not an allowed value")
     reason = value.get("reason")
+    source_fingerprint = value.get("source_state_fingerprint")
+    verification_hash = value.get("verification_report_sha256")
+    quoted = value.get("quoted_source_fragments")
     missing = value.get("missing_evidence")
+    violated = value.get("violated_requirements")
     if not isinstance(reason, str) or not reason.strip():
         raise StructuredOutputError("Reviewer reason must be non-empty text")
+    if not isinstance(source_fingerprint, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", source_fingerprint
+    ):
+        raise StructuredOutputError("Reviewer source_state_fingerprint must be SHA-256")
+    if not isinstance(verification_hash, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", verification_hash
+    ):
+        raise StructuredOutputError("Reviewer verification_report_sha256 must be SHA-256")
+    if not isinstance(quoted, list) or not all(isinstance(item, str) for item in quoted):
+        raise StructuredOutputError("Reviewer quoted_source_fragments must be a list of strings")
     if not isinstance(missing, list) or not all(isinstance(item, str) for item in missing):
         raise StructuredOutputError("Reviewer missing_evidence must be a list of strings")
+    if not isinstance(violated, list) or not all(isinstance(item, str) for item in violated):
+        raise StructuredOutputError("Reviewer violated_requirements must be a list of strings")
     return ReviewerVerdict(
-        schema_version=1,
+        schema_version=2,
         verdict=verdict,
         reason=reason.strip(),
+        source_state_fingerprint=source_fingerprint,
+        verification_report_sha256=verification_hash,
+        quoted_source_fragments=tuple(item.strip() for item in quoted if item.strip()),
         missing_evidence=tuple(item.strip() for item in missing if item.strip()),
+        violated_requirements=tuple(item.strip() for item in violated if item.strip()),
     )
