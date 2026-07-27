@@ -12,11 +12,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from typing import Any, Callable, Iterable
+
+from defusedxml import ElementTree as ET
 
 try:
     import certifi as _certifi

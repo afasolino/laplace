@@ -7,7 +7,7 @@ import json
 import os
 import re
 import shutil
-import subprocess  # nosec B404 - fixed version probes only
+import subprocess  # nosec B404
 import sys
 from dataclasses import dataclass
 from pathlib import Path

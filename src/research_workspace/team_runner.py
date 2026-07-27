@@ -259,6 +259,7 @@ class LocalTeamRunner:
         experiment_arm: str = "single_model",
         options: TeamWorkflowOptions | None = None,
         shared_reference_root: Path | None = None,
+        skill_root: Path | None = None,
     ) -> None:
         self.repository_root = repository_root.resolve()
         self.project_root = project_root.resolve()
@@ -282,9 +283,18 @@ class LocalTeamRunner:
         self.log_root = self.project_root / "Outputs" / "AgentTeam" / "team_logs"
         self.shared_reference_root = resolve_shared_reference_root(shared_reference_root)
         self.run_record_root = self.project_root / "Outputs" / "AgentTeam" / "run"
-        self.skill_registry = FrozenSkillRegistry(
-            self.repository_root / "codex_a6000" / "skills"
+        selected_skill_root = (
+            skill_root.resolve()
+            if skill_root is not None
+            else self.repository_root / "codex_a6000" / "skills"
         )
+        if not selected_skill_root.is_dir():
+            application_skill_root = (
+                Path(__file__).resolve().parents[2] / "codex_a6000" / "skills"
+            )
+            if application_skill_root.is_dir():
+                selected_skill_root = application_skill_root
+        self.skill_registry = FrozenSkillRegistry(selected_skill_root)
         self.skills_lock = self.skill_registry.write_lock(
             self.run_record_root / "skills.lock.json"
         )

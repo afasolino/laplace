@@ -344,7 +344,7 @@ class DirectUrlResearchAdapter:
         )
         parser = urllib.robotparser.RobotFileParser()
         parser.set_url(robots_url)
-        request = urllib.request.Request(  # nosec B310 - public host checked.
+        request = urllib.request.Request(  # nosec B310
             robots_url, headers={"User-Agent": self.user_agent}
         )
         try:
@@ -361,11 +361,12 @@ class DirectUrlResearchAdapter:
     def fetch(self, source: DiscoveredSource) -> FetchedSource:
         url = canonicalize_url(source.canonical_url)
         parsed = urllib.parse.urlsplit(url)
-        assert parsed.hostname is not None
+        if parsed.hostname is None:
+            raise ValueError("research URL hostname is missing")
         _assert_public_hostname(parsed.hostname)
         if not self._robots_allowed(url):
             raise ValueError("robots policy does not permit this fetch")
-        request = urllib.request.Request(  # nosec B310 - public host checked.
+        request = urllib.request.Request(  # nosec B310
             url,
             headers={
                 "User-Agent": self.user_agent,

@@ -10,9 +10,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import urllib.robotparser
-import xml.etree.ElementTree as ET  # nosec B405 - bounded trusted API metadata only.
 from dataclasses import dataclass, field
 from typing import Callable, Sequence
+
+from defusedxml import ElementTree as ET
 
 from .research_models import (
     DirectUrlResearchAdapter,
@@ -60,7 +61,7 @@ class BoundedWebClient:
         origin = f"{parsed.scheme}://{parsed.netloc}"
         if origin not in self._robots:
             robots_url = origin + "/robots.txt"
-            request = urllib.request.Request(  # nosec B310 - public host checked.
+            request = urllib.request.Request(  # nosec B310
                 robots_url, headers={"User-Agent": self.user_agent}
             )
             try:
@@ -87,7 +88,7 @@ class BoundedWebClient:
         if not self._robots_allowed(parsed, url):
             raise WebAdapterError("robots policy does not permit the request")
         self._rate_limit(str(parsed.hostname))
-        request = urllib.request.Request(  # nosec B310 - public host checked.
+        request = urllib.request.Request(  # nosec B310
             url,
             headers={"Accept": accept, "User-Agent": self.user_agent},
         )
@@ -140,7 +141,7 @@ class SearXNGResearchAdapter:
         url = self.endpoint.rstrip("/") + "/search?" + urllib.parse.urlencode(
             {"q": query, "format": "json"}
         )
-        request = urllib.request.Request(  # nosec B310 - endpoint is loopback-validated.
+        request = urllib.request.Request(  # nosec B310
             url,
             headers={"Accept": "application/json"},
         )
@@ -220,7 +221,7 @@ class ArxivResearchAdapter(_CachedMetadataAdapter):
         )
         body = self.client.get(url, accept="application/atom+xml")
         try:
-            root = ET.fromstring(body)  # nosec B314 - response is size bounded.
+            root = ET.fromstring(body)
         except ET.ParseError as exc:
             raise WebAdapterError("arXiv returned invalid Atom XML") from exc
         namespace = {"atom": "http://www.w3.org/2005/Atom"}

@@ -94,7 +94,9 @@ class LocalNotificationAdapter:
                 "event": event,
                 "measured_result_affected": False,
             }
-        assert self.config.endpoint is not None
+        endpoint = self.config.endpoint
+        if endpoint is None:
+            raise ValueError("enabled notifications require an endpoint")
         body = json.dumps(
             {
                 "topic": "laplace-local",
@@ -105,14 +107,14 @@ class LocalNotificationAdapter:
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-        request = urllib.request.Request(  # nosec B310 - config enforces loopback.
-            self.config.endpoint,
+        request = urllib.request.Request(  # nosec B310
+            endpoint,
             data=body,
             headers={"Content-Type": "application/json"},
             method="POST",
         )
         try:
-            with urllib.request.urlopen(  # nosec B310 - config enforces loopback.
+            with urllib.request.urlopen(  # nosec B310
                 request,
                 timeout=self.config.timeout_seconds,
             ) as response:
@@ -139,4 +141,3 @@ class LocalNotificationAdapter:
             "http_status": status_code,
             "measured_result_affected": False,
         }
-

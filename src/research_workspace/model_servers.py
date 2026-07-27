@@ -7,7 +7,7 @@ import json
 import os
 import re
 import secrets
-import subprocess  # nosec B404 - commands are fixed repository tools.
+import subprocess  # nosec B404
 import time
 import urllib.error
 import urllib.request
@@ -380,7 +380,7 @@ def observe_port_owners(port: int) -> list[JsonObject]:
 def probe_endpoint(spec: ModelServerSpec, *, timeout_seconds: float = 3.0) -> JsonObject:
     """Probe `/v1/models` and require the exact configured served-model identity."""
 
-    request = urllib.request.Request(  # nosec B310 - endpoint is localhost-validated.
+    request = urllib.request.Request(  # nosec B310
         f"{spec.endpoint}/v1/models",
         headers={"Accept": "application/json"},
         method="GET",

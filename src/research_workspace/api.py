@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import sqlite3
@@ -154,56 +153,58 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
     app = FastAPI(title="Laplace Local Research Workspace", docs_url="/docs")
 
     @app.get("/", response_class=HTMLResponse)
-    def home() -> HTMLResponse:
+    async def home() -> HTMLResponse:
         return project_page("Chat", project.name, "/chat")
 
     @app.get("/chat", response_class=HTMLResponse)
-    def chat() -> HTMLResponse:
+    async def chat() -> HTMLResponse:
         return project_page("Chat", project.name, "/chat")
 
     @app.get("/library", response_class=HTMLResponse)
-    def library_page() -> HTMLResponse:
+    async def library_page() -> HTMLResponse:
         return project_page("Library", project.name, "/library")
 
     @app.get("/research", response_class=HTMLResponse)
-    def research_page() -> HTMLResponse:
+    async def research_page() -> HTMLResponse:
         return project_page("Research", project.name, "/research")
 
     @app.get("/downloads", response_class=HTMLResponse)
-    def downloads_page() -> HTMLResponse:
+    async def downloads_page() -> HTMLResponse:
         return project_page("Downloads", project.name, "/downloads")
 
     @app.get("/settings", response_class=HTMLResponse)
-    def settings_page() -> HTMLResponse:
+    async def settings_page() -> HTMLResponse:
         return project_page("Settings", project.name, "/settings")
 
     @app.get("/dashboard", response_class=HTMLResponse)
-    def dashboard() -> HTMLResponse:
+    async def dashboard() -> HTMLResponse:
         return offline_dashboard(project.name)
 
     @app.get("/health")
-    def health() -> dict[str, str]:
+    async def health() -> dict[str, str]:
         return {"status": "ok", "bind": "127.0.0.1"}
 
     @app.get("/projects")
-    def projects() -> dict[str, object]:
+    async def projects() -> dict[str, object]:
         return {"projects": list_projects()}
 
     @app.post("/projects/init")
-    def project_init(request: ProjectInitRequest) -> dict[str, object]:
+    async def project_init(request: ProjectInitRequest) -> dict[str, object]:
         paths = init_project(request.name, update=request.update)
         return {"status": "CREATED", "project": str(paths.root)}
 
     @app.get("/projects/{name}")
-    def project_show(name: str) -> dict[str, object]:
+    async def project_show(name: str) -> dict[str, object]:
         return project_summary(name)
 
     @app.post("/projects/{name}/library/ingest")
-    def project_library_ingest(name: str, collection: str = "MyWorks") -> dict[str, object]:
+    async def project_library_ingest(
+        name: str, collection: str = "MyWorks"
+    ) -> dict[str, object]:
         return ingest_library(name, collection=collection)
 
     @app.get("/api/project/current")
-    def current_project() -> dict[str, Any]:
+    async def current_project() -> dict[str, Any]:
         return {
             "name": project.name,
             "project_id": project.project_id,
@@ -215,7 +216,7 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
         }
 
     @app.get("/api/project/collections")
-    def project_collections() -> dict[str, Any]:
+    async def project_collections() -> dict[str, Any]:
         from .projects import COLLECTIONS
 
         counts: dict[str, int] = {item: 0 for item in COLLECTIONS}
@@ -241,7 +242,7 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
         }
 
     @app.get("/api/project/status")
-    def project_status() -> dict[str, Any]:
+    async def project_status() -> dict[str, Any]:
         counts = _counts(index_database)
         downloads = (
             len(list((root / "Data" / "Downloads").rglob("*.pdf")))
@@ -262,7 +263,7 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
         }
 
     @app.post("/api/engineering/references/{domain}")
-    def engineering_references(
+    async def engineering_references(
         domain: Literal["python", "systemverilog"], request: EngineeringReferenceRequest
     ) -> dict[str, object]:
         shared = resolve_shared_reference_root()
@@ -293,7 +294,7 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
             raise HTTPException(400, str(exc)) from exc
 
     @app.post("/api/engineering/python-quality")
-    def engineering_python_quality() -> dict[str, object]:
+    async def engineering_python_quality() -> dict[str, object]:
         try:
             return LocalToolRunner(
                 Path(__file__).resolve().parents[2], root / "Outputs" / "AgentTeam" / "tool_logs"
@@ -302,7 +303,7 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
             raise HTTPException(400, str(exc)) from exc
 
     @app.get("/api/project/settings")
-    def project_settings() -> dict[str, Any]:
+    async def project_settings() -> dict[str, Any]:
         settings: dict[str, str] = {}
         for name in ("instructions.md", "writing_style.yaml", "retrieval.yaml", "providers.yaml"):
             path = root / "Config" / name
@@ -310,7 +311,9 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
         return {"settings": settings, "secrets_included": False}
 
     @app.patch("/api/project/settings/{name}")
-    def update_project_settings(name: str, request: SettingsUpdateRequest) -> dict[str, Any]:
+    async def update_project_settings(
+        name: str, request: SettingsUpdateRequest
+    ) -> dict[str, Any]:
         allowed = {"instructions.md", "writing_style.yaml", "retrieval.yaml", "providers.yaml"}
         if name not in allowed:
             raise HTTPException(400, "settings file is not editable through this endpoint")
@@ -337,7 +340,7 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
         }
 
     @app.get("/api/chat/conversations")
-    def conversations(
+    async def conversations(
         include_archived: bool = False, q: str | None = Query(default=None, max_length=200)
     ) -> dict[str, Any]:
         values = store.list(include_archived)
@@ -346,18 +349,20 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
         return {"conversations": [item.model_dump() for item in values]}
 
     @app.post("/api/chat/conversations")
-    def create_conversation(request: ConversationCreateRequest) -> dict[str, Any]:
+    async def create_conversation(
+        request: ConversationCreateRequest,
+    ) -> dict[str, Any]:
         return store.create(request.title, request.collections, request.mode).model_dump()
 
     @app.get("/api/chat/conversations/{conversation_id}")
-    def conversation_detail(conversation_id: str) -> dict[str, Any]:
+    async def conversation_detail(conversation_id: str) -> dict[str, Any]:
         try:
             return store.detail(conversation_id).model_dump()
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
 
     @app.patch("/api/chat/conversations/{conversation_id}")
-    def patch_conversation(
+    async def patch_conversation(
         conversation_id: str, request: ConversationPatchRequest
     ) -> dict[str, Any]:
         try:
@@ -371,7 +376,9 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
             raise HTTPException(404, str(exc)) from exc
 
     @app.delete("/api/chat/conversations/{conversation_id}")
-    def delete_conversation(conversation_id: str, confirm: bool = False) -> dict[str, str]:
+    async def delete_conversation(
+        conversation_id: str, confirm: bool = False
+    ) -> dict[str, str]:
         if not confirm:
             raise HTTPException(
                 400, "confirm=true is required; documents and indexes are not deleted"
@@ -383,7 +390,7 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
         return {"status": "DELETED", "conversation_id": conversation_id}
 
     @app.post("/api/chat/conversations/{conversation_id}/messages")
-    def post_message(
+    async def post_message(
         conversation_id: str, request: ChatMessageRequest, stream: bool = False
     ) -> Any:
         try:
@@ -409,7 +416,7 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
                 )
                 try:
                     while True:
-                        event = await asyncio.to_thread(next_event, iterator)
+                        event = next_event(iterator)
                         if event is None:
                             return
                         yield _sse(event)
@@ -429,14 +436,14 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
             raise HTTPException(409, str(exc)) from exc
 
     @app.post("/api/chat/conversations/{conversation_id}/stop")
-    def stop_message(conversation_id: str) -> dict[str, Any]:
+    async def stop_message(conversation_id: str) -> dict[str, Any]:
         return {
             "status": "STOP_REQUESTED" if engine.stop(conversation_id) else "NOT_GENERATING",
             "conversation_id": conversation_id,
         }
 
     @app.post("/api/chat/conversations/{conversation_id}/regenerate")
-    def regenerate(conversation_id: str) -> dict[str, Any]:
+    async def regenerate(conversation_id: str) -> dict[str, Any]:
         try:
             detail = store.detail(conversation_id)
             user_messages = [item for item in detail.messages if item.get("role") == "user"]
@@ -452,21 +459,21 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
             raise HTTPException(404, str(exc)) from exc
 
     @app.get("/api/chat/messages/{message_id}/evidence")
-    def message_evidence(message_id: str) -> dict[str, Any]:
+    async def message_evidence(message_id: str) -> dict[str, Any]:
         try:
             return store.evidence(message_id)
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
 
     @app.get("/api/chat/messages/{message_id}/audit")
-    def message_audit(message_id: str) -> dict[str, Any]:
+    async def message_audit(message_id: str) -> dict[str, Any]:
         try:
             return store.audit(message_id)
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
 
     @app.get("/api/chat/messages/{message_id}/source/{citation_id}")
-    def open_source(message_id: str, citation_id: int) -> FileResponse:
+    async def open_source(message_id: str, citation_id: int) -> FileResponse:
         try:
             audit = store.audit(message_id)
             evidence = audit.get("citations", audit.get("evidence", []))
@@ -501,7 +508,7 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
             raise HTTPException(404, str(exc)) from exc
 
     @app.get("/api/chat/conversations/{conversation_id}/export")
-    def export_conversation(conversation_id: str) -> FileResponse:
+    async def export_conversation(conversation_id: str) -> FileResponse:
         target = root / "Outputs" / "Conversations" / f"{conversation_id}.json"
         try:
             store.export(conversation_id, target)
@@ -541,7 +548,7 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
         }
 
     @app.get("/api/search/scholarly")
-    def scholarly_search(
+    async def scholarly_search(
         query: str,
         providers: str = "crossref,openalex,arxiv",
         limit: int = 10,
@@ -555,16 +562,16 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
         )
 
     @app.get("/search/scholarly")
-    def legacy_scholarly_search(
+    async def legacy_scholarly_search(
         query: str,
         providers: str = "crossref,openalex,arxiv",
         limit: int = 10,
         offline: bool = False,
     ) -> dict[str, object]:
-        return scholarly_search(query, providers, limit, offline)
+        return await scholarly_search(query, providers, limit, offline)
 
     @app.get("/search/ieee")
-    def ieee_search(query: str, limit: int = 10) -> dict[str, object]:
+    async def ieee_search(query: str, limit: int = 10) -> dict[str, object]:
         response = search_ieee(query, limit=limit)
         return {
             "provider": response.provider,
@@ -575,7 +582,7 @@ def create_app(root: Path | None = None, database: Path | None = None) -> FastAP
         }
 
     @app.post("/search")
-    def do_search(request: SearchRequest) -> dict[str, Any]:
+    async def do_search(request: SearchRequest) -> dict[str, Any]:
         evidence = search(
             index_database,
             request.query,

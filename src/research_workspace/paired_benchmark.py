@@ -17,7 +17,7 @@ import shlex
 import shutil
 import signal
 import statistics
-import subprocess  # nosec B404 - fixed benchmark executables only.
+import subprocess  # nosec B404
 import sys
 import time
 import uuid
@@ -623,7 +623,7 @@ def _run_command(
     if environment:
         env.update(environment)
     try:
-        completed = subprocess.run(  # nosec B603 - callers construct fixed evaluator commands.
+        completed = subprocess.run(  # nosec B603
             command,
             cwd=cwd,
             text=True,
@@ -655,7 +655,7 @@ def _git(repository_root: Path, arguments: list[str], *, timeout_seconds: int = 
     git = shutil.which("git")
     if git is None:
         raise RuntimeError("git executable is unavailable")
-    completed = subprocess.run(  # nosec B603 - benchmark worktree arguments are generated locally.
+    completed = subprocess.run(  # nosec B603
         [git, *arguments],
         cwd=repository_root,
         text=True,
@@ -1206,7 +1206,7 @@ def run_valid_paired_benchmark(
         )
         codex_started_at, codex_started = _now(), time.monotonic()
         with codex_log.open("w", encoding="utf-8") as codex_stream:
-            codex_process = subprocess.Popen(  # nosec B603 - executable and arguments are fixed.
+            codex_process = subprocess.Popen(  # nosec B603
                 [
                     codex,
                     "exec",
@@ -1227,7 +1227,7 @@ def run_valid_paired_benchmark(
             )
             laplace_started_at, laplace_started = _now(), time.monotonic()
             with laplace_log.open("w", encoding="utf-8") as laplace_stream:
-                laplace_process = subprocess.Popen(  # nosec B603 - fixed module and request path.
+                laplace_process = subprocess.Popen(  # nosec B603
                     [
                         python_executable,
                         "-m",
