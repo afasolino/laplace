@@ -2548,9 +2548,9 @@ def _validate_terminal_pair_result(value: JsonObject) -> None:
             "reviewer_status",
         }
         failure_missing = sorted(failure_required - set(value))
-        if outcome != "infrastructure_failure" or failure_missing:
+        if outcome not in {"infrastructure_failure", "model_quality_failure"} or failure_missing:
             raise EngineeringError(
-                "Typed infrastructure failure is malformed; missing: " + ", ".join(failure_missing)
+                "Typed terminal failure is malformed; missing: " + ", ".join(failure_missing)
             )
     elif status != "COMPLETE_EVALUATED":
         raise EngineeringError(f"Unknown terminal pair result status: {status}")
@@ -2572,6 +2572,28 @@ def _task_failure_stage(task_value: JsonObject | None) -> str:
     }.get(str(state), "orchestration")
 
 
+_MODEL_QUALITY_FAILURE_CATEGORIES = frozenset(
+    {
+        "empty_content",
+        "incomplete_response",
+        "malformed_json",
+        "malformed_response",
+        "no_effect_correction",
+        "schema_mismatch",
+        "truncated_response",
+        "worker_response_invalid",
+    }
+)
+
+
+def _failure_outcome_kind(category: str) -> str:
+    return (
+        "model_quality_failure"
+        if category in _MODEL_QUALITY_FAILURE_CATEGORIES
+        else "infrastructure_failure"
+    )
+
+
 def _exception_failure_category(exc: Exception) -> str:
     if isinstance(exc, ContextBudgetError):
         return "context_overflow"
@@ -2580,7 +2602,8 @@ def _exception_failure_category(exc: Exception) -> str:
     if isinstance(exc, ModelInvocationError):
         return exc.category
     if isinstance(exc, ModelRequired):
-        return "endpoint_unavailable"
+        category = getattr(exc, "category", None)
+        return category if isinstance(category, str) and category else "endpoint_unavailable"
     if isinstance(exc, (subprocess.TimeoutExpired, TimeoutError)):
         return "timeout"
     name = exc.__class__.__name__.lower()
@@ -2604,7 +2627,7 @@ def _terminal_lane_failure(
     return {
         "status": "TERMINAL_FAILURE",
         "terminal": True,
-        "outcome_kind": "infrastructure_failure",
+        "outcome_kind": _failure_outcome_kind(category),
         "task_id": task.task_id,
         "arm_id": arm.arm_id,
         "stage": stage,
@@ -2700,6 +2723,51 @@ def _execute_task_lane(
     }
 
 
+def _ensure_lane_corpus_ready(
+    repository_root: Path,
+    configuration: ExperimentConfiguration,
+) -> JsonObject:
+    """Prepare and verify governed retrieval for standalone run-pair execution.
+
+    Normal phase execution prepares the shared overlay before spawning lane
+    subprocesses. Direct run-pair smoke tests bypass that phase-level setup, so
+    they must fail closed or prepare the same verified overlay themselves.
+    """
+    validation_error: str | None = None
+    try:
+        validation = validate_corpus_retrieval(configuration.overlay_root)
+    except ReferencePolicyError as exc:
+        validation = {"status": "UNAVAILABLE"}
+        validation_error = str(exc)
+    if validation.get("status") == "VERIFIED_NON_EMPTY":
+        return {
+            "status": "REUSED_VERIFIED_OVERLAY",
+            "base_root": str(configuration.base_reference_root.expanduser().resolve()),
+            "overlay_root": str(configuration.overlay_root),
+            "preparation": None,
+            "validation": validation,
+        }
+
+    preparation = prepare_corpus_overlay(
+        repository_root,
+        configuration.base_reference_root,
+        configuration.overlay_root,
+    )
+    validation = validate_corpus_retrieval(configuration.overlay_root)
+    if validation.get("status") != "VERIFIED_NON_EMPTY":
+        details = f"; initial validation error: {validation_error}" if validation_error else ""
+        raise ReferencePolicyError(
+            "Standalone lane governed corpus is not verified and non-empty" + details
+        )
+    return {
+        "status": "PREPARED_VERIFIED_OVERLAY",
+        "base_root": str(configuration.base_reference_root.expanduser().resolve()),
+        "overlay_root": str(configuration.overlay_root),
+        "preparation": preparation,
+        "validation": validation,
+    }
+
+
 def _execute_lane_request(
     repository_root: Path,
     configuration: ExperimentConfiguration,
@@ -2727,7 +2795,9 @@ def _execute_lane_request(
         configuration.output_root,
         Path(_string(request.get("result_path"), label="lane result path")).resolve(),
     )
+    corpus_preflight: JsonObject | None = None
     try:
+        corpus_preflight = _ensure_lane_corpus_ready(repository_root, configuration)
         bundle = _execute_task_lane(
             repository_root,
             configuration,
@@ -2735,6 +2805,7 @@ def _execute_lane_request(
             arms[arm_id],
             project,
         )
+        bundle["corpus_preflight"] = corpus_preflight
     except Exception as exc:
         task_value: JsonObject = {}
         try:
@@ -2758,6 +2829,7 @@ def _execute_lane_request(
             "lane": lane,
             "gpu_before": {"status": "UNAVAILABLE"},
             "gpu_after": {"status": "UNAVAILABLE"},
+            "corpus_preflight": corpus_preflight,
         }
     _write_json_atomic(result_path, bundle)
     return bundle
@@ -2923,7 +2995,7 @@ def _terminal_pair_result(
         "schema_version": RESULT_SCHEMA_VERSION,
         "status": "TERMINAL_FAILURE",
         "terminal": True,
-        "outcome_kind": "infrastructure_failure",
+        "outcome_kind": _failure_outcome_kind(category),
         "experiment_id": EXPERIMENT_ID,
         "task_id": task.task_id,
         "language": task.language,
@@ -2955,7 +3027,11 @@ def _terminal_pair_result(
             "evidence": verification,
         },
         "held_out": {
-            "status": "NOT_RUN_INFRASTRUCTURE_FAILURE",
+            "status": (
+                "NOT_RUN_MODEL_QUALITY_FAILURE"
+                if _failure_outcome_kind(category) == "model_quality_failure"
+                else "NOT_RUN_INFRASTRUCTURE_FAILURE"
+            ),
             "score": None,
             "included_in_model_quality_metrics": False,
         },
@@ -3497,6 +3573,9 @@ def package_results(configuration: ExperimentConfiguration) -> JsonObject:
     infrastructure_failures = [
         row for row in rows if row.get("outcome_kind") == "infrastructure_failure"
     ]
+    model_quality_failures = [
+        row for row in rows if row.get("outcome_kind") == "model_quality_failure"
+    ]
     quality_rows = [row for row in rows if row.get("outcome_kind") == "candidate_result"]
     by_pair = {(str(row.get("task_id")), str(row.get("arm_id"))): row for row in quality_rows}
     aggregates: list[JsonObject] = []
@@ -3705,6 +3784,7 @@ def package_results(configuration: ExperimentConfiguration) -> JsonObject:
         "generated_at": _now(),
         "task_arm_results": rows,
         "infrastructure_failures": infrastructure_failures,
+        "model_quality_failures": model_quality_failures,
         "model_quality_task_arm_results": len(quality_rows),
         "aggregates": aggregates,
         "contrasts": contrasts,

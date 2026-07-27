@@ -442,6 +442,44 @@ def _interface_requirements(task_specification: JsonObject) -> tuple[list[str], 
     return cycle, handshake
 
 
+def _ready_valid_fifo_guidance(
+    *, task_specification: JsonObject, ports: list[JsonObject]
+) -> tuple[list[str], list[str]]:
+    """Make simultaneous full-buffer transfer semantics explicit when the task requires them."""
+    port_names = {str(port.get("name")) for port in ports}
+    required_ports = {
+        "in_valid",
+        "in_ready",
+        "in_data",
+        "out_valid",
+        "out_ready",
+        "out_data",
+    }
+    requirements = task_specification.get("functional_requirements")
+    requirement_text = (
+        " ".join(item.lower() for item in requirements if isinstance(item, str))
+        if isinstance(requirements, list)
+        else ""
+    )
+    if not required_ports.issubset(port_names):
+        return [], []
+    if "simultaneous" not in requirement_text or "full throughput" not in requirement_text:
+        return [], []
+    return (
+        [
+            "When storage is full and an output transfer is accepted, assert in_ready so an input "
+            "transfer may be accepted in the same cycle.",
+            "For a simultaneous pop and push while full, preserve FIFO order and keep "
+            "occupancy full: move the surviving older item to the output position and store "
+            "the new input at the tail.",
+        ],
+        [
+            "Compute input readiness from both available capacity and a same-cycle accepted output "
+            "transfer; do not create an avoidable bubble at full occupancy."
+        ],
+    )
+
+
 def _clock_reset_contract(
     *, source: str, task_specification: JsonObject, ports: list[JsonObject]
 ) -> JsonObject:
@@ -533,6 +571,11 @@ def build_rtl_worker_contract(
     module_name, parameter_text, port_text = _module_declaration(content)
     ports = _declared_ports(port_text)
     cycle_requirements, handshake_requirements = _interface_requirements(task_specification)
+    fifo_cycle, fifo_handshake = _ready_valid_fifo_guidance(
+        task_specification=task_specification, ports=ports
+    )
+    cycle_requirements.extend(fifo_cycle)
+    handshake_requirements.extend(fifo_handshake)
     verification = task_specification.get("verification")
     verification_item = dict(verification) if isinstance(verification, dict) else {}
     contract: JsonObject = {
@@ -714,36 +757,115 @@ def rtl_contract_prompt(
     )
 
 
+def _diagnostic_priority_summary(contract: RtlWorkerContract) -> list[str]:
+    """Extract compact verifier and reviewer evidence for a corrective worker call."""
+    diagnostics = contract.to_json().get("diagnostics")
+    if not isinstance(diagnostics, list):
+        return []
+    summaries: list[str] = []
+    for raw in diagnostics:
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        tool = item.get("tool")
+        expected = item.get("expected")
+        observed = item.get("observed")
+        compact_observed: object = observed
+        if isinstance(observed, str):
+            try:
+                decoded: object = json.loads(observed)
+            except json.JSONDecodeError:
+                compact_observed = observed[:3000]
+            else:
+                if isinstance(decoded, dict):
+                    compact_observed = {
+                        key: decoded[key]
+                        for key in (
+                            "observed_result",
+                            "violated_requirement",
+                            "minimal_failing_example",
+                            "reviewer_verdict",
+                        )
+                        if key in decoded
+                    }
+                else:
+                    compact_observed = decoded
+        summaries.append(
+            json.dumps(
+                {
+                    "tool": tool,
+                    "expected": expected,
+                    "observed": compact_observed,
+                },
+                sort_keys=True,
+            )[:6000]
+        )
+    return summaries
+
+
+def _worker_priority_guidance(
+    contract: RtlWorkerContract,
+    *,
+    retry_index: int,
+    prior_error: str | None,
+) -> str:
+    """Place mandatory behavior and repair deltas before the verbose serialized contract."""
+    value = contract.to_json()
+    cycle = value.get("cycle_requirements")
+    handshake = value.get("handshake_and_events")
+    requirements: list[str] = []
+    for raw in (cycle, handshake):
+        if isinstance(raw, list):
+            requirements.extend(str(item) for item in raw if isinstance(item, str))
+    lines = [
+        "MANDATORY BEHAVIORAL REQUIREMENTS. Every item below must be visibly implemented; "
+        "do not preserve contradictory behavior from the current source:",
+        *(f"- {item}" for item in requirements),
+    ]
+    if retry_index > 0:
+        lines.extend(
+            [
+                "MANDATORY CORRECTION. The prior implementation failed deterministic "
+                "verification or review.",
+                f"- Previous rejection: {prior_error or 'invalid worker response'}",
+                f"- Current source SHA-256: {contract.current_source_sha256}",
+                "- Return a materially changed implementation that fixes the reported failure. "
+                "Returning the current source unchanged is invalid.",
+            ]
+        )
+        for summary in _diagnostic_priority_summary(contract):
+            lines.append(f"- Verification/reviewer evidence: {summary}")
+    return "\n".join(lines) + "\n"
+
 def rtl_worker_prompt(
     contract: RtlWorkerContract,
     *,
     retry_index: int = 0,
     prior_error: str | None = None,
 ) -> str:
-    """Use CodeV's native reasoning/final-answer protocol for one bounded RTL file."""
-    retry_instruction = ""
-    if retry_index > 0:
-        retry_instruction = (
-            "This is a deterministic correction attempt. The previous answer was rejected for: "
-            f"{prior_error or 'invalid output'}. Correct that issue, keep the source concise, and do not "
-            "repeat declarations or source blocks.\n"
-        )
+    """Request one concise RTL source block without exposing a model reasoning channel."""
+    priority_guidance = _worker_priority_guidance(
+        contract, retry_index=retry_index, prior_error=prior_error
+    )
     return (
-        "You are a bounded RTL implementation worker. Implement exactly the one module specified by the "
-        "contract. Think through the implementation inside exactly one <think>...</think> block. Then emit "
-        "exactly one <answer>...</answer> block containing exactly one "
-        f"fenced {contract.language} code block with the complete replacement source for module "
-        f"{contract.module_name}. Do not emit JSON, a diff, a path, shell commands, testbench code, or prose "
-        "outside those tags. Preserve the public module name, parameters, ports, clock/reset behavior, and "
-        "all contract constraints. Do not explore a repository, execute tools, add modules, add files, or "
-        "change architecture. The orchestrator will validate and wrap the source deterministically.\n"
-        f"{retry_instruction}"
+        "You are a bounded RTL implementation worker. Implement exactly the one module "
+        "specified by the "
+        "contract. Return the implementation immediately as exactly one "
+        f"fenced {contract.language} code block containing the complete replacement source "
+        "for module "
+        f"{contract.module_name}. Do not emit reasoning, XML-style tags, JSON, a diff, a path, "
+        "shell commands, testbench code, or prose outside the code block. Preserve the public "
+        "module name, "
+        "parameters, ports, clock/reset behavior, and all contract constraints. Do not explore a repository, "
+        "execute tools, add modules, add files, or change architecture. The orchestrator will validate and "
+        "wrap the source deterministically.\n"
+        f"{priority_guidance}"
         f"RTL contract: {json.dumps(contract.to_json(), sort_keys=True)}"
     )
 
 
 def parse_codev_rtl_answer(model_text: str, *, contract: RtlWorkerContract) -> str:
-    """Extract one complete RTL module from CodeV's native tagged response."""
+    """Extract one complete RTL module from a bare or legacy tagged CodeV response."""
     if not isinstance(model_text, str) or not model_text.strip():
         raise StructuredOutputError("RTL worker response is empty")
     text = model_text.strip()

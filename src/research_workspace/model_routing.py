@@ -206,6 +206,14 @@ class RoutingDecision:
         }
 
 
+class WorkerFallbackDisabled(ModelRequired):
+    """A specialist failed and policy forbids replacing it with the main model."""
+
+    def __init__(self, message: str, *, category: str) -> None:
+        super().__init__(message)
+        self.category = category
+
+
 class RoleRouter:
     """Select a configured endpoint for one explicit role."""
 
@@ -231,10 +239,19 @@ class RoleRouter:
         return RoutingDecision(role, "main", self.configuration.main, eligibility, reason)
 
     def fallback(
-        self, role: ModelRole, metadata: RoutingTaskMetadata, *, failed_reason: str
+        self,
+        role: ModelRole,
+        metadata: RoutingTaskMetadata,
+        *,
+        failed_reason: str,
+        failed_category: str | None = None,
     ) -> RoutingDecision:
         if not self.configuration.fallback_to_main:
-            raise ModelRequired("RTL worker fallback is disabled")
+            category = failed_category or "worker_failure"
+            raise WorkerFallbackDisabled(
+                f"RTL worker fallback is disabled after {category}: {failed_reason}",
+                category=category,
+            )
         eligibility = assess_rtl_worker_eligibility(metadata)
         return RoutingDecision(
             role,
@@ -256,6 +273,7 @@ class RoutedCall:
     retry_index: int
     audit_path: str
     budget: JsonObject
+    failure_category: str | None = None
 
 
 ResponseValidator = Callable[[str], object]
@@ -384,6 +402,7 @@ class AuditedModelCaller:
         metadata: RoutingTaskMetadata,
         retry_index: int = 0,
         fallback_reason: str | None = None,
+        fallback_category: str | None = None,
         validator: ResponseValidator | None = None,
         requested_completion_tokens: int | None = None,
         compact_prompt: PromptCompactor | None = None,
@@ -397,7 +416,12 @@ class AuditedModelCaller:
         if not prompt.strip():
             raise EngineeringError("Model prompt cannot be empty")
         decision = (
-            self.router.fallback(role, metadata, failed_reason=fallback_reason)
+            self.router.fallback(
+                role,
+                metadata,
+                failed_reason=fallback_reason,
+                failed_category=fallback_category,
+            )
             if fallback_reason is not None
             else self.router.select(role, metadata)
         )
@@ -691,13 +715,16 @@ class AuditedModelCaller:
             )
         elif schema_validation_error is not None:
             lowered = schema_validation_error.lower()
-            failure_category = (
-                "malformed_json"
-                if "not valid json" in lowered
+            if "no source change" in lowered:
+                failure_category = "no_effect_correction"
+            elif (
+                "not valid json" in lowered
                 or "must be one json object" in lowered
                 or "fenced" in lowered
-                else "schema_mismatch"
-            )
+            ):
+                failure_category = "malformed_json"
+            else:
+                failure_category = "schema_mismatch"
         elif result.finish_reason not in {None, "stop"}:
             valid = False
             failure_category = "incomplete_response"
@@ -736,6 +763,7 @@ class AuditedModelCaller:
             retry_index,
             str(path),
             budget,
+            failure_category,
         )
 
 

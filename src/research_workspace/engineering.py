@@ -369,6 +369,8 @@ def normalize_task_spec(repository_root: Path, domain: Domain, raw: JsonObject) 
             "vvp_simulation",
             "yosys_synthesis",
         ]
+        if domain == "systemverilog":
+            gates.insert(3, "verilator_simulation")
         focus = [
             f"explicit {domain} microarchitecture before RTL",
             "clock/reset and CDC assumptions",
@@ -1414,16 +1416,32 @@ class LocalToolRunner:
                     "yosys", ["yosys", "-s", str(script)], timeout_seconds=timeout_seconds
                 ).to_json()
             )
+        executed_tools = sorted(
+            {
+                str(item.get("tool"))
+                for item in results
+                if isinstance(item.get("tool"), str)
+            }
+        )
+        required_results = set(required_tools)
+        if require_verilator_simulation:
+            required_results.add("verilator_simulation")
+        missing_required_results = sorted(required_results.difference(executed_tools))
+        verilator_simulation_executed = "verilator_simulation" in executed_tools
         return {
             "operation": "run_eda_flow",
             "language": language,
             "require_verilator_simulation": require_verilator_simulation,
+            "verilator_simulation_executed": verilator_simulation_executed,
             "required_tools": list(required_tools),
+            "executed_tools": executed_tools,
             "sources": sources,
             "top_module": top_module,
             "results": results,
             "missing_tools": missing_tools,
+            "missing_required_results": missing_required_results,
             "passed": not missing_tools
+            and not missing_required_results
             and bool(results)
             and all(item["status"] == "PASS" for item in results),
             "created_at": _now(),

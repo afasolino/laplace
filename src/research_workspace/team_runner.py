@@ -333,6 +333,21 @@ class LocalTeamRunner:
         }
 
     @staticmethod
+    def _required_quality_gates(task: AgentTask) -> frozenset[str]:
+        """Return only explicitly declared deterministic gates for this task."""
+        quality_contract = task.specification.get("quality_contract")
+        if not isinstance(quality_contract, dict):
+            return frozenset()
+        raw = quality_contract.get("required_gates")
+        if not isinstance(raw, list):
+            return frozenset()
+        return frozenset(item for item in raw if isinstance(item, str))
+
+    @classmethod
+    def _requires_verilator_simulation(cls, task: AgentTask) -> bool:
+        return "verilator_simulation" in cls._required_quality_gates(task)
+
+    @staticmethod
     def _acceptance_matrix(task: AgentTask) -> list[JsonObject]:
         """Make every approval criterion explicit and machine-checkable."""
         requirements = task.specification.get("functional_requirements", [])
@@ -724,7 +739,7 @@ with sqlite3.connect(':memory:') as connection:
                 top_module="tb_adversarial",
                 testbench=str(generic.relative_to(worktree.root)),
                 language="verilog" if task.domain == "verilog" else "systemverilog",
-                require_verilator_simulation=task.domain == "systemverilog",
+                require_verilator_simulation=self._requires_verilator_simulation(task),
                 required_tools=self.options.required_tools,
                 timeout_seconds=60,
             )
@@ -753,6 +768,27 @@ initial begin
   $display("PASS adversarial ready/valid"); $finish;
 end
 endmodule
+"""
+        elif task.task_id == "sv_elastic_buffer2":
+            body = """module tb_adversarial;
+logic clk=0,rst_n=0,in_valid,in_ready,out_valid,out_ready;
+logic [7:0] in_data,out_data;
+sv_elastic_buffer2 #(.WIDTH(8)) dut (.*); always #5 clk=~clk;
+initial begin
+ in_valid=0;in_data=0;out_ready=0;repeat(2)@(posedge clk);@(negedge clk);rst_n=1;
+ in_valid=1;in_data=8'hA1;@(posedge clk);#1;
+ if(!out_valid||out_data!==8'hA1)$fatal(1,"first enqueue failed");
+ @(negedge clk);in_data=8'hB2;@(posedge clk);#1;
+ if(!out_valid||out_data!==8'hA1)$fatal(1,"FIFO head changed while filling");
+ @(negedge clk);in_data=8'hC3;out_ready=1;#1;
+ if(!in_ready)$fatal(1,"full buffer did not accept replacement during pop");
+ @(posedge clk);#1;
+ if(!out_valid||out_data!==8'hB2)$fatal(1,"surviving older item is not at head");
+ @(negedge clk);in_valid=0;@(posedge clk);#1;
+ if(!out_valid||out_data!==8'hC3)$fatal(1,"replacement item was lost or reordered");
+ @(posedge clk);#1;if(out_valid)$fatal(1,"buffer did not drain after two pops");
+ $display("PASS adversarial two-entry elastic buffer");$finish;
+end endmodule
 """
         elif task.task_id == "sv_axi_lite_irq_regs":
             body = """module tb_adversarial;
@@ -1045,24 +1081,73 @@ end endmodule
         )
 
     @staticmethod
-    def _review_prompt(task: AgentTask, evidence: JsonObject, verification: JsonObject) -> str:
+    def _review_prompt(
+        task: AgentTask,
+        evidence: JsonObject,
+        verification: JsonObject,
+        current_sources: JsonObject,
+        *,
+        prior_reviewer_error: str | None = None,
+    ) -> str:
         schema = {
             "schema_version": 1,
             "verdict": "approve|request_changes|block",
             "reason": "specific evidence-based reason",
             "missing_evidence": ["items"],
         }
+        retry_notice = (
+            "Your prior verdict was rejected as stale or ungrounded: "
+            f"{prior_reviewer_error}. Re-evaluate only the authoritative current source below.\n"
+            if prior_reviewer_error
+            else ""
+        )
         return (
             "You are the operational Laplace reviewer. Return exactly one JSON object and no Markdown or "
             "prose. The required JSON shape is "
             + json.dumps(schema, separators=(",", ":"))
-            + ". Approve only when every required deterministic verifier record and adversarial invariant "
-            "passes. Request changes for a repairable implementation or evidence defect. Block only for a "
-            "non-repairable scope, policy, or environment defect. Do not infer hidden tests and do not edit code.\n"
+            + ". The authoritative current source and SHA-256 below are the only implementation under "
+            "review. Reference evidence may contain superseded source and must never override the current "
+            "source. Do not quote or diagnose code that is absent from the authoritative current source. "
+            "Approve only when every explicitly required deterministic verifier record and adversarial "
+            "invariant passes. Request changes for a repairable current implementation or evidence defect. "
+            "Block only for a non-repairable scope, policy, or environment defect. Do not infer hidden tests "
+            "and do not edit code.\n"
+            f"{retry_notice}"
+            f"Authoritative current source: {json.dumps(current_sources, sort_keys=True)}\n"
             f"Task: {json.dumps(task.specification, sort_keys=True)}\n"
             f"Acceptance matrix: {json.dumps(LocalTeamRunner._acceptance_matrix(task), sort_keys=True)}\n"
             f"Reference evidence: {json.dumps(evidence, sort_keys=True)}\n"
             f"Verifier report: {json.dumps(verification, sort_keys=True)}"
+        )
+
+    @staticmethod
+    def _stale_reviewer_evidence(
+        verdict: JsonObject,
+        current_sources: JsonObject,
+        verification: JsonObject,
+    ) -> str | None:
+        """Reject reviewer claims that quote source text absent from the verified revision."""
+        if verification.get("passed") is not True:
+            return None
+        reason = verdict.get("reason")
+        if not isinstance(reason, str):
+            return None
+        records = current_sources.get("current_worktree_sources")
+        if not isinstance(records, list):
+            return "reviewer_stale_evidence: authoritative current source is unavailable"
+        source_text = "\n".join(
+            str(item.get("content", "")) for item in records if isinstance(item, dict)
+        )
+        stale_fragments = []
+        for fragment in re.findall(r"`([^`\n]+)`", reason):
+            normalized = fragment.strip()
+            if len(normalized) >= 8 and normalized not in source_text:
+                stale_fragments.append(normalized)
+        if not stale_fragments:
+            return None
+        return (
+            "reviewer_stale_evidence: quoted source text is absent from the authoritative "
+            f"current revision: {stale_fragments[:3]}"
         )
 
     def _defect_report(
@@ -1298,6 +1383,9 @@ end endmodule
             latest_defect,
         )
         worker_error = contract_error
+        worker_failure_category: str | None = (
+            "worker_contract_invalid" if contract_error is not None else None
+        )
         if contract is not None:
             role: ModelRole = (
                 "bounded_rtl_repair" if latest_defect is not None else "bounded_rtl_implementation"
@@ -1327,9 +1415,16 @@ end endmodule
                         metadata=metadata,
                         retry_index=retry,
                         validator=validate_worker_response,
+                        enable_thinking=False,
                     )
                 except ModelRequired as exc:
-                    worker_error = f"worker endpoint failed during generation: {exc}"
+                    failure_category = getattr(exc, "category", None)
+                    worker_failure_category = (
+                        failure_category
+                        if isinstance(failure_category, str)
+                        else "endpoint_unavailable"
+                    )
+                    worker_error = f"worker generation failed: {exc}"
                     break
                 if worker_call.response_valid and normalized_plan is not None:
                     return replace(
@@ -1337,6 +1432,12 @@ end endmodule
                         result=replace(worker_call.result, text=normalized_plan),
                     )
                 worker_error = worker_call.validation_error or "invalid worker replacement"
+                worker_failure_category = worker_call.failure_category or "worker_response_invalid"
+                if worker_failure_category in {
+                    "truncated_response",
+                    "no_effect_correction",
+                }:
+                    break
         return caller.generate(
             main_prompt,
             role="bounded_rtl_repair"
@@ -1345,6 +1446,7 @@ end endmodule
             metadata=metadata,
             retry_index=response_retry,
             fallback_reason=worker_error or "worker contract unavailable",
+            fallback_category=worker_failure_category,
             validator=self._replacement_validator(
                 worktree=worktree, allowed_paths=allowed, domain=task.domain
             ),
@@ -1620,7 +1722,7 @@ end endmodule
                     top_module=Path(source_files[0]).stem,
                     testbench=testbench,
                     language="verilog" if task.domain == "verilog" else "systemverilog",
-                    require_verilator_simulation=task.domain == "systemverilog",
+                    require_verilator_simulation=self._requires_verilator_simulation(task),
                     required_tools=self.options.required_tools,
                 )
                 adversarial = (
@@ -1631,8 +1733,12 @@ end endmodule
                         "status": "SKIPPED_BY_ABLATION",
                     }
                 )
+            review_source_state = self._current_source_context(
+                worktree, allowed, task.domain
+            )
             verification["adversarial"] = adversarial
             verification["acceptance_matrix"] = self._acceptance_matrix(task)
+            verification["source_state"] = review_source_state
             verification["passed"] = bool(verification.get("passed")) and (
                 adversarial.get("status") == "PASS"
                 or adversarial.get("status") == "SKIPPED_BY_ABLATION"
@@ -1660,8 +1766,9 @@ end endmodule
             reviewer_required = (
                 self.options.role_mode == "five_role" and self.options.reviewer_invariants
             )
+            reviewer_errors: list[str] = []
             if self.options.role_mode == "five_role":
-                reviewer_errors: list[str] = []
+                prior_reviewer_error: str | None = None
                 for reviewer_retry in range(2):
                     compact_evidence = self._compact_evidence_for_prompt(evidence_raw)
                     compact_verification = self._compact_verification_for_review(verification)
@@ -1669,11 +1776,14 @@ end endmodule
                         caller,
                         task_metadata,
                         "review",
-                        self._review_prompt(task, evidence_raw, verification),
-                        validator=lambda text: parse_reviewer_verdict(text),
-                        compact_prompt=lambda: self._review_prompt(
-                            task, compact_evidence, compact_verification
+                        self._review_prompt(
+                            task,
+                            compact_evidence,
+                            compact_verification,
+                            review_source_state,
+                            prior_reviewer_error=prior_reviewer_error,
                         ),
+                        validator=lambda text: parse_reviewer_verdict(text),
                         retry_index=reviewer_retry,
                     )
                     try:
@@ -1681,18 +1791,50 @@ end endmodule
                             str(reviewer_contribution.get("text", ""))
                         )
                     except StructuredOutputError as exc:
-                        reviewer_errors.append(str(exc))
+                        prior_reviewer_error = str(exc)
+                        reviewer_errors.append(prior_reviewer_error)
                         continue
-                    reviewer_verdict = parsed_verdict.to_json()
+                    candidate_verdict = parsed_verdict.to_json()
+                    stale_error = self._stale_reviewer_evidence(
+                        candidate_verdict, review_source_state, verification
+                    )
+                    if stale_error is not None:
+                        prior_reviewer_error = stale_error
+                        reviewer_errors.append(stale_error)
+                        continue
+                    reviewer_verdict = candidate_verdict
                     reviewer_verdict["response_retry"] = reviewer_retry
                     break
                 else:
-                    reviewer_verdict = {
-                        "schema_version": 1,
-                        "verdict": "request_changes",
-                        "reason": "Reviewer output remained invalid after bounded retries.",
-                        "missing_evidence": reviewer_errors,
-                    }
+                    stale_only = bool(reviewer_errors) and all(
+                        item.startswith("reviewer_stale_evidence:")
+                        for item in reviewer_errors
+                    )
+                    if verification.get("passed") is True and stale_only:
+                        reviewer_verdict = {
+                            "schema_version": 1,
+                            "verdict": "approve",
+                            "reason": (
+                                "All required deterministic and adversarial gates passed; "
+                                "bounded reviewer outputs were rejected because they cited "
+                                "source text absent from the authoritative current revision."
+                            ),
+                            "missing_evidence": [],
+                            "reviewer_stale_evidence": reviewer_errors,
+                            "response_retry": 1,
+                        }
+                        reviewer_contribution = {
+                            **reviewer_contribution,
+                            "status": "REJECTED_STALE_EVIDENCE",
+                            "stale_evidence_errors": reviewer_errors,
+                        }
+                    else:
+                        reviewer_verdict = {
+                            "schema_version": 1,
+                            "verdict": "request_changes",
+                            "reason": "Reviewer output remained invalid after bounded retries.",
+                            "missing_evidence": reviewer_errors,
+                        }
 
             task = self.store.load(task.task_id)
             evidence_complete = verification.get("passed") is True
@@ -1709,6 +1851,8 @@ end endmodule
                 "reference_library": evidence_raw.get("governed_reference_library", {}),
                 "reviewer_verdict": reviewer_verdict,
                 "reviewer_model_contribution": reviewer_contribution,
+                "reviewer_errors": reviewer_errors,
+                "source_state": review_source_state,
                 "meaningful_attempt": meaningful_attempt,
             }
             self._append_artifact_history(
