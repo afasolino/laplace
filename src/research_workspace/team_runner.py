@@ -57,6 +57,7 @@ from .repair_protocol import (
     replacement_plan_json_schema,
     source_state,
 )
+from .reproducibility import ContextPacketBuilder, FrozenSkillRegistry
 from .rtl_contract import (
     RtlWorkerContract,
     build_rtl_worker_contract,
@@ -280,6 +281,85 @@ class LocalTeamRunner:
         self.options = options or TeamWorkflowOptions()
         self.log_root = self.project_root / "Outputs" / "AgentTeam" / "team_logs"
         self.shared_reference_root = resolve_shared_reference_root(shared_reference_root)
+        self.run_record_root = self.project_root / "Outputs" / "AgentTeam" / "run"
+        self.skill_registry = FrozenSkillRegistry(
+            self.repository_root / "codex_a6000" / "skills"
+        )
+        self.skills_lock = self.skill_registry.write_lock(
+            self.run_record_root / "skills.lock.json"
+        )
+        self.context_builder = ContextPacketBuilder(self.repository_root)
+        self.corpus_snapshot_sha256 = self._corpus_snapshot_sha256(
+            self.shared_reference_root
+        )
+        self._context_attempts: dict[str, int] = {}
+
+    @staticmethod
+    def _corpus_snapshot_sha256(root: Path | None) -> str:
+        manifests: list[JsonObject] = []
+        if root is not None and root.is_dir():
+            for path in sorted(root.glob("*/90_manifests/catalog_snapshot.json")):
+                manifests.append(
+                    {
+                        "domain": path.parts[-3],
+                        "filename": path.name,
+                        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    }
+                )
+        return hashlib.sha256(
+            json.dumps(
+                {
+                    "root_name": root.name if root is not None else None,
+                    "manifests": manifests,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _skill_role(model_role: ModelRole) -> str:
+        return {
+            "planning_supervision": "requirements",
+            "retrieval_interpretation": "requirements",
+            "general_implementation": "general_implementation",
+            "rtl_contract_generation": "requirements",
+            "bounded_rtl_implementation": "bounded_rtl_implementation",
+            "bounded_rtl_repair": "bounded_rtl_repair",
+            "review": "review",
+        }[model_role]
+
+    def _context_packet(
+        self, role: ModelRole, retry_index: int, prompt: str
+    ) -> tuple[str, JsonObject]:
+        del retry_index
+        attempt = self._context_attempts.get(role, 0)
+        self._context_attempts[role] = attempt + 1
+        skill_role = self._skill_role(role)
+        skill_paths = [
+            self.repository_root / str(item["path"])
+            for record in self.skill_registry.skills_for_role(skill_role)
+            for item in record.files
+        ]
+        packet = self.context_builder.build(
+            self.run_record_root,
+            role=role,
+            attempt=attempt,
+            sections={"request": prompt},
+            source_paths=skill_paths,
+            skills_lock_sha256=str(self.skills_lock["skills_lock_sha256"]),
+            corpus_snapshot_sha256=self.corpus_snapshot_sha256,
+        )
+        return (
+            Path(packet.context_path).read_text(encoding="utf-8"),
+            {
+                "role": role,
+                "attempt": attempt,
+                "context_path": packet.context_path,
+                "manifest_path": packet.manifest_path,
+                "context_sha256": packet.context_sha256,
+            },
+        )
 
     def _transition(self, task: AgentTask, target: TaskState, note: str) -> AgentTask:
         return self.store.transition(task.task_id, target, role="supervisor", note=note)
@@ -1584,7 +1664,11 @@ end endmodule
             return {"status": "BLOCKED_GPU", "task": task.to_json(), "cuda_evidence": cuda}
         task_metadata = self._effective_routing_metadata(task)
         configuration = self.model_configuration
-        caller = AuditedModelCaller(RoleRouter(configuration), self.log_root / "model_calls")
+        caller = AuditedModelCaller(
+            RoleRouter(configuration),
+            self.log_root / "model_calls",
+            context_packet_factory=self._context_packet,
+        )
         worker_needed = (
             assess_rtl_worker_eligibility(task_metadata).eligible
             and self.rtl_worker_candidate is not None

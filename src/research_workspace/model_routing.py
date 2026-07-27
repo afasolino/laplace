@@ -278,6 +278,7 @@ class RoutedCall:
 
 ResponseValidator = Callable[[str], object]
 PromptCompactor = Callable[[], str]
+ContextPacketFactory = Callable[[ModelRole, int, str], tuple[str, JsonObject]]
 
 
 class ContextBudgetError(ModelRequired):
@@ -318,10 +319,12 @@ class AuditedModelCaller:
         audit_root: Path,
         *,
         backend_factory: Callable[[ServingCandidate], LocalGenerationBackend] = backend_for,
+        context_packet_factory: ContextPacketFactory | None = None,
     ) -> None:
         self.router = router
         self.audit_root = audit_root.resolve()
         self.backend_factory = backend_factory
+        self.context_packet_factory = context_packet_factory
         self._backends: dict[ServingCandidate, LocalGenerationBackend] = {}
 
     def _backend(self, candidate: ServingCandidate) -> LocalGenerationBackend:
@@ -476,6 +479,18 @@ class AuditedModelCaller:
                 )
                 capacity = max(0, context_limit - safety_margin - prompt_tokens)
                 effective_completion = min(requested, capacity)
+        context_packet: JsonObject | None = None
+        if self.context_packet_factory is not None:
+            effective_prompt, context_packet = self.context_packet_factory(
+                role, retry_index, effective_prompt
+            )
+            if not effective_prompt.strip():
+                raise EngineeringError("Context packet factory returned an empty prompt")
+            prompt_tokens, token_count_method, tokenizer_error = self._prompt_tokens(
+                backend, effective_prompt
+            )
+            capacity = max(0, context_limit - safety_margin - prompt_tokens)
+            effective_completion = min(requested, capacity)
         budget: JsonObject = {
             "call_policy": call_policy,
             "normal_output_cap": decision.candidate.max_output_tokens,
@@ -578,6 +593,7 @@ class AuditedModelCaller:
                 "structured_output": structured_output,
                 "thinking_mode": thinking_mode,
                 "sampling_parameters": sampling_parameters,
+                "context_packet": context_packet,
                 **payload,
             }
             _write_json_atomic(path, record, readonly=True)
