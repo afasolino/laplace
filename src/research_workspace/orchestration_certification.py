@@ -215,10 +215,9 @@ class LiveCertificationExecutor:
             else []
         )
         if len(servers) != 2 or any(
-            item.get("endpoint_observation", {}).get("status")
-            != "HEALTHY_EXACT_MODEL"
+            not isinstance(item.get("endpoint_observation"), dict)
+            or item["endpoint_observation"].get("status") != "HEALTHY_EXACT_MODEL"
             for item in servers
-            if isinstance(item.get("endpoint_observation"), dict)
         ):
             raise CertificationRunError("Exact local model endpoints are not healthy")
         event_log.append(
