@@ -121,3 +121,31 @@ The original low-level command remains supported for reproducible scripts and CI
 ```
 
 The FormalScience example and detailed security/provenance procedures are documented in [docs/FORMALSCIENCE_OPERATING_GUIDE.md](docs/FORMALSCIENCE_OPERATING_GUIDE.md), [docs/ONLINE_RESEARCH_SECURITY.md](docs/ONLINE_RESEARCH_SECURITY.md), [docs/IEEE_XPLORE_WORKFLOW.md](docs/IEEE_XPLORE_WORKFLOW.md), [docs/PROJECT_LIFECYCLE.md](docs/PROJECT_LIFECYCLE.md), [docs/PROVENANCE_MODEL.md](docs/PROVENANCE_MODEL.md), and [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
+## Frozen CodeV execution and Operator Plane
+
+The A6000 workflow now has an append-only, reproducibility-locked execution
+core and a separate Research and Operator Plane. The browser and exploratory
+research stores cannot influence measured execution.
+
+```bash
+laplace-operator --role read status --json
+laplace-operator --role read model-servers preflight --json
+laplace-operator-server --host 127.0.0.1 --port 8765
+research create --request request.json --adapters adapters.json
+research run --job RESEARCH_JOB_ID --adapters adapters.json
+```
+
+The Operator GUI provides authenticated run, evidence, research, corpus,
+hardware, comparison, approval, and diagnostic views. GPU work and corpus
+promotion require explicit approvals. Model-server admission uses preserved
+A6000 measurements and exact `/v1/models` identities; shutdown signals only
+PIDs proven to match Laplace model paths and ports.
+
+Technical contracts are indexed from
+[orchestration architecture](docs/orchestration_architecture.md),
+[model-server lifecycle](docs/model_server_admission_and_lifecycle.md),
+[Research Plane](docs/research_and_knowledge_plane.md), and
+[GUI security](docs/gui_security.md). The exact reference revisions and
+licence decisions are recorded in
+[the external reference audit](docs/external_reference_audit.md).
