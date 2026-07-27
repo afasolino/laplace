@@ -728,6 +728,77 @@ class OperatorService:
             ).fetchall()
         return [_row_object(row) for row in rows]
 
+    def approvals(
+        self,
+        *,
+        actor_role: str,
+        state: str | None = None,
+    ) -> list[JsonObject]:
+        _require_role(actor_role, _ROLES)
+        if state is not None and state not in {"PENDING", "APPROVED", "REJECTED"}:
+            raise OperatorServiceError(
+                "invalid_approval_state", {"state": state}
+            )
+        with self._connect() as connection:
+            if state is None:
+                rows = connection.execute(
+                    """
+                    SELECT approval_id, action, entity_id, payload_sha256, state,
+                           requested_by_role, decided_by_role, created_at_utc,
+                           decided_at_utc
+                    FROM approvals ORDER BY created_at_utc DESC LIMIT 200
+                    """
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT approval_id, action, entity_id, payload_sha256, state,
+                           requested_by_role, decided_by_role, created_at_utc,
+                           decided_at_utc
+                    FROM approvals WHERE state = ?
+                    ORDER BY created_at_utc DESC LIMIT 200
+                    """,
+                    (state,),
+                ).fetchall()
+        return [_row_object(row) for row in rows]
+
+    def record_action(
+        self,
+        *,
+        actor_role: str,
+        action: str,
+        entity_type: str,
+        entity_id: str,
+        payload: Mapping[str, object],
+    ) -> JsonObject:
+        """Append an action performed by another typed local service."""
+
+        _require_role(actor_role, _OPERATORS)
+        if not re.fullmatch(r"[A-Z0-9_]{1,80}", action):
+            raise OperatorServiceError(
+                "invalid_operator_action", {"action": action}
+            )
+        if not re.fullmatch(r"[a-z_]{1,40}", entity_type):
+            raise OperatorServiceError(
+                "invalid_operator_action", {"entity_type": entity_type}
+            )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._event(
+                connection,
+                actor_role=actor_role,
+                action=action,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                payload=payload,
+            )
+            sequence = int(
+                connection.execute(
+                    "SELECT last_insert_rowid()"
+                ).fetchone()[0]
+            )
+        return {"status": "RECORDED", "event_sequence": sequence}
+
     def summary(self, *, actor_role: str) -> JsonObject:
         _require_role(actor_role, _ROLES)
         with self._connect() as connection:

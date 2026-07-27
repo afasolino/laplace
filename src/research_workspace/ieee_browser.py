@@ -62,7 +62,7 @@ def login() -> dict[str, Any]:
             "instruction": "Install the optional Playwright dependency, then run this command in a visible session. The user must complete IEEE/institutional login manually; automation never enters credentials.",
         }
     try:
-        from playwright.sync_api import sync_playwright  # type: ignore[import-not-found]
+        from playwright.sync_api import sync_playwright  # type: ignore[import-not-found,unused-ignore]
 
         with sync_playwright() as playwright:
             context = playwright.chromium.launch_persistent_context(info["profile"], headless=False)

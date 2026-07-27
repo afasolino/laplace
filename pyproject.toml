@@ -19,10 +19,14 @@ browser = ["playwright>=1.40"]
 research-workspace = "research_workspace.cli:main"
 laplace = "research_workspace.laplace_cli:main"
 laplace-operator = "research_workspace.operator_cli:main"
+laplace-operator-server = "research_workspace.operator_server:main"
 research = "research_workspace.research_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+research_workspace = ["operator_web/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

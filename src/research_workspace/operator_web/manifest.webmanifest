@@ -1,0 +1,9 @@
+{
+  "name": "Laplace Research and Operator Plane",
+  "short_name": "Laplace",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f3efe4",
+  "theme_color": "#173c35",
+  "description": "Local evidence-led research and measured-run operations"
+}

@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#173c35">
+  <title>Laplace Operator Plane</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <a class="skip-link" href="#workspace">Skip to workspace</a>
+  <div class="shell">
+    <aside class="rail" aria-label="Primary navigation">
+      <a class="brand" href="#dashboard" aria-label="Laplace home">
+        <span class="brand-mark" aria-hidden="true">λ</span>
+        <span><strong>Laplace</strong><small>operator plane</small></span>
+      </a>
+      <nav id="primary-nav">
+        <a href="#dashboard" data-view="dashboard" aria-current="page">Overview</a>
+        <a href="#run-builder" data-view="run-builder">Run builder</a>
+        <a href="#live-run" data-view="live-run">Live run</a>
+        <a href="#evidence" data-view="evidence">Evidence</a>
+        <a href="#research" data-view="research">Research</a>
+        <a href="#corpora" data-view="corpora">Corpora</a>
+        <a href="#hardware" data-view="hardware">Hardware</a>
+        <a href="#compare" data-view="compare">Compare</a>
+        <a href="#approvals" data-view="approvals">Approvals</a>
+        <a href="#diagnostics" data-view="diagnostics">Diagnostics</a>
+      </nav>
+      <div class="rail-foot">
+        <span id="connection-dot" class="status-dot" aria-hidden="true"></span>
+        <span id="connection-label">Offline</span>
+      </div>
+    </aside>
+
+    <main id="workspace" tabindex="-1">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Local research control</p>
+          <h1 id="view-title">Operational overview</h1>
+        </div>
+        <div class="top-actions">
+          <span id="role-badge" class="badge">signed out</span>
+          <button id="refresh-button" class="button secondary" type="button">Refresh</button>
+          <button id="sign-out-button" class="button ghost" type="button">Sign out</button>
+        </div>
+      </header>
+
+      <p id="live-status" class="sr-only" role="status" aria-live="polite"></p>
+      <div id="warning-banner" class="banner warning" role="alert" hidden></div>
+
+      <section id="dashboard" class="view active" data-title="Operational overview">
+        <div class="hero">
+          <div>
+            <p class="eyebrow light">Evidence before assertion</p>
+            <h2>Runs, research, and hardware—without crossing the measurement boundary.</h2>
+          </div>
+          <div class="hero-metric"><span id="hero-active-runs">0</span><small>active runs</small></div>
+        </div>
+        <div id="dashboard-cards" class="metric-grid" aria-label="Workspace metrics"></div>
+        <div class="split-grid">
+          <article class="panel">
+            <div class="panel-head"><h2>Recent runs</h2><span class="badge quiet">immutable</span></div>
+            <div id="recent-runs" class="table-wrap"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><h2>Research queue</h2><span class="badge quiet">exploratory</span></div>
+            <div id="research-summary" class="stack-list"></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="run-builder" class="view" data-title="Measured run builder">
+        <div class="section-intro">
+          <div><p class="eyebrow">Frozen before start</p><h2>Compose an immutable execution request</h2></div>
+          <p>The preview is hashed before activation. GPU work still requires a separate approval.</p>
+        </div>
+        <form id="run-form" class="panel form-grid">
+          <label>Task ID<input name="task_id" value="sv_elastic_buffer2" required></label>
+          <label>Arm<select name="arm_id"><option value="C">C — main + CodeV</option><option value="A">A — baseline</option><option value="B">B — main only</option></select></label>
+          <label>Model route<input name="model_route" value="main+codev" required></label>
+          <label>Smoke profile<input name="smoke_profile" value="codev-live" required></label>
+          <label>Corpus snapshot SHA-256<input name="corpus_snapshot_sha256" pattern="[0-9a-f]{64}" value="1111111111111111111111111111111111111111111111111111111111111111" required></label>
+          <label>Skills lock SHA-256<input name="skills_lock_sha256" pattern="[0-9a-f]{64}" value="2222222222222222222222222222222222222222222222222222222222222222" required></label>
+          <label>Request SHA-256<input name="request_sha256" pattern="[0-9a-f]{64}" value="3333333333333333333333333333333333333333333333333333333333333333" required></label>
+          <label class="check"><input name="gpu_required" type="checkbox" checked> Requires GPU resources</label>
+          <div class="form-actions"><button class="button primary" type="submit">Prepare immutable run</button></div>
+        </form>
+        <article class="panel"><h3>Configuration preview</h3><pre id="run-preview">Submit the form to create a fresh run identity.</pre></article>
+      </section>
+
+      <section id="live-run" class="view" data-title="Live run evidence">
+        <div class="section-intro"><div><p class="eyebrow">Append-only state</p><h2>Execution timeline</h2></div><label>Run ID<input id="live-run-id" placeholder="run-…"></label></div>
+        <div class="split-grid">
+          <article class="panel"><h3>State machine</h3><ol id="event-timeline" class="timeline"></ol></article>
+          <article class="panel"><h3>Run record</h3><pre id="run-record">Choose a run to inspect.</pre></article>
+        </div>
+        <article class="panel"><div class="panel-head"><h3>Verification gates</h3><span class="badge quiet">source evidence</span></div><div id="gate-matrix" class="gate-grid"></div></article>
+      </section>
+
+      <section id="evidence" class="view" data-title="Artifact and evidence explorer">
+        <div class="section-intro"><div><p class="eyebrow">Read-only</p><h2>Inspect an artifact</h2></div><p>Paths are confined to approved output roots; held-out and secret paths are denied.</p></div>
+        <form id="artifact-form" class="inline-form"><label>Artifact path<input name="path" placeholder="research/job/report.md" required></label><button class="button primary" type="submit">Inspect</button></form>
+        <article class="panel"><div class="panel-head"><h3 id="artifact-name">Artifact preview</h3><a id="artifact-download" class="button secondary" href="#" hidden>Download</a></div><pre id="artifact-preview">No artifact selected.</pre></article>
+      </section>
+
+      <section id="research" class="view" data-title="Deep research studio">
+        <div class="section-intro"><div><p class="eyebrow">Exploratory store</p><h2>Ask, trace, verify</h2></div><p>Research evidence never enters a measured run or governed corpus automatically.</p></div>
+        <form id="research-form" class="panel form-grid">
+          <label class="wide">Research question<textarea name="question" rows="4" required>What evidence supports deterministic, evidence-led local RTL research?</textarea></label>
+          <label>Mode<select name="research_mode"><option>quick</option><option selected>standard</option><option>deep</option><option>systematic_literature</option><option>repository_audit</option><option>hardware_state_of_the_art</option></select></label>
+          <label>Backend<input name="backend" value="local_governed_corpus" required></label>
+          <label>Scope<input name="scope" value="bounded operator request" required></label>
+          <label>Source policy<input name="source_policy" value="primary_preferred" required></label>
+          <div class="form-actions"><button class="button primary" type="submit">Create research job</button><button id="run-research-button" class="button secondary" type="button" disabled>Run stages</button></div>
+        </form>
+        <div class="split-grid">
+          <article class="panel"><h3>Stage progress</h3><ol id="research-stages" class="timeline"></ol></article>
+          <article class="panel"><h3>Evidence ledger</h3><div id="evidence-ledger" class="stack-list">No completed report.</div></article>
+        </div>
+        <article class="panel"><h3>Research report</h3><pre id="research-report">No report generated.</pre></article>
+      </section>
+
+      <section id="corpora" class="view" data-title="RAG and corpus manager">
+        <div class="section-intro"><div><p class="eyebrow">Governed snapshots</p><h2>Corpus lineage</h2></div><p>Promotions are reviewed snapshots; rollback never rewrites the prior snapshot.</p></div>
+        <div id="corpus-list" class="card-grid"></div>
+      </section>
+
+      <section id="hardware" class="view" data-title="Model and hardware center">
+        <div class="section-intro"><div><p class="eyebrow">Exact identities</p><h2>GPU admission and endpoints</h2></div><button id="hardware-refresh" class="button secondary" type="button">Probe now</button></div>
+        <div id="gpu-status" class="metric-grid"></div>
+        <article class="panel"><h3>Model servers</h3><div id="model-servers" class="stack-list"></div></article>
+      </section>
+
+      <section id="compare" class="view" data-title="Run comparison">
+        <form id="compare-form" class="inline-form">
+          <label>Left run<input name="left" required></label>
+          <label>Right run<input name="right" required></label>
+          <button class="button primary" type="submit">Compare locks and outcomes</button>
+        </form>
+        <article class="panel"><h3>Comparison</h3><div id="comparison-table" class="table-wrap">Choose two runs.</div></article>
+      </section>
+
+      <section id="approvals" class="view" data-title="Approval queue">
+        <div class="section-intro"><div><p class="eyebrow">Two-person boundary</p><h2>Pending decisions</h2></div><button id="approvals-refresh" class="button secondary" type="button">Refresh</button></div>
+        <div id="approval-list" class="stack-list"></div>
+      </section>
+
+      <section id="diagnostics" class="view" data-title="Settings and diagnostics">
+        <div class="section-intro"><div><p class="eyebrow">Local by default</p><h2>Security posture</h2></div><p>No saved secret values are returned by this view.</p></div>
+        <div id="diagnostic-cards" class="card-grid"></div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="login-dialog" aria-labelledby="login-title">
+    <form id="login-form" method="dialog">
+      <p class="eyebrow">Local authentication</p>
+      <h2 id="login-title">Unlock the Operator Plane</h2>
+      <p>Enter a locally configured role token. It remains in this browser tab only.</p>
+      <label>Access token<input id="token-input" type="password" minlength="24" autocomplete="off" required></label>
+      <p id="login-error" class="error" role="alert"></p>
+      <button class="button primary" type="submit">Authenticate</button>
+    </form>
+  </dialog>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>
