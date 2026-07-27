@@ -8,22 +8,31 @@ import hmac
 import json
 import secrets
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import AsyncIterator, Mapping
+from typing import AsyncIterator, Literal, Mapping
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.concurrency import run_in_threadpool
 
 from .operator_service import (
     OperatorService,
     OperatorServiceError,
     RunExecutor,
 )
+from .agent_sandbox import AgentSandboxError, AgentToolPolicy
 from .research_models import ResearchJobRequest
 from .research_plane import DeepResearchService, ResearchPlaneError
 from .research_web_adapters import supported_web_adapter_names
+from .repository_authorization import RepositoryAuthorizationError
+from .service_tiers import ModelLane, ServiceTierError, TieredServingService
+from .serving_profile_runtime import (
+    ServingProfileOperator,
+    ServingRuntimeError,
+)
+from .user_capabilities import CapabilityTier, UserCapabilityError
 
 
 class RunPrepareRequest(BaseModel):
@@ -67,26 +76,121 @@ class ResearchCreateRequest(BaseModel):
     research_job_id: str | None = Field(default=None, max_length=160)
 
 
+class TierChatMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    role: str
+    content: str = Field(min_length=1, max_length=100_000)
+
+
+class TierChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    lane: Literal["quality", "standard", "economy"]
+    domain: str = Field(default="general", min_length=1, max_length=80)
+    session_id: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+    )
+    messages: list[TierChatMessage] = Field(min_length=1, max_length=200)
+
+
+class AgentSessionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    repo_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+    session_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+    allowed_tools: list[str] = Field(
+        default_factory=lambda: ["read_file", "apply_patch", "run_validation"],
+        min_length=1,
+        max_length=20,
+    )
+    max_commands: int = Field(default=100, ge=1, le=1_000)
+    max_wall_seconds: int = Field(default=1_800, ge=1, le=14_400)
+
+
+class AgentRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    lane: Literal["quality", "standard", "economy"]
+    instruction: str = Field(min_length=1, max_length=100_000)
+    domain: str = Field(min_length=1, max_length=80)
+
+
+class TierUserRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    user_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+    tier: Literal["basic", "plus", "operator"]
+    enabled: bool = True
+
+
+class RepositoryRegistrationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    repo_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+    canonical_root: str = Field(min_length=1, max_length=4_096)
+
+
+class RepositoryGrantRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    user_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+    repo_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+    base_revision: str = Field(default="HEAD", min_length=1, max_length=200)
+
+
+class ServingProfileActionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    action: Literal["start", "stop"]
+    profile_id: str | None = Field(
+        default=None, pattern=r"^P[0-9]+(?:_[a-z0-9_]+)?$"
+    )
+
+
+@dataclass(frozen=True)
+class AuthCredential:
+    role: str
+    user_id: str
+    capability_tier: CapabilityTier
+
+
 @dataclass(frozen=True)
 class AuthPrincipal:
     role: str
+    user_id: str
+    capability_tier: CapabilityTier
     credential_sha256: str
 
 
 class OperatorAuth:
     """Bearer-role mapping with in-memory, credential-bound CSRF nonces."""
 
-    def __init__(self, token_roles: Mapping[str, str]) -> None:
+    def __init__(self, token_roles: Mapping[str, str | AuthCredential]) -> None:
         if not token_roles:
             raise ValueError("at least one Operator Plane token is required")
         allowed = {"read", "operate", "approve", "admin"}
-        if any(role not in allowed for role in token_roles.values()):
+        credentials: dict[str, AuthCredential] = {}
+        for token, value in token_roles.items():
+            binding = (
+                AuthCredential(
+                    role=value,
+                    user_id=f"operator-{value}",
+                    capability_tier=CapabilityTier.OPERATOR,
+                )
+                if isinstance(value, str)
+                else value
+            )
+            if binding.role not in allowed:
+                raise ValueError("invalid Operator Plane role")
+            credentials[token] = binding
+        if any(binding.role not in allowed for binding in credentials.values()):
             raise ValueError("invalid Operator Plane role")
         if any(len(token) < 24 for token in token_roles):
             raise ValueError("Operator Plane tokens must contain at least 24 characters")
         self._credentials = {
-            hashlib.sha256(token.encode("utf-8")).hexdigest(): role
-            for token, role in token_roles.items()
+            hashlib.sha256(token.encode("utf-8")).hexdigest(): binding
+            for token, binding in credentials.items()
         }
         self._csrf: dict[str, str] = {}
 
@@ -96,14 +200,19 @@ class OperatorAuth:
         token = authorization.removeprefix("Bearer ")
         digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
         matched_digest: str | None = None
-        role: str | None = None
-        for expected, expected_role in self._credentials.items():
+        binding: AuthCredential | None = None
+        for expected, expected_binding in self._credentials.items():
             if hmac.compare_digest(digest, expected):
                 matched_digest = expected
-                role = expected_role
-        if matched_digest is None or role is None:
+                binding = expected_binding
+        if matched_digest is None or binding is None:
             raise HTTPException(status_code=401, detail="authentication_failed")
-        return AuthPrincipal(role=role, credential_sha256=matched_digest)
+        return AuthPrincipal(
+            role=binding.role,
+            user_id=binding.user_id,
+            capability_tier=binding.capability_tier,
+            credential_sha256=matched_digest,
+        )
 
     def issue_csrf(self, principal: AuthPrincipal) -> str:
         nonce = secrets.token_urlsafe(32)
@@ -150,6 +259,8 @@ def create_operator_app(
     settings: OperatorApiSettings = OperatorApiSettings(),
     research: DeepResearchService | None = None,
     run_executor: RunExecutor | None = None,
+    tiered: TieredServingService | None = None,
+    serving_profile_operator: ServingProfileOperator | None = None,
 ) -> FastAPI:
     """Create the localhost GUI/API application without changing execution semantics."""
 
@@ -188,7 +299,25 @@ def create_operator_app(
     ) -> AuthPrincipal:
         return auth.authenticate(authorization)
 
+    async def operator_principal(
+        authenticated: AuthPrincipal = Depends(principal),
+    ) -> AuthPrincipal:
+        if authenticated.capability_tier is not CapabilityTier.OPERATOR:
+            raise HTTPException(status_code=403, detail="operator_capability_required")
+        return authenticated
+
     async def mutation_principal(
+        request: Request,
+        authenticated: AuthPrincipal = Depends(operator_principal),
+        x_csrf_token: str | None = Header(default=None),
+    ) -> AuthPrincipal:
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in settings.allowed_origins:
+            raise HTTPException(status_code=403, detail="origin_not_allowed")
+        auth.validate_csrf(authenticated, x_csrf_token)
+        return authenticated
+
+    async def tier_mutation_principal(
         request: Request,
         authenticated: AuthPrincipal = Depends(principal),
         x_csrf_token: str | None = Header(default=None),
@@ -226,6 +355,32 @@ def create_operator_app(
                 "status": "ERROR",
                 "failure_category": exc.category,
                 "evidence": exc.evidence,
+            },
+        )
+
+    @app.exception_handler(ServiceTierError)
+    @app.exception_handler(UserCapabilityError)
+    @app.exception_handler(RepositoryAuthorizationError)
+    @app.exception_handler(AgentSandboxError)
+    @app.exception_handler(ServingRuntimeError)
+    async def tier_error(
+        _request: Request,
+        exc: (
+            AgentSandboxError
+            | ServiceTierError
+            | UserCapabilityError
+            | RepositoryAuthorizationError
+            | ServingRuntimeError
+        ),
+    ) -> JSONResponse:
+        category = getattr(exc, "category", str(exc))
+        evidence = getattr(exc, "evidence", {})
+        return JSONResponse(
+            status_code=403,
+            content={
+                "status": "ERROR",
+                "failure_category": category,
+                "evidence": evidence,
             },
         )
 
@@ -285,6 +440,9 @@ def create_operator_app(
         return {
             "status": "AUTHENTICATED",
             "role": authenticated.role,
+            "user_id": authenticated.user_id,
+            "capability_tier": authenticated.capability_tier.value,
+            "model_lanes": [lane.value for lane in ModelLane],
             "csrf_token": auth.issue_csrf(authenticated),
         }
 
@@ -311,7 +469,7 @@ def create_operator_app(
 
     @app.get("/api/v1/dashboard")
     async def dashboard(
-        authenticated: AuthPrincipal = Depends(principal),
+        authenticated: AuthPrincipal = Depends(operator_principal),
     ) -> dict[str, object]:
         summary = operator.summary(actor_role=authenticated.role)
         try:
@@ -346,7 +504,7 @@ def create_operator_app(
     @app.get("/api/v1/runs/{run_id}")
     async def get_run(
         run_id: str,
-        authenticated: AuthPrincipal = Depends(principal),
+        authenticated: AuthPrincipal = Depends(operator_principal),
     ) -> dict[str, object]:
         return operator.get_run(run_id, actor_role=authenticated.role)
 
@@ -377,7 +535,7 @@ def create_operator_app(
 
     @app.get("/api/v1/approvals")
     async def list_approvals(
-        authenticated: AuthPrincipal = Depends(principal),
+        authenticated: AuthPrincipal = Depends(operator_principal),
         state: str | None = Query(default=None),
     ) -> dict[str, object]:
         return {
@@ -412,7 +570,7 @@ def create_operator_app(
 
     @app.get("/api/v1/model-servers/status")
     async def model_server_status(
-        authenticated: AuthPrincipal = Depends(principal),
+        authenticated: AuthPrincipal = Depends(operator_principal),
     ) -> dict[str, object]:
         return sanitized_model_status(authenticated.role)
 
@@ -463,7 +621,7 @@ def create_operator_app(
     @app.get("/api/v1/research/jobs/{job_id}")
     async def get_research(
         job_id: str,
-        authenticated: AuthPrincipal = Depends(principal),
+        authenticated: AuthPrincipal = Depends(operator_principal),
     ) -> dict[str, object]:
         del authenticated
         if research is None:
@@ -473,7 +631,7 @@ def create_operator_app(
     @app.get("/api/v1/research/jobs/{job_id}/report")
     async def get_research_report(
         job_id: str,
-        authenticated: AuthPrincipal = Depends(principal),
+        authenticated: AuthPrincipal = Depends(operator_principal),
     ) -> dict[str, object]:
         del authenticated
         if research is None:
@@ -496,7 +654,7 @@ def create_operator_app(
 
     @app.get("/api/v1/events")
     async def events(
-        authenticated: AuthPrincipal = Depends(principal),
+        authenticated: AuthPrincipal = Depends(operator_principal),
         after_sequence: int = Query(default=0, ge=0),
         once: bool = Query(default=False),
     ) -> StreamingResponse:
@@ -534,7 +692,7 @@ def create_operator_app(
     @app.get("/api/v1/artifacts")
     async def artifact_metadata(
         path: str,
-        authenticated: AuthPrincipal = Depends(principal),
+        authenticated: AuthPrincipal = Depends(operator_principal),
     ) -> dict[str, object]:
         artifact = _safe_artifact_path(
             path,
@@ -557,7 +715,7 @@ def create_operator_app(
     @app.get("/api/v1/artifacts/download")
     async def artifact_download(
         path: str,
-        authenticated: AuthPrincipal = Depends(principal),
+        authenticated: AuthPrincipal = Depends(operator_principal),
     ) -> FileResponse:
         artifact = _safe_artifact_path(
             path,
@@ -574,7 +732,7 @@ def create_operator_app(
     async def compare_runs(
         left_run_id: str,
         right_run_id: str,
-        authenticated: AuthPrincipal = Depends(principal),
+        authenticated: AuthPrincipal = Depends(operator_principal),
     ) -> dict[str, object]:
         left = operator.get_run(left_run_id, actor_role=authenticated.role)
         right = operator.get_run(right_run_id, actor_role=authenticated.role)
@@ -601,7 +759,7 @@ def create_operator_app(
 
     @app.get("/api/v1/corpora")
     async def corpora(
-        authenticated: AuthPrincipal = Depends(principal),
+        authenticated: AuthPrincipal = Depends(operator_principal),
     ) -> dict[str, object]:
         del authenticated
         governed = (
@@ -618,9 +776,296 @@ def create_operator_app(
         ]
         return {"status": "OK", "governed_snapshots": snapshots}
 
+    def require_tiered() -> TieredServingService:
+        if tiered is None:
+            raise HTTPException(status_code=503, detail="tiered_serving_unavailable")
+        return tiered
+
+    @app.get("/api/v1/tier/capabilities")
+    async def tier_capabilities(
+        authenticated: AuthPrincipal = Depends(principal),
+    ) -> dict[str, object]:
+        service = require_tiered()
+        effective = service.capability(authenticated.user_id)
+        if effective is not authenticated.capability_tier:
+            raise HTTPException(status_code=401, detail="credential_capability_changed")
+        return {
+            "status": "OK",
+            "user_id": authenticated.user_id,
+            "capability_tier": effective.value,
+            "chat_enabled": effective in {CapabilityTier.BASIC, CapabilityTier.PLUS},
+            "agent_enabled": effective is CapabilityTier.PLUS,
+            "operator_enabled": effective is CapabilityTier.OPERATOR,
+            "model_lanes": [lane.value for lane in ModelLane],
+            "lane_axis_independent": True,
+            "routes": {
+                lane.value: {
+                    "model_id": service.lane_policy.routes[lane].model_id,
+                    "priority": service.lane_policy.routes[lane].priority,
+                }
+                for lane in ModelLane
+            },
+            "queue": service.scheduler.snapshot(),
+            "effective_limits": {
+                "quality_reserved_slots": service.lane_policy.quality_reserved_slots,
+                "standard_capacity": service.lane_policy.standard_capacity,
+                "economy_capacity": service.lane_policy.economy_capacity,
+                "agent_network_enabled": False,
+            },
+        }
+
+    @app.post("/api/v1/chat")
+    async def tier_chat(
+        body: TierChatRequest,
+        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
+    ) -> dict[str, object]:
+        service = require_tiered()
+        messages = [message.model_dump() for message in body.messages]
+        if settings.fixture_mode:
+            return service.chat(
+                user_id=authenticated.user_id,
+                lane=ModelLane(body.lane),
+                messages=messages,
+                domain=body.domain,
+                session_id=body.session_id,
+            )
+        return await run_in_threadpool(
+            service.chat,
+            user_id=authenticated.user_id,
+            lane=ModelLane(body.lane),
+            messages=messages,
+            domain=body.domain,
+            session_id=body.session_id,
+        )
+
+    @app.post("/api/v1/agent/sessions")
+    async def create_agent_session(
+        body: AgentSessionRequest,
+        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
+    ) -> dict[str, object]:
+        service = require_tiered()
+        tool_policy = AgentToolPolicy(
+            policy_id=f"api-{body.session_id}",
+            allowed_tools=tuple(body.allowed_tools),
+            network_enabled=False,
+            max_commands=body.max_commands,
+            max_wall_seconds=body.max_wall_seconds,
+        )
+        if settings.fixture_mode:
+            return service.create_agent_session(
+                user_id=authenticated.user_id,
+                repo_id=body.repo_id,
+                session_id=body.session_id,
+                tool_policy=tool_policy,
+            )
+        return await run_in_threadpool(
+            service.create_agent_session,
+            user_id=authenticated.user_id,
+            repo_id=body.repo_id,
+            session_id=body.session_id,
+            tool_policy=tool_policy,
+        )
+
+    @app.post("/api/v1/agent/sessions/{session_id}/run")
+    @app.post("/api/v1/agent/sessions/{session_id}/messages")
+    async def run_agent_session(
+        session_id: str,
+        body: AgentRunRequest,
+        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
+    ) -> dict[str, object]:
+        service = require_tiered()
+        if settings.fixture_mode:
+            return service.agent(
+                user_id=authenticated.user_id,
+                session_id=session_id,
+                lane=ModelLane(body.lane),
+                instruction=body.instruction,
+                domain=body.domain,
+            )
+        return await run_in_threadpool(
+            service.agent,
+            user_id=authenticated.user_id,
+            session_id=session_id,
+            lane=ModelLane(body.lane),
+            instruction=body.instruction,
+            domain=body.domain,
+        )
+
+    @app.get("/api/v1/agent/sessions/{session_id}/status")
+    async def agent_session_status(
+        session_id: str,
+        authenticated: AuthPrincipal = Depends(principal),
+    ) -> dict[str, object]:
+        service = require_tiered()
+        if settings.fixture_mode:
+            return service.agent_session_status(
+                user_id=authenticated.user_id,
+                session_id=session_id,
+            )
+        return await run_in_threadpool(
+            service.agent_session_status,
+            user_id=authenticated.user_id,
+            session_id=session_id,
+        )
+
+    @app.post("/api/v1/agent/sessions/{session_id}/cancel")
+    async def cancel_agent_session(
+        session_id: str,
+        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
+    ) -> dict[str, object]:
+        service = require_tiered()
+        if settings.fixture_mode:
+            return service.cancel_agent_session(
+                user_id=authenticated.user_id,
+                session_id=session_id,
+            )
+        return await run_in_threadpool(
+            service.cancel_agent_session,
+            user_id=authenticated.user_id,
+            session_id=session_id,
+        )
+
+    @app.post("/api/v1/admin/tier/users")
+    async def set_tier_user(
+        body: TierUserRequest,
+        authenticated: AuthPrincipal = Depends(mutation_principal),
+    ) -> dict[str, object]:
+        if authenticated.role != "admin":
+            raise HTTPException(status_code=403, detail="admin_role_required")
+        capability = require_tiered().users.set_user(
+            body.user_id, CapabilityTier(body.tier), enabled=body.enabled
+        )
+        operator.record_action(
+            actor_role=authenticated.role,
+            action="USER_CAPABILITY_SET",
+            entity_type="user",
+            entity_id=body.user_id,
+            payload={
+                "tier": body.tier,
+                "enabled": body.enabled,
+                "revision": capability.revision,
+            },
+        )
+        return {"status": "UPDATED", "capability": asdict(capability)}
+
+    @app.post("/api/v1/admin/repositories")
+    async def register_repository(
+        body: RepositoryRegistrationRequest,
+        authenticated: AuthPrincipal = Depends(mutation_principal),
+    ) -> dict[str, object]:
+        if authenticated.role != "admin":
+            raise HTTPException(status_code=403, detail="admin_role_required")
+        repository = require_tiered().sandboxes.authorizations.register(
+            body.repo_id, Path(body.canonical_root)
+        )
+        operator.record_action(
+            actor_role=authenticated.role,
+            action="REPOSITORY_REGISTERED",
+            entity_type="repository",
+            entity_id=body.repo_id,
+            payload={"canonical_root": str(repository.canonical_root)},
+        )
+        return {
+            "status": "REGISTERED",
+            "repository": {
+                **asdict(repository),
+                "canonical_root": str(repository.canonical_root),
+            },
+        }
+
+    @app.post("/api/v1/admin/repository-grants")
+    async def grant_repository(
+        body: RepositoryGrantRequest,
+        authenticated: AuthPrincipal = Depends(mutation_principal),
+    ) -> dict[str, object]:
+        if authenticated.role != "admin":
+            raise HTTPException(status_code=403, detail="admin_role_required")
+        grant = require_tiered().sandboxes.authorizations.grant(
+            body.user_id,
+            body.repo_id,
+            base_revision=body.base_revision,
+        )
+        operator.record_action(
+            actor_role=authenticated.role,
+            action="REPOSITORY_GRANTED",
+            entity_type="repository_grant",
+            entity_id=f"{body.user_id}:{body.repo_id}",
+            payload={
+                "base_revision": grant.base_revision,
+                "revision": grant.revision,
+            },
+        )
+        return {
+            "status": "GRANTED",
+            "user_id": grant.user_id,
+            "repo_id": grant.repository.repo_id,
+            "base_revision": grant.base_revision,
+            "revision": grant.revision,
+        }
+
+    @app.post("/api/v1/admin/repository-grants/revoke")
+    async def revoke_repository(
+        body: RepositoryGrantRequest,
+        authenticated: AuthPrincipal = Depends(mutation_principal),
+    ) -> dict[str, object]:
+        if authenticated.role != "admin":
+            raise HTTPException(status_code=403, detail="admin_role_required")
+        grant = require_tiered().sandboxes.authorizations.revoke(
+            body.user_id, body.repo_id
+        )
+        operator.record_action(
+            actor_role=authenticated.role,
+            action="REPOSITORY_REVOKED",
+            entity_type="repository_grant",
+            entity_id=f"{body.user_id}:{body.repo_id}",
+            payload={"revision": grant.revision},
+        )
+        return {
+            "status": "REVOKED",
+            "user_id": grant.user_id,
+            "repo_id": grant.repository.repo_id,
+            "revision": grant.revision,
+        }
+
+    @app.get("/api/v1/serving-profiles/status")
+    async def serving_profile_status(
+        authenticated: AuthPrincipal = Depends(operator_principal),
+    ) -> dict[str, object]:
+        if serving_profile_operator is None:
+            raise HTTPException(status_code=503, detail="serving_profile_runtime_unavailable")
+        return serving_profile_operator.status()
+
+    @app.post("/api/v1/serving-profiles/action")
+    async def serving_profile_action(
+        body: ServingProfileActionRequest,
+        authenticated: AuthPrincipal = Depends(mutation_principal),
+    ) -> dict[str, object]:
+        if authenticated.role != "admin":
+            raise HTTPException(status_code=403, detail="admin_role_required")
+        if serving_profile_operator is None:
+            raise HTTPException(status_code=503, detail="serving_profile_runtime_unavailable")
+        if body.action == "start":
+            if body.profile_id is None:
+                raise HTTPException(status_code=422, detail="profile_id_required")
+            result = serving_profile_operator.start(body.profile_id)
+            entity_id = body.profile_id
+            action = "SERVING_PROFILE_STARTED"
+        else:
+            result = serving_profile_operator.stop()
+            entity_id = str(result.get("profile_id", "owned_profile"))
+            action = "SERVING_PROFILE_STOPPED"
+        operator.record_action(
+            actor_role=authenticated.role,
+            action=action,
+            entity_type="serving_profile",
+            entity_id=entity_id,
+            payload={"status": result.get("status")},
+        )
+        return result
+
     @app.get("/api/v1/diagnostics")
     async def diagnostics(
-        authenticated: AuthPrincipal = Depends(principal),
+        authenticated: AuthPrincipal = Depends(operator_principal),
     ) -> dict[str, object]:
         return {
             "status": "OK",

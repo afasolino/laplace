@@ -104,7 +104,7 @@ def test_preflight_reuses_only_healthy_exact_models(tmp_path: Path) -> None:
 def test_preflight_refuses_low_free_memory(tmp_path: Path) -> None:
     admission = ModelServerAdmission(
         tmp_path,
-        gpu_observer=lambda: _gpu(47_896),
+        gpu_observer=lambda: _gpu(43_800),
         endpoint_probe=lambda _spec: {"status": "UNAVAILABLE"},
         port_observer=lambda _port: [],
     )
@@ -116,6 +116,25 @@ def test_preflight_refuses_low_free_memory(tmp_path: Path) -> None:
     )
     assert result["decision"] == "REFUSED"
     assert result["failure_category"] == "resource_admission_failure"
+
+
+def test_preflight_accepts_idle_driver_overhead_when_total_capacity_is_sufficient(
+    tmp_path: Path,
+) -> None:
+    admission = ModelServerAdmission(
+        tmp_path,
+        gpu_observer=lambda: _gpu(47_272),
+        endpoint_probe=lambda _spec: {"status": "UNAVAILABLE"},
+        port_observer=lambda _port: [],
+    )
+    result = admission.preflight(
+        output_path=tmp_path / "preflight.json",
+        specs=_specs(),
+        policy=_policy(),
+        startup_timeout_seconds=60,
+    )
+    assert result["decision"] == "ADMITTED_START_REQUIRED"
+    assert result["failure_category"] is None
 
 
 @pytest.mark.parametrize(

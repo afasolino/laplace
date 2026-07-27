@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "case_id": "general_grounded",
+      "domain": "general",
+      "prompt": "Using only this fact: 'The calibration sample is cobalt blue.' State the sample colour in one sentence.",
+      "required_markers": ["cobalt blue"],
+      "require_json_object": false,
+      "forbidden_markers": ["red", "green"],
+      "source_policy": "inline_fixture"
+    },
+    {
+      "case_id": "python_reasoning",
+      "domain": "python",
+      "prompt": "A Python range is range(2, 11, 3). Return only the comma-separated emitted integers.",
+      "required_markers": ["2,5,8"],
+      "require_json_object": false,
+      "forbidden_markers": ["11"],
+      "source_policy": "deterministic_fixture"
+    },
+    {
+      "case_id": "systemverilog_handshake",
+      "domain": "systemverilog",
+      "prompt": "In a ready/valid interface, state the transfer condition using the exact identifiers valid and ready.",
+      "required_markers": ["valid", "ready"],
+      "require_json_object": false,
+      "forbidden_markers": ["valid || ready"],
+      "source_policy": "deterministic_fixture"
+    },
+    {
+      "case_id": "rag_citation",
+      "domain": "rag",
+      "prompt": "Evidence: file=fixture.pdf page=7 section=Methods chunk_id=fx-007 says 'Annealing lasted 30 minutes.' Answer with the duration and cite all four location fields.",
+      "required_markers": ["30 minutes", "fixture.pdf", "page=7", "Methods", "fx-007"],
+      "require_json_object": false,
+      "forbidden_markers": ["page=8"],
+      "source_policy": "inline_fixture"
+    },
+    {
+      "case_id": "research_contradiction",
+      "domain": "research",
+      "prompt": "Source A reports an increase; Source B reports no statistically significant change. Synthesize without erasing disagreement and name both Source A and Source B.",
+      "required_markers": ["Source A", "Source B", "disagree"],
+      "require_json_object": false,
+      "forbidden_markers": ["both prove"],
+      "source_policy": "inline_fixture"
+    },
+    {
+      "case_id": "strict_json",
+      "domain": "json",
+      "prompt": "Return only a JSON object with keys status and count, where status is PASS and count is 3.",
+      "required_markers": ["\"status\"", "\"count\"", "PASS"],
+      "require_json_object": true,
+      "forbidden_markers": ["```"],
+      "source_policy": "deterministic_fixture"
+    }
+  ]
+}

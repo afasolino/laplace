@@ -4,6 +4,9 @@ const state = {
   token: sessionStorage.getItem("laplace_operator_token") || "",
   csrf: "",
   role: "",
+  userId: "",
+  capabilityTier: "",
+  agentSession: "",
   currentResearchJob: "",
   eventCursor: 0,
 };
@@ -47,10 +50,12 @@ async function establishSession() {
   const session = await api("/api/v1/session", { method: "POST" });
   state.csrf = session.csrf_token;
   state.role = session.role;
-  byId("role-badge").textContent = session.role;
+  state.userId = session.user_id;
+  state.capabilityTier = session.capability_tier;
+  byId("role-badge").textContent = `${session.capability_tier} · ${session.role}`;
   byId("connection-dot").classList.add("online");
   byId("connection-label").textContent = "Local API online";
-  announce(`Authenticated with ${session.role} role`);
+  announce(`Authenticated as ${session.user_id} with ${session.capability_tier} capability`);
   return session;
 }
 
@@ -67,8 +72,13 @@ async function signIn(token) {
     await establishSession();
     sessionStorage.setItem("laplace_operator_token", token);
     byId("login-dialog").close();
-    await loadDashboard();
-    startEventStream();
+    configureShell();
+    if (state.capabilityTier === "operator") {
+      await loadDashboard();
+      startEventStream();
+    } else {
+      await loadTierWorkspace();
+    }
   } catch (error) {
     state.token = "";
     sessionStorage.removeItem("laplace_operator_token");
@@ -81,12 +91,18 @@ function signOut() {
   state.token = "";
   state.csrf = "";
   state.role = "";
+  state.userId = "";
+  state.capabilityTier = "";
+  state.agentSession = "";
   byId("role-badge").textContent = "signed out";
   byId("connection-dot").classList.remove("online");
   showLogin();
 }
 
 function activateView(name) {
+  if (state.capabilityTier && state.capabilityTier !== "operator" && name !== "tier-workspace") {
+    name = "tier-workspace";
+  }
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === name));
   document.querySelectorAll("#primary-nav a").forEach((link) => {
     if (link.dataset.view === name) link.setAttribute("aria-current", "page");
@@ -99,6 +115,86 @@ function activateView(name) {
   if (name === "hardware") loadHardware();
   if (name === "corpora") loadCorpora();
   if (name === "diagnostics") loadDiagnostics();
+}
+
+function configureShell() {
+  const operator = state.capabilityTier === "operator";
+  document.querySelectorAll("#primary-nav a").forEach((link) => {
+    link.hidden = operator ? link.dataset.view === "tier-workspace" : link.dataset.view !== "tier-workspace";
+  });
+  byId("refresh-button").hidden = !operator;
+  if (operator) {
+    activateView(location.hash.slice(1) && location.hash.slice(1) !== "tier-workspace" ? location.hash.slice(1) : "dashboard");
+  } else {
+    activateView("tier-workspace");
+  }
+}
+
+async function loadTierWorkspace() {
+  const capability = await api("/api/v1/tier/capabilities");
+  byId("capability-label").textContent = capability.capability_tier;
+  byId("tier-user").textContent = capability.user_id;
+  byId("plus-agent-panel").hidden = !capability.agent_enabled;
+  const standard = capability.routes?.standard || {};
+  byId("tier-route-model").textContent = standard.model_id || "—";
+  byId("tier-queue-status").textContent = `${(capability.queue?.waiting || []).length} waiting`;
+  byId("tier-limits").textContent = `${capability.effective_limits?.standard_capacity || "—"} standard`;
+  announce(`${capability.capability_tier} workspace ready`);
+}
+
+async function sendTierChat(form) {
+  const values = new FormData(form);
+  const lane = String(values.get("lane"));
+  byId("lane-label").textContent = lane;
+  const result = await api("/api/v1/chat", {
+    method: "POST",
+    body: JSON.stringify({
+      lane,
+      domain: String(values.get("domain")),
+      messages: [{ role: "user", content: String(values.get("message")) }],
+    }),
+  });
+  byId("tier-chat-response").textContent = JSON.stringify(result, null, 2);
+  announce(`Chat completed on ${result.effective_lane} lane`);
+}
+
+async function bindAgentSession(form) {
+  const values = new FormData(form);
+  const sessionId = String(values.get("session_id"));
+  const result = await api("/api/v1/agent/sessions", {
+    method: "POST",
+    body: JSON.stringify({
+      repo_id: String(values.get("repo_id")),
+      session_id: sessionId,
+      allowed_tools: ["read_file", "apply_patch", "run_validation"],
+    }),
+  });
+  state.agentSession = sessionId;
+  byId("agent-response").textContent = JSON.stringify(result, null, 2);
+  announce(`Agent bound to isolated session ${sessionId}`);
+}
+
+async function runAgent(form) {
+  if (!state.agentSession) throw new Error("Bind an authorized repository session first");
+  const values = new FormData(form);
+  const result = await api(`/api/v1/agent/sessions/${encodeURIComponent(state.agentSession)}/run`, {
+    method: "POST",
+    body: JSON.stringify({
+      lane: String(values.get("lane")),
+      domain: String(values.get("domain")),
+      instruction: String(values.get("instruction")),
+    }),
+  });
+  byId("agent-response").textContent = JSON.stringify(result, null, 2);
+  announce(`Agent request ${result.request_id} completed`);
+}
+
+async function cancelAgent() {
+  if (!state.agentSession) return;
+  const result = await api(`/api/v1/agent/sessions/${encodeURIComponent(state.agentSession)}/cancel`, { method: "POST" });
+  byId("agent-response").textContent = JSON.stringify(result, null, 2);
+  if (result.status === "RELEASED_CLEAN_WORKTREE") state.agentSession = "";
+  announce(result.status);
 }
 
 function renderTable(container, rows, columns) {
@@ -281,9 +377,32 @@ async function loadHardware() {
       item.append(text("strong", `${server.profile} · ${server.expected_model_id}`), text("small", `${server.endpoint_observation?.status || "unknown"} · port ${server.port}`));
       return item;
     }));
+    try {
+      const profiles = await api("/api/v1/serving-profiles/status");
+      const owned = profiles.owned_profile;
+      byId("serving-profile-status").textContent = owned
+        ? `${owned.profile_id} · PID ${owned.pid} · ${owned.alive_exact_pid ? "running" : "not running"}`
+        : `No owned profile · available: ${(profiles.available_profiles || []).join(", ")}`;
+    } catch (error) {
+      byId("serving-profile-status").textContent = `Profile runtime unavailable: ${error.message}`;
+    }
   } catch (error) {
     container.textContent = `Probe failed safely: ${error.message}`;
   }
+}
+
+async function servingProfileAction(form) {
+  const values = new FormData(form);
+  const action = String(values.get("action"));
+  const result = await api("/api/v1/serving-profiles/action", {
+    method: "POST",
+    body: JSON.stringify({
+      action,
+      profile_id: action === "start" ? String(values.get("profile_id")) : null,
+    }),
+  });
+  byId("serving-profile-status").textContent = JSON.stringify(result, null, 2);
+  announce(`Serving profile action ${action}: ${result.status}`);
 }
 
 async function loadApprovals() {
@@ -371,6 +490,11 @@ function bindEvents() {
   byId("research-form").addEventListener("submit", (event) => { event.preventDefault(); createResearch(event.currentTarget).catch((error) => warn(error.message)); });
   byId("run-research-button").addEventListener("click", () => runResearch().catch((error) => warn(error.message)));
   byId("compare-form").addEventListener("submit", (event) => { event.preventDefault(); compareRuns(event.currentTarget).catch((error) => warn(error.message)); });
+  byId("tier-chat-form").addEventListener("submit", (event) => { event.preventDefault(); sendTierChat(event.currentTarget).catch((error) => warn(error.message)); });
+  byId("agent-session-form").addEventListener("submit", (event) => { event.preventDefault(); bindAgentSession(event.currentTarget).catch((error) => warn(error.message)); });
+  byId("agent-run-form").addEventListener("submit", (event) => { event.preventDefault(); runAgent(event.currentTarget).catch((error) => warn(error.message)); });
+  byId("agent-cancel").addEventListener("click", () => cancelAgent().catch((error) => warn(error.message)));
+  byId("serving-profile-form").addEventListener("submit", (event) => { event.preventDefault(); servingProfileAction(event.currentTarget).catch((error) => warn(error.message)); });
 }
 
 async function boot() {
@@ -380,8 +504,13 @@ async function boot() {
   if (!state.token) return showLogin();
   try {
     await establishSession();
-    await loadDashboard();
-    startEventStream();
+    configureShell();
+    if (state.capabilityTier === "operator") {
+      await loadDashboard();
+      startEventStream();
+    } else {
+      await loadTierWorkspace();
+    }
   } catch {
     signOut();
   }

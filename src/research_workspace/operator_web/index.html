@@ -17,6 +17,7 @@
         <span><strong>Laplace</strong><small>operator plane</small></span>
       </a>
       <nav id="primary-nav">
+        <a href="#tier-workspace" data-view="tier-workspace">Chat and agent</a>
         <a href="#dashboard" data-view="dashboard" aria-current="page">Overview</a>
         <a href="#run-builder" data-view="run-builder">Run builder</a>
         <a href="#live-run" data-view="live-run">Live run</a>
@@ -49,6 +50,69 @@
 
       <p id="live-status" class="sr-only" role="status" aria-live="polite"></p>
       <div id="warning-banner" class="banner warning" role="alert" hidden></div>
+
+      <section id="tier-workspace" class="view" data-title="Local serving workspace">
+        <div class="tier-hero">
+          <div>
+            <p class="eyebrow light">Capability and quality are independent</p>
+            <h2>Private local chat, with repository-bound agent work only when granted.</h2>
+          </div>
+          <div class="hero-metric"><span id="capability-label">—</span><small>capability tier</small></div>
+        </div>
+        <div class="metric-grid tier-metrics" aria-label="Tier status">
+          <article class="metric"><span>User</span><strong id="tier-user">—</strong></article>
+          <article class="metric"><span>Selected lane</span><strong id="lane-label">standard</strong></article>
+          <article class="metric"><span>Chat tools</span><strong>none</strong></article>
+          <article class="metric"><span>Network</span><strong>local only</strong></article>
+          <article class="metric"><span>Effective model</span><strong id="tier-route-model">—</strong></article>
+          <article class="metric"><span>Queue</span><strong id="tier-queue-status">0 waiting</strong></article>
+          <article class="metric"><span>Capacity</span><strong id="tier-limits">—</strong></article>
+          <article class="metric"><span>Current profile / KV</span><strong>operator-selected</strong></article>
+        </div>
+        <form id="tier-chat-form" class="panel form-grid">
+          <label>Model lane
+            <select id="tier-lane" name="lane">
+              <option value="quality">Quality</option>
+              <option value="standard" selected>Standard</option>
+              <option value="economy">Economy · SystemVerilog only</option>
+            </select>
+          </label>
+          <label>Domain
+            <select name="domain">
+              <option value="general">General</option>
+              <option value="python">Python</option>
+              <option value="systemverilog">SystemVerilog</option>
+              <option value="rag">RAG</option>
+              <option value="research">Research synthesis</option>
+              <option value="json">Strict JSON</option>
+            </select>
+          </label>
+          <label class="wide">Message<textarea name="message" rows="6" required></textarea></label>
+          <div class="form-actions"><button class="button primary" type="submit">Send local chat</button></div>
+        </form>
+        <article class="panel"><h3>Response</h3><pre id="tier-chat-response">No request sent.</pre></article>
+        <div id="plus-agent-panel" hidden>
+          <div class="section-intro">
+            <div><p class="eyebrow">Plus only</p><h2>Repository-bound agent session</h2></div>
+            <p>The repository ID resolves through the server grant registry. Client paths are never accepted.</p>
+          </div>
+          <form id="agent-session-form" class="panel form-grid">
+            <label>Authorized repository ID<input name="repo_id" required></label>
+            <label>Session ID<input name="session_id" pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,127}" required></label>
+            <div class="form-actions"><button class="button primary" type="submit">Bind isolated worktree</button></div>
+          </form>
+          <form id="agent-run-form" class="panel form-grid">
+            <label>Model lane<select name="lane"><option>quality</option><option selected>standard</option><option>economy</option></select></label>
+            <label>Domain<input name="domain" value="python" required></label>
+            <label class="wide">Bounded instruction<textarea name="instruction" rows="6" required></textarea></label>
+            <div class="form-actions">
+              <button class="button primary" type="submit">Run bounded agent</button>
+              <button id="agent-cancel" class="button secondary" type="button">Cancel / release clean session</button>
+            </div>
+          </form>
+          <article class="panel"><h3>Agent evidence</h3><pre id="agent-response">No agent session bound.</pre></article>
+        </div>
+      </section>
 
       <section id="dashboard" class="view active" data-title="Operational overview">
         <div class="hero">
@@ -131,6 +195,16 @@
         <div class="section-intro"><div><p class="eyebrow">Exact identities</p><h2>GPU admission and endpoints</h2></div><button id="hardware-refresh" class="button secondary" type="button">Probe now</button></div>
         <div id="gpu-status" class="metric-grid"></div>
         <article class="panel"><h3>Model servers</h3><div id="model-servers" class="stack-list"></div></article>
+        <article class="panel">
+          <div class="panel-head"><h3>Tiered serving profiles</h3><span class="badge quiet">admin lifecycle</span></div>
+          <div id="serving-profile-status" class="stack-list">Profile runtime not probed.</div>
+          <form id="serving-profile-form" class="inline-form">
+            <label>Profile ID<input name="profile_id" value="P0_baseline" required></label>
+            <label>Action<select name="action"><option value="start">Start and verify</option><option value="stop">Stop owned profile</option></select></label>
+            <button class="button secondary" type="submit">Apply profile action</button>
+          </form>
+        </article>
+        <article class="panel"><h3>Profile comparison</h3><div id="profile-comparison">Use the certification artifact for measured quality, latency, context, KV, GPU, and CPU memory comparisons.</div></article>
       </section>
 
       <section id="compare" class="view" data-title="Run comparison">

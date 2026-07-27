@@ -377,6 +377,35 @@ def observe_port_owners(port: int) -> list[JsonObject]:
     return owners
 
 
+def _descendant_pids(root_pids: set[int]) -> set[int]:
+    """Resolve the current process tree below owned launcher PIDs."""
+
+    descendants = set(root_pids)
+    parents: dict[int, int] = {}
+    for process_dir in Path("/proc").iterdir():
+        if not process_dir.name.isdigit():
+            continue
+        try:
+            parent_line = next(
+                line
+                for line in process_dir.joinpath("status")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if line.startswith("PPid:")
+            )
+            parents[int(process_dir.name)] = int(parent_line.split()[1])
+        except (OSError, ValueError, IndexError, StopIteration):
+            continue
+    changed = True
+    while changed:
+        changed = False
+        for pid, parent in parents.items():
+            if parent in descendants and pid not in descendants:
+                descendants.add(pid)
+                changed = True
+    return descendants
+
+
 def probe_endpoint(spec: ModelServerSpec, *, timeout_seconds: float = 3.0) -> JsonObject:
     """Probe `/v1/models` and require the exact configured served-model identity."""
 
@@ -485,12 +514,17 @@ class ModelServerAdmission:
             failure_category = "hardware_probe_failure"
         else:
             gpu = gpu_observation.get("gpu")
+            compute_processes = gpu_observation.get("compute_processes")
             if not isinstance(gpu, dict) or "A6000" not in str(gpu.get("name", "")):
                 decision = "REFUSED"
                 failure_category = "hardware_mismatch"
             elif (
-                not isinstance(gpu.get("memory_free_mib"), int)
-                or gpu["memory_free_mib"] < selected_policy.required_pre_start_free_mib
+                not isinstance(compute_processes, list)
+                or bool(compute_processes)
+                or not isinstance(gpu.get("memory_total_mib"), int)
+                or not isinstance(gpu.get("memory_free_mib"), int)
+                or gpu["memory_total_mib"] < selected_policy.required_pre_start_free_mib
+                or gpu["memory_free_mib"] < selected_policy.maximum_observed_used_mib
             ):
                 decision = "REFUSED"
                 failure_category = "resource_admission_failure"
@@ -716,6 +750,14 @@ class ModelServerController:
     def release_owned(self, *, timeout_seconds: int = 75) -> JsonObject:
         before_gpu = self.gpu_observer()
         owned = self._owned_profiles()
+        owned_process_tree = _descendant_pids(
+            {
+                value
+                for item in owned
+                for value in (item.get("pid"),)
+                if isinstance(value, int)
+            }
+        )
         before_processes_raw = before_gpu.get("compute_processes")
         before_processes = (
             before_processes_raw if isinstance(before_processes_raw, list) else []
@@ -724,7 +766,7 @@ class ModelServerController:
             process
             for process in before_processes
             if isinstance(process, dict)
-            and process.get("pid") not in {item["pid"] for item in owned}
+            and process.get("pid") not in owned_process_tree
         ]
         if not owned:
             return {
@@ -777,6 +819,7 @@ class ModelServerController:
             ),
             "timestamp_utc": _utc_now(),
             "signalled_pids": [item["pid"] for item in owned],
+            "owned_process_tree_before_release": sorted(owned_process_tree),
             "remaining_owned_processes": remaining,
             "unrelated_compute_processes_preserved": preserved,
             "endpoints_down": endpoints_down,
