@@ -19,6 +19,7 @@ browser = ["playwright>=1.40"]
 research-workspace = "research_workspace.cli:main"
 laplace = "research_workspace.laplace_cli:main"
 laplace-operator = "research_workspace.operator_cli:main"
+research = "research_workspace.research_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

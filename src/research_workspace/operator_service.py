@@ -480,6 +480,23 @@ class OperatorService:
             ).fetchone()
         return row is not None and row["state"] == "APPROVED"
 
+    def approval_is_valid(
+        self,
+        approval_id: str,
+        action: str,
+        entity_id: str,
+        *,
+        actor_role: str,
+    ) -> bool:
+        """Read-only approval check used by other typed local services."""
+
+        _require_role(actor_role, _ROLES)
+        return self._approved(
+            approval_id=approval_id,
+            action=action,
+            entity_id=entity_id,
+        )
+
     def start_run(
         self,
         run_id: str,
