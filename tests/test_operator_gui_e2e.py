@@ -300,6 +300,24 @@ def test_registered_gui_chat_research_operator_accessibility_and_responsive(
         page.on("pageerror", lambda error: page_errors.append(str(error)))
         _authenticate(page, gui_server)
 
+        assert page.locator("#chat-lane option").all_text_contents() == [
+            "Quality — fixture-quality",
+            "Standard — fixture-standard",
+            "Economy — fixture-economy",
+        ]
+        provider_catalog = page.evaluate(
+            """async () => {
+              const response = await fetch('/api/v1/providers', {
+                credentials: 'same-origin',
+                cache: 'no-store'
+              });
+              return await response.json();
+            }"""
+        )
+        assert provider_catalog["endpoint_details_exposed"] is False
+        assert len(provider_catalog["providers"]) == 3
+        assert "127.0.0.1" not in str(provider_catalog)
+
         chat_domains = page.locator("#chat-domain option").all_text_contents()
         assert chat_domains == [
             "Auto / General",

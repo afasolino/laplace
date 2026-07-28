@@ -36,6 +36,7 @@ from .auth_sessions import (
     RegisteredEmailAuth,
 )
 from .conversations import ConversationError, ConversationStore
+from .contracts import ProviderCapabilitiesV1, ProviderV1, RouteV1
 from .domain_registry import (
     DEFAULT_DOMAIN_REGISTRY,
     DomainRegistry,
@@ -2046,6 +2047,83 @@ def create_operator_app(
                 "AGENT_WORKTREES.md",
                 "STORAGE_AND_RETENTION.md",
             ],
+        }
+
+    @app.get("/api/v1/providers")
+    async def providers(
+        _authenticated: AuthPrincipal = Depends(principal),
+    ) -> dict[str, object]:
+        """Return frontend-safe provider capabilities and logical routes."""
+
+        if tiered is None:
+            return {
+                "schema_version": 1,
+                "status": "UNAVAILABLE",
+                "providers": [],
+                "routes": [],
+                "endpoint_details_exposed": False,
+            }
+        provider_type: Literal["fixture", "vllm"] = (
+            "fixture" if settings.fixture_mode else "vllm"
+        )
+        public_providers: list[dict[str, object]] = []
+        public_routes: list[dict[str, object]] = []
+        for lane in ModelLane:
+            configured = tiered.lane_policy.routes[lane]
+            parsed_endpoint = urlsplit(configured.endpoint)
+            endpoint_host = parsed_endpoint.hostname or ""
+            endpoint_origin = (
+                f"{parsed_endpoint.scheme}://"
+                f"{'[' + endpoint_host + ']' if ':' in endpoint_host else endpoint_host}"
+                f":{parsed_endpoint.port}"
+                if parsed_endpoint.port is not None
+                else f"{parsed_endpoint.scheme}://{endpoint_host}"
+            )
+            provider_id = f"{provider_type}-{lane.value}"
+            provider = ProviderV1(
+                provider_id=provider_id,
+                display_name=(
+                    f"{lane.value.title()} deterministic fixture"
+                    if settings.fixture_mode
+                    else f"{lane.value.title()} configured local provider"
+                ),
+                provider_type=provider_type,
+                endpoint=(
+                    "fixture://in-memory"
+                    if settings.fixture_mode
+                    else endpoint_origin
+                ),
+                lifecycle="fixture" if settings.fixture_mode else "unowned",
+                context_limit=configured.context_limit,
+                output_limit=configured.output_limit,
+                capabilities=ProviderCapabilitiesV1(
+                    streaming=not settings.fixture_mode,
+                    tools=True,
+                    structured_output=True,
+                    embeddings=False,
+                    thinking_control=False,
+                    requires_gpu=not settings.fixture_mode,
+                    supports_cpu=settings.fixture_mode,
+                    can_start=False,
+                    can_stop=False,
+                ),
+            )
+            route = RouteV1(
+                route_id=f"{lane.value}-route",
+                display_name=f"{lane.value.title()} — {configured.model_id}",
+                provider_id=provider_id,
+                model_id=configured.model_id,
+                lane=lane.value,
+                enabled=True,
+            )
+            public_providers.append(provider.public_summary())
+            public_routes.append(route.model_dump(mode="json"))
+        return {
+            "schema_version": 1,
+            "status": "OK",
+            "providers": public_providers,
+            "routes": public_routes,
+            "endpoint_details_exposed": False,
         }
 
     @app.get("/api/v1/domains")

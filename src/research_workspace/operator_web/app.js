@@ -4,6 +4,7 @@ const state = {
   csrf: null,
   account: null,
   capabilities: null,
+  providerCatalog: null,
   domains: [],
   corpusPolicy: null,
   corpora: [],
@@ -303,19 +304,21 @@ function activateView(id) {
 
 async function initializeWorkspace() {
   clearNotice();
-  const [capabilities, help, about, domains, corpusPolicy] = await Promise.all([
+  const [capabilities, help, about, domains, corpusPolicy, providerCatalog] = await Promise.all([
     api("/api/v1/tier/capabilities"),
     api("/api/v1/help"),
     api("/api/v1/about"),
     api("/api/v1/domains"),
     api("/api/v1/personal-corpus/policy"),
+    api("/api/v1/providers"),
   ]);
   state.capabilities = capabilities;
+  state.providerCatalog = providerCatalog;
   state.domains = domains.domains || [];
   state.corpusPolicy = corpusPolicy;
   $("#account-name").textContent = state.account.display_name || state.account.email;
   $("#account-tier").textContent = `${capabilities.capability_tier} · ${capabilities.role}`;
-  $("#chat-lane").value = capabilities.default_lane;
+  populateLaneSelect($("#chat-lane"), capabilities.default_lane);
   populateDomainSelect($("#chat-domain"), "chat", domains.default_domain_id);
   populateDomainSelect($("#research-domain"), "research", domains.default_domain_id);
   const retrieval = $("#chat-retrieval");
@@ -365,6 +368,45 @@ function populateDomainSelect(select, surface, defaultId = "general") {
   }
 }
 
+function populateLaneSelect(select, preferredLane = "standard") {
+  if (!select) return;
+  const providers = new Map(
+    (state.providerCatalog?.providers || []).map((provider) => [provider.provider_id, provider]),
+  );
+  const routes = (state.providerCatalog?.routes || []).filter((route) => route.enabled);
+  const order = new Map(["quality", "standard", "economy"].map((lane, index) => [lane, index]));
+  routes.sort((left, right) => (order.get(left.lane) ?? 99) - (order.get(right.lane) ?? 99));
+  select.replaceChildren();
+  for (const route of routes) {
+    const provider = providers.get(route.provider_id);
+    const option = element("option", {
+      value: route.lane,
+      text: route.display_name,
+      dataset: {
+        routeId: route.route_id,
+        providerId: route.provider_id,
+        modelId: route.model_id,
+      },
+    });
+    option.title = provider ?
+      `${provider.display_name}; context ${provider.context_limit}; output ${provider.output_limit}` :
+      route.model_id;
+    select.append(option);
+  }
+  if ([...select.options].some((option) => option.value === preferredLane)) {
+    select.value = preferredLane;
+  }
+  if (!select.options.length) {
+    select.append(element("option", {
+      value: "",
+      text: "No eligible provider route",
+      disabled: true,
+      selected: true,
+    }));
+    select.disabled = true;
+  }
+}
+
 function buildAgentView() {
   const repoSelect = element("select", {id: "agent-repository", name: "repo_id", required: true});
   repoSelect.append(element("option", {value: "", text: "Choose an authorized repository"}));
@@ -373,6 +415,8 @@ function buildAgentView() {
   }
   const domainSelect = element("select", {id: "agent-domain", name: "domain"});
   populateDomainSelect(domainSelect, "agent", "python");
+  const laneSelect = element("select", {name: "lane"});
+  populateLaneSelect(laneSelect, state.capabilities?.default_lane || "standard");
   const retrievalSelect = element("select", {id: "agent-retrieval", name: "retrieval_selection"}, [
     element("option", {value: "none", text: "No retrieval", selected: true}),
     element("option", {value: "personal", text: "My personal corpus"}),
@@ -390,11 +434,7 @@ function buildAgentView() {
   const form = element("form", {id: "agent-form", className: "surface form-grid"}, [
     element("label", {text: "Authorized repository"}, [repoSelect]),
     element("label", {text: "Quality lane"}, [
-      element("select", {name: "lane"}, [
-        element("option", {value: "quality", text: "Quality"}),
-        element("option", {value: "standard", text: "Standard", selected: true}),
-        element("option", {value: "economy", text: "Economy"}),
-      ]),
+      laneSelect,
     ]),
     element("label", {text: "Engineering domain"}, [domainSelect]),
     element("label", {text: "Reference sources"}, [retrievalSelect]),
@@ -959,6 +999,22 @@ function renderAbout(payload) {
     lane, route.display_name, route.context_limit, route.output_limit,
   ]);
   $("#about-lanes").replaceChildren(makeTable(["Lane", "Model", "Context", "Output"], lanes));
+  const providers = new Map(
+    (state.providerCatalog?.providers || []).map((provider) => [provider.provider_id, provider]),
+  );
+  const providerRows = (state.providerCatalog?.routes || []).map((route) => {
+    const provider = providers.get(route.provider_id) || {};
+    return [
+      route.lane,
+      provider.display_name || route.provider_id,
+      route.model_id,
+      provider.capabilities?.tools ? "Yes" : "No",
+      provider.endpoint_scope || "configured-local",
+    ];
+  });
+  $("#about-providers").replaceChildren(
+    makeTable(["Lane", "Provider", "Model", "Tools", "Endpoint scope"], providerRows),
+  );
   const links = $("#documentation-links");
   links.replaceChildren();
   for (const name of payload.documentation || []) {

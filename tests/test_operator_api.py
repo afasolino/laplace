@@ -178,6 +178,27 @@ async def test_auth_csrf_roles_and_idempotent_run_mutation(app: object) -> None:
 
 
 @pytest.mark.anyio
+async def test_provider_catalog_is_authenticated_and_never_exposes_endpoints(
+    app: object,
+) -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),  # type: ignore[arg-type]
+        base_url="http://127.0.0.1:8765",
+    ) as client:
+        assert (await client.get("/api/v1/providers")).status_code == 401
+        headers, _ = await _session(
+            client, "read-token-000000000000000000000000"
+        )
+        response = await client.get("/api/v1/providers", headers=headers)
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["endpoint_details_exposed"] is False
+        assert payload["providers"] == []
+        assert "127.0.0.1" not in response.text
+        assert "endpoint" not in " ".join(payload["providers"])
+
+
+@pytest.mark.anyio
 async def test_approval_workflow_sse_and_private_model_path_redaction(
     app: object,
 ) -> None:
