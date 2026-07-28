@@ -28,6 +28,11 @@ import yaml
 from . import __version__
 from .acquisition import download_open_access, promote_download
 from .chat import ChatEngine, ChatProject, ConversationStore
+from .configuration import (
+    ConfigurationV7Error,
+    load_configuration,
+    write_diagnostic_export,
+)
 from .engineering import (
     AgentTaskStore,
     Domain,
@@ -59,6 +64,7 @@ from .probe import collect_probe
 from .paired_benchmark import run_paired_quality_benchmark, run_valid_paired_benchmark
 from .model_routing import serving_candidate_from_json
 from .team_runner import LocalTeamRunner
+from .versioning import version_line
 
 
 APP_HOME = Path(os.getenv("LAPLACE_HOME", str(Path.home() / ".laplace"))).expanduser()
@@ -872,6 +878,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--unregister", metavar="NAME")
     parser.add_argument("--doctor", action="store_true")
     parser.add_argument("--version", action="store_true")
+    parser.add_argument(
+        "--validate-config",
+        type=Path,
+        metavar="YAML",
+        help="Validate v7 configuration without contacting a provider",
+    )
+    parser.add_argument("--deployment-config", type=Path, metavar="YAML")
+    parser.add_argument("--diagnostic-export", type=Path, metavar="JSON")
+    parser.add_argument("--configuration-mode", choices=("desktop", "server"))
+    parser.add_argument("--configuration-state-root")
     parser.add_argument("--validate", action="store_true")
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--config", action="store_true")
@@ -952,7 +968,24 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.version:
-            print(f"laplace {__version__}")
+            print(version_line(APPLICATION_ROOT))
+            return 0
+        if args.validate_config is not None:
+            overrides: dict[str, object] = {}
+            if args.configuration_mode is not None:
+                overrides["operating_mode"] = args.configuration_mode
+            if args.configuration_state_root is not None:
+                overrides["storage"] = {"state_root": args.configuration_state_root}
+            effective = load_configuration(
+                repository_configuration=args.validate_config,
+                deployment_configuration=args.deployment_config,
+                cli_overrides=overrides,
+            )
+            diagnostic = effective.diagnostic()
+            if args.diagnostic_export is not None:
+                write_diagnostic_export(args.diagnostic_export, effective)
+                diagnostic["diagnostic_export"] = "written-private-file"
+            _json({"status": "PASS", **diagnostic})
             return 0
         if args.init is not None:
             _json(init_laplace(args.init, force=args.force))
@@ -1280,6 +1313,7 @@ def main(argv: list[str] | None = None) -> int:
         _parser().print_help()
         return 0
     except (
+        ConfigurationV7Error,
         LaplaceError,
         EngineeringError,
         ProjectError,

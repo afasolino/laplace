@@ -69,6 +69,7 @@ from .user_capabilities import (
     UserCapabilityError,
     default_capabilities,
 )
+from .versioning import version_record
 
 JsonObject: TypeAlias = dict[str, object]
 LOGGER = logging.getLogger("laplace.operator")
@@ -1189,12 +1190,14 @@ def create_operator_app(
 
     @app.get("/api/v1/version")
     async def version() -> dict[str, object]:
+        build = version_record(operator.repository_root)
         return {
             "status": "OK",
             "application": "Laplace",
-            "application_version": "0.1.0",
+            "application_version": build["application_version"],
             "api_version": "v1",
-            "git_revision": _git_revision(operator.repository_root),
+            "git_revision": build["git_revision"],
+            "build_identity": build["build_identity"],
             "deployment_mode": settings.deployment_mode,
         }
 
@@ -2014,10 +2017,12 @@ def create_operator_app(
         authenticated: AuthPrincipal = Depends(principal),
     ) -> dict[str, object]:
         service = require_tiered()
+        build = version_record(operator.repository_root)
         return {
             "status": "OK",
-            "application_version": "0.1.0",
-            "git_revision": _git_revision(operator.repository_root),
+            "application_version": build["application_version"],
+            "git_revision": build["git_revision"],
+            "build_identity": build["build_identity"],
             "api_version": "v1",
             "capability_tier": authenticated.capability_tier.value,
             "role": authenticated.role,

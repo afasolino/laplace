@@ -1,0 +1,19 @@
+include README.md
+include CHANGELOG.md
+include requirements.lock
+recursive-include configs *.yaml *.json
+recursive-include docs *.md
+recursive-include schemas *.json
+recursive-include scripts *.py *.ps1 *.sh
+prune outputs
+prune data
+prune logs
+prune .runtime
+prune .models
+prune .tools
+global-exclude .env
+global-exclude *.sqlite*
+global-exclude *.db
+global-exclude *.log
+global-exclude *.py[cod]
+global-exclude __pycache__
