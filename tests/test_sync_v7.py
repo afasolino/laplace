@@ -1,0 +1,279 @@
+from __future__ import annotations
+
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from research_workspace.contracts import RepositoryGrantV1
+from research_workspace.fixture_services import FixtureRepositoryService
+from research_workspace.sync_client import (
+    DesktopSyncClient,
+    RepositoryInspector,
+    SyncOperationStore,
+    apply_confirmed_patch,
+)
+from research_workspace.sync_protocol import (
+    SyncError,
+    SyncReceiptV1,
+    SyncTransport,
+    TransportPolicyV1,
+    confirmation_for,
+)
+from research_workspace.sync_service import FixtureSyncService, RegisteredSyncRepository
+
+NOW = "2026-07-28T00:00:00+00:00"
+
+
+def _git(root: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(root), *arguments],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+        env={
+            **os.environ,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        },
+    )
+    assert completed.returncode == 0, completed.stderr
+    return completed.stdout.strip()
+
+
+def _repository(tmp_path: Path, name: str) -> Path:
+    root = tmp_path / name
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "fixture@example.invalid")
+    _git(root, "config", "user.name", "Fixture")
+    (root / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(root, "add", "module.py")
+    _git(root, "commit", "-q", "-m", "fixture base")
+    return root
+
+
+def _service(root: Path) -> FixtureSyncService:
+    grant = RepositoryGrantV1(
+        grant_id="grant-1",
+        user_id="owner-a",
+        repository_id="repo-a",
+        revision=1,
+        active=True,
+        created_at_utc=NOW,
+    )
+    return FixtureSyncService(
+        repositories=FixtureRepositoryService([grant]),
+        registrations=(RegisteredSyncRepository("repo-a", root),),
+    )
+
+
+def test_repository_snapshot_excludes_untracked_and_redacts_remote(tmp_path: Path) -> None:
+    root = _repository(tmp_path, "project")
+    _git(
+        root,
+        "remote",
+        "add",
+        "origin",
+        "https://user:password@example.invalid/private/repository.git",
+    )
+    (root / "module.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (root / "untracked.txt").write_text("not silently included\n", encoding="utf-8")
+    snapshot = RepositoryInspector().snapshot(root, logical_repository_id="repo-a")
+    assert snapshot.branch in {"main", "master"}
+    assert len(snapshot.head) == 40
+    assert snapshot.dirty is True
+    assert snapshot.remotes == ("https://example.invalid/<redacted-path>",)
+    changes = {item.logical_path: item for item in snapshot.changes}
+    assert changes["module.py"].included is True
+    assert changes["untracked.txt"].included is False
+    assert snapshot.untracked_included is False
+    plan, patch = RepositoryInspector().plan_upload(
+        root,
+        logical_repository_id="repo-a",
+    )
+    assert plan.changed_paths == ("module.py",)
+    assert b"untracked" not in patch
+    assert plan.force_push is False
+    assert plan.untracked_included is False
+
+
+def test_confirmed_resumable_fixture_upload_and_patch_export(tmp_path: Path) -> None:
+    root = _repository(tmp_path, "server")
+    (root / "module.py").write_text("VALUE = 2\n" + ("# padding\n" * 200), encoding="utf-8")
+    plan, patch = RepositoryInspector().plan_upload(root, logical_repository_id="repo-a")
+    service = _service(root)
+
+    class InterruptAfterFirstReceipt:
+        def __init__(self, delegate: FixtureSyncService) -> None:
+            self.delegate = delegate
+            self.interrupted = False
+
+        def upload_chunk(
+            self,
+            *,
+            owner_id: str,
+            logical_repository_id: str,
+            operation_id: str,
+            base_head: str,
+            offset: int,
+            content: bytes,
+            final: bool,
+            expected_sha256: str,
+        ) -> SyncReceiptV1:
+            receipt = self.delegate.upload_chunk(
+                owner_id=owner_id,
+                logical_repository_id=logical_repository_id,
+                operation_id=operation_id,
+                base_head=base_head,
+                offset=offset,
+                content=content,
+                final=final,
+                expected_sha256=expected_sha256,
+            )
+            if not self.interrupted:
+                self.interrupted = True
+                raise RuntimeError("synthetic disconnect")
+            return receipt
+
+        def download_patch(
+            self,
+            *,
+            owner_id: str,
+            logical_repository_id: str,
+            operation_id: str,
+        ) -> bytes:
+            return self.delegate.download_patch(
+                owner_id=owner_id,
+                logical_repository_id=logical_repository_id,
+                operation_id=operation_id,
+            )
+
+    transport = InterruptAfterFirstReceipt(service)
+    assert isinstance(transport, SyncTransport)
+    store = SyncOperationStore(tmp_path / "sync/operations.sqlite3")
+    client = DesktopSyncClient(
+        owner_id="owner-a",
+        operations=store,
+        transport=transport,
+        chunk_bytes=1024,
+    )
+    operation = client.prepare(plan, patch)
+    with pytest.raises(SyncError, match="sync_confirmation_required"):
+        client.upload(operation.operation_id, confirmation="yes")
+    with pytest.raises(RuntimeError, match="synthetic disconnect"):
+        client.upload(
+            operation.operation_id,
+            confirmation=confirmation_for(plan.plan_id),
+        )
+    resumed = client.upload(
+        operation.operation_id,
+        confirmation=confirmation_for(plan.plan_id),
+    )
+    assert resumed.state.value == "TRANSFERRED"
+    assert resumed.transferred_bytes == len(patch)
+    history = store.history("owner-a", operation.operation_id)
+    assert history[0]["state"] == "PLANNED"
+    assert history[-1]["state"] == "TRANSFERRED"
+    assert service.download_patch(
+        owner_id="owner-a",
+        logical_repository_id="repo-a",
+        operation_id=operation.operation_id,
+    ) == patch
+    safe = service.sanitized_operation("owner-a", operation.operation_id)
+    assert safe["canonical_path_exposed"] is False
+    assert str(root) not in str(safe)
+    exported = client.export_patch(operation.operation_id, tmp_path / "exports/change.patch")
+    assert exported.read_bytes() == patch
+    with pytest.raises(SyncError, match="sync_repository_not_authorized"):
+        service.download_patch(
+            owner_id="owner-b",
+            logical_repository_id="repo-a",
+            operation_id=operation.operation_id,
+        )
+
+
+def test_patch_application_requires_confirmation_and_detects_base_conflict(
+    tmp_path: Path,
+) -> None:
+    source = _repository(tmp_path, "source")
+    target = tmp_path / "target"
+    _git(tmp_path, "clone", "-q", str(source), str(target))
+    (source / "module.py").write_text("VALUE = 3\n", encoding="utf-8")
+    plan, patch = RepositoryInspector().plan_upload(source, logical_repository_id="repo-a")
+    with pytest.raises(SyncError, match="sync_confirmation_required"):
+        apply_confirmed_patch(target, plan=plan, patch=patch, confirmation="yes")
+    assert apply_confirmed_patch(
+        target,
+        plan=plan,
+        patch=patch,
+        confirmation=confirmation_for(plan.plan_id),
+    ) == "APPLIED"
+    assert (target / "module.py").read_text(encoding="utf-8") == "VALUE = 3\n"
+
+    conflict = tmp_path / "conflict"
+    _git(tmp_path, "clone", "-q", str(source), str(conflict))
+    _git(conflict, "config", "user.email", "fixture@example.invalid")
+    _git(conflict, "config", "user.name", "Fixture")
+    (conflict / "other.txt").write_text("conflict\n", encoding="utf-8")
+    _git(conflict, "add", "other.txt")
+    _git(conflict, "commit", "-q", "-m", "different head")
+    with pytest.raises(SyncError, match="sync_base_conflict"):
+        apply_confirmed_patch(
+            conflict,
+            plan=plan,
+            patch=patch,
+            confirmation=confirmation_for(plan.plan_id),
+        )
+
+
+def test_selection_path_links_submodules_and_transport_policy_fail_closed(
+    tmp_path: Path,
+) -> None:
+    root = _repository(tmp_path, "project")
+    nested = root / "nested"
+    nested.mkdir()
+    with pytest.raises(SyncError, match="repository_selection_not_git_top_level"):
+        RepositoryInspector().snapshot(nested, logical_repository_id="repo-a")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    with pytest.raises(SyncError, match="git_inspection_failed"):
+        RepositoryInspector().snapshot(plain, logical_repository_id="repo-a")
+
+    (root / "module.py").write_text("VALUE = 4\n", encoding="utf-8")
+    hardlink = root / "hardlink.py"
+    try:
+        os.link(root / "module.py", hardlink)
+    except OSError:
+        pytest.skip("hardlinks unavailable")
+    with pytest.raises(SyncError, match="hardlink_rejected"):
+        RepositoryInspector().snapshot(root, logical_repository_id="repo-a")
+
+    TransportPolicyV1(
+        transport="ssh",
+        host="git.example.invalid",
+        host_key_verification=True,
+        tls_verification=False,
+    )
+    TransportPolicyV1(
+        transport="https",
+        host="git.example.invalid",
+        host_key_verification=False,
+        tls_verification=True,
+    )
+    with pytest.raises(ValueError, match="host-key"):
+        TransportPolicyV1(
+            transport="ssh",
+            host="git.example.invalid",
+            host_key_verification=False,
+            tls_verification=False,
+        )
+    with pytest.raises(ValueError, match="TLS"):
+        TransportPolicyV1(
+            transport="https",
+            host="git.example.invalid",
+            host_key_verification=False,
+            tls_verification=False,
+        )
