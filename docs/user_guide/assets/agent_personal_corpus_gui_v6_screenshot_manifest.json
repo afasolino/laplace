@@ -1,5 +1,6 @@
 {
   "contains_live_secrets": false,
+  "contains_private_paths": false,
   "contains_private_documents": false,
   "files": [
     {

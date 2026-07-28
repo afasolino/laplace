@@ -1,6 +1,6 @@
 # Release policy
 
-Laplace uses Semantic Versioning. Before 1.0, a minor release may add or deliberately
+Laplace v0.7.0 uses Semantic Versioning. Before 1.0, a minor release may add or deliberately
 change a documented API or state contract; patch releases preserve every supported
 schema and command. Breaking changes require a changelog entry, compatibility
 adapter or ordered migration, old-state fixtures and an explicit rollback boundary.

@@ -67,7 +67,24 @@ PYTHONPATH=src .venv/bin/python -m research_workspace.user_admin add \
 
 Give that activation code only to the named user. Repository access remains empty until an administrator registers and grants a logical repository.
 
-## 3. Start the local Operator service
+## 3. Validate the selected operating mode
+
+Desktop mode uses a user-owned project, a single-user state root and a configured
+local provider. Server mode adds registered identities, capabilities, logical
+repositories, isolated worktrees, governed corpora, queues and audit. Ports and
+providers come from the selected deployment configuration; a frontend port is never
+a provider identity.
+
+```bash
+PYTHONPATH=src .venv/bin/python -m research_workspace.laplace_cli \
+  --validate-config configs/laplace.example.yaml \
+  --configuration-mode desktop \
+  --diagnostic-export /tmp/laplace-config-diagnostic.json
+```
+
+This command does not contact, start or stop a model provider.
+
+## 4. Start the local Operator service
 
 Start the selected local model endpoints separately using the validated serving-profile procedure. Then:
 
@@ -81,7 +98,7 @@ PYTHONPATH=src .venv/bin/python -m research_workspace.operator_server \
 
 Open `http://127.0.0.1:8765`, select **First activation**, enter the printed code, and create the password.
 
-## 4. Verify
+## 5. Verify
 
 ```bash
 curl --fail http://127.0.0.1:8765/api/v1/health
@@ -93,3 +110,14 @@ Health proves process liveness. Readiness also checks the registered-user regist
 For remote use, continue with [REMOTE_ACCESS.md](REMOTE_ACCESS.md). For user and lifecycle administration, read [ADMIN_GUIDE.md](ADMIN_GUIDE.md).
 
 For personal-folder ingestion and isolated Agent work, continue with [PERSONAL_CORPUS.md](PERSONAL_CORPUS.md) and [AGENT_WORKTREES.md](AGENT_WORKTREES.md).
+
+For release review without a GPU, run:
+
+```bash
+PYTHONPATH=src .venv/bin/python \
+  scripts/run_architecture_release_v7_certification.py
+```
+
+That command uses only fixtures and temporary state. It never contacts or manages a
+model provider; GPU/live-model certification remains
+`BLOCKED_BY_USER_CONSTRAINT_GPU_UNAVAILABLE`.

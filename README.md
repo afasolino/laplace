@@ -4,6 +4,31 @@ Laplace is the user-facing, local-only command for private PDF retrieval, struct
 
 The application repository is separate from the user-owned FormalScience library. A Laplace project can live in any safe working directory and contains its own `.laplace/project.yaml`, `Config`, `Data`, `Outputs`, and lifecycle state.
 
+## v0.7 architecture and release status
+
+v0.7 consolidates Desktop/local and Server/multi-user operation behind versioned
+domain, provider, storage, provenance, repository, worktree, identity, capability,
+job, audit and configuration contracts. It does not add a third GUI. The Operator GUI
+loads a frontend-safe provider catalog and routes by provider/model identity; provider
+ports and endpoints are not sent to ordinary frontend selectors.
+
+Configuration validation is offline and does not load a provider:
+
+```bash
+PYTHONPATH=src python -m research_workspace.laplace_cli \
+  --validate-config configs/laplace.example.yaml \
+  --configuration-mode desktop \
+  --diagnostic-export /tmp/laplace-config-diagnostic.json
+```
+
+The release gate is CPU/fixture-only. It covers static analysis, full tests, browser
+fixtures, migrations, reproducible packaging, offline evaluation, CPU soak/failure
+injection, security and documentation. Its live-model status is exactly
+`BLOCKED_BY_USER_CONSTRAINT_GPU_UNAVAILABLE`; fixture quality is never presented as
+live-model quality. See [operating modes](docs/OPERATING_MODES.md),
+[product architecture](docs/PRODUCT_ARCHITECTURE.md), [configuration](docs/CONFIGURATION_REFERENCE.md),
+[migrations](docs/MIGRATIONS.md), and [release policy](docs/RELEASE_POLICY.md).
+
 ### Citation-safe chat revisions
 
 Streaming is revision-aware. The model draft is persisted as an immutable `CITATION_REJECTED` assistant message when its citations do not resolve; a separate `GROUNDED_FALLBACK` message is then generated from retrieved evidence. The browser keeps the rejected draft expandable and shows the fallback as the primary answer, so a late validation event can never overwrite a streamed draft. Evidence supplied to the model uses compact IDs (`E1`, `E2`, …); the audit retains the raw model response and full provenance packet. The terminal equivalent is `laplace --ask "..." --show-rejected-draft` (or `--json`).
@@ -106,9 +131,9 @@ The shared library is selected through `FORMALSCIENCE_ROOT` (default `C:\Users\a
 laplace --doctor
 ```
 
-The current verified runtime is local Ollama at `http://127.0.0.1:11434` with `qwen3:4b` and `qwen3-embedding:0.6b`. The benchmark records RTX 5060 Laptop GPU execution, context settings, prompt/generation token counts, TTFT, latency, token/s, CPU RAM, and sampled peak VRAM. No GPU result is inferred from API success alone.
+A historical, separately certified runtime used local Ollama at `http://127.0.0.1:11434` with `qwen3:4b` and `qwen3-embedding:0.6b`. That preserved benchmark records RTX 5060 Laptop GPU execution, context settings, prompt/generation token counts, TTFT, latency, token/s, CPU RAM, and sampled peak VRAM. It is not evidence for the v0.7 CPU/fixture release, and no GPU result is inferred from API success alone.
 
-The latest continuation rerun measured 0.379 tok/s (short), 32.838 tok/s (4k grounded), 20.798 tok/s (8k grounded), 21.575 tok/s (JSON), and 2.093 embedding texts/s, with observed peak VRAM up to 7795 MiB under a concurrent GPU process. The prior uncontended verified peak was 3832 MiB; see [docs/BENCHMARK_REPORT.md](docs/BENCHMARK_REPORT.md) for both runs and the safety interpretation.
+The preserved historical continuation rerun measured 0.379 tok/s (short), 32.838 tok/s (4k grounded), 20.798 tok/s (8k grounded), 21.575 tok/s (JSON), and 2.093 embedding texts/s, with observed peak VRAM up to 7795 MiB under a concurrent GPU process. The prior uncontended verified peak was 3832 MiB; see [docs/BENCHMARK_REPORT.md](docs/BENCHMARK_REPORT.md) for both historical runs and the safety interpretation.
 
 ## Advanced compatibility command
 

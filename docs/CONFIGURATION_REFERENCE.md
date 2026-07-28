@@ -50,3 +50,12 @@ Windows path as a Linux path; traversal and NUL are rejected.
 
 External deployment configuration must not be group/world writable on POSIX.
 Repository examples contain no credentials.
+
+Validate without loading or contacting a provider:
+
+```bash
+PYTHONPATH=src python -m research_workspace.laplace_cli \
+  --validate-config configs/laplace.example.yaml \
+  --configuration-mode desktop \
+  --diagnostic-export /tmp/laplace-config-diagnostic.json
+```

@@ -36,6 +36,11 @@ Health only proves process liveness. Readiness checks authentication state, sess
 
 Keep the draft. Check the selected lane, queue position, model display name, and readiness. Quality has reserved capacity. Validation may escalate once to Quality; it never retries indefinitely or silently downgrades.
 
+If a selector is empty, inspect the authenticated `/api/v1/providers` response. It
+should contain enabled logical routes and sanitized capabilities but no endpoints.
+Validate configuration offline with `--validate-config` before doing any
+deployment-specific provider diagnosis.
+
 ## Agent repository is absent or rejected
 
 The client list is server-generated. Confirm both the repository authorization DB grant and the user's external `authorized_repo_ids`. Revoke/re-grant only by logical ID. Never work around a rejection by accepting a client filesystem path.
@@ -91,3 +96,7 @@ Stop admitting expensive work, preserve source files, and rotate/archive derived
 Stop the Operator service, then only model PIDs whose ownership record and live command identity match. The lifecycle manager waits for graceful exit and does not force-kill after timeout. Confirm unrelated GPU processes remain unchanged.
 
 If a trace is needed for support, share the trace ID and sanitized failure category—not a password, activation code, cookie, raw registry, private path, or document content.
+
+For the v0.7 CPU/fixture release command, do not run provider or GPU diagnostics as a
+troubleshooting step. Its exact expected live status is
+`BLOCKED_BY_USER_CONSTRAINT_GPU_UNAVAILABLE`.

@@ -56,6 +56,11 @@ The server-provided domain registry exposes **Auto / General**, **Python**, **St
 
 Capability and quality are independent. A chat-only account may still select any permitted quality lane.
 
+The selector is built from `/api/v1/providers`. The response contains provider
+capabilities plus logical provider/model route IDs, but not endpoints, credentials or
+ports. A route appears only when enabled. Agent uses the same provider catalog, so
+Chat and Agent cannot drift into separate frontend routing vocabularies.
+
 ## 7. Understand queue and response details
 
 During a request, the status progresses through queued, running, complete, cancelled, or failed. **Stop** cancels the browser request; deterministic failure messages explain whether the draft can be retried.
@@ -126,7 +131,7 @@ Every read/export verifies the stored SHA-256. A mismatch is rejected as `artifa
 
 ## 16. Inspect available functionality
 
-**Help** lists only functions available to the authenticated capability. **System** shows the application/Git/API versions, role, capability, sanitized lane display names, context/output limits, guardrails, deployment mode, and documentation names.
+**Help** lists only functions available to the authenticated capability. **System** shows the application/Git/API versions, role, capability, sanitized provider and lane display names, provider/model route IDs, tool support, context/output limits, guardrails, deployment mode, and documentation names. It never shows a provider endpoint.
 
 ![Sanitized system and remote-access mode](user_guide/assets/remote_access_status.png)
 

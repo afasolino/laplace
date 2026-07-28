@@ -123,20 +123,34 @@ Stop the Operator service or take SQLite-consistent backups before copying:
 
 Restore into a new mode-`0700` state root, restore selected secrets only under explicit authorization, validate the registry, start on loopback, inspect readiness, and only then restore the reverse proxy.
 
+The v0.7 manifest and external-key interface is specified in
+[BACKUP_AND_RECOVERY.md](BACKUP_AND_RECOVERY.md). Verify every safe logical path,
+size and hash before importing restored state.
+
 ## Reverse proxy and TLS
 
 Use [REMOTE_ACCESS.md](REMOTE_ACCESS.md) and the Caddy/Nginx examples. Uvicorn and vLLM remain loopback-only. The proxy must pass an explicit Host, `X-Forwarded-*` only from a configured trusted proxy, stream without buffering, limit bodies, and terminate TLS. Remote mode disables PWA by default.
 
 ## Upgrades and rollback
 
-1. Back up non-secret external state plus explicitly selected encrypted secrets.
-2. Create a new implementation worktree/revision.
-3. Install it into a dedicated environment and run all static/API/browser/security checks.
-4. Stop the Operator service gracefully; do not stop unrelated GPU work.
-5. Deploy the new revision and run health/readiness/auth/chat smokes.
-6. On failure, stop only the new service, restore the prior code revision and compatible state backup, then verify hashes and readiness.
+1. Copy the explicit state root into an isolated test location and record its
+   `state_id`; do not let the migration tool discover production state.
+2. Run `laplace-migrate --state-root <copy> --state-id <id> --dry-run`.
+3. Export and verify an encrypted backup, then run
+   `laplace-migrate --state-root <copy> --state-id <id> --apply --yes`.
+4. Run integrity, authentication, ownership and provenance checks against the copy.
+5. Install the candidate into a dedicated environment and run the complete
+   CPU/fixture release command plus separately authorized live tests.
+6. During the approved maintenance window, stop only the Operator writer, back up the
+   explicit deployment state, apply the tested migration and restart the Operator.
+7. On failure, stop only the new Operator service and run
+   `laplace-migrate --state-root <root> --state-id <id> --rollback-backup-id <backup-id> --yes`.
+   Restore the prior code revision, verify hashes and only then restore service.
 
 Database schema changes must be versioned, backed up before migration, applied transactionally, and rolled back from the pre-migration copy on failure. Registered-user and capability stores migrate legacy profile records to capability schema v2. Corpus and worktree stores initialize their versioned schemas idempotently.
+
+See [MIGRATIONS.md](MIGRATIONS.md) for preflight, recovery and exact rollback
+semantics. v0.7 certification migrates only synthetic temporary fixtures.
 
 Personal-corpus backup/restore, quotas, purge, and HMAC-key handling are documented in [PERSONAL_CORPUS.md](PERSONAL_CORPUS.md) and [STORAGE_AND_RETENTION.md](STORAGE_AND_RETENTION.md). Worktree cleanup and recovery are in [AGENT_WORKTREES.md](AGENT_WORKTREES.md).
 
