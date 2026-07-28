@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 users:
   - email: afasolino@unisa.it
     user_id: usr_afasolino
@@ -8,7 +8,33 @@ users:
     role: admin
     default_lane: quality
     authorized_repo_ids: []
+    capabilities:
+      - chat
+      - agent
+      - research
+      - operator
+      - admin
+      - personal_corpus
+      - shared_corpus_ingest
+      - repository_admin
+      - model_admin
     # Non-secret placeholder. Generate the external runtime registry only with
     # `python -m research_workspace.user_admin bootstrap`; do not copy this value.
+    password_hash: "BOOTSTRAP_REQUIRED"
+    must_change_password: true
+  - email: frcapone@unisa.it
+    user_id: usr_frcapone
+    display_name: Francesco R. Capone
+    enabled: true
+    capability_tier: plus
+    role: user
+    default_lane: standard
+    authorized_repo_ids: []
+    capabilities:
+      - chat
+      - agent
+      - personal_corpus
+    # Generate an external activation credential with user_admin; this is not
+    # a usable password hash and must never be deployed.
     password_hash: "BOOTSTRAP_REQUIRED"
     must_change_password: true

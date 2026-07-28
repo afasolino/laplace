@@ -12,7 +12,7 @@ For local use, open `http://127.0.0.1:8765`. Through an SSH tunnel, open the sam
 
 The page shows a red persistent warning if an administrator explicitly enabled insecure non-loopback HTTP. Do not enter a password in that mode unless you understand the network risk.
 
-## 2. First activation for afasolino@unisa.it
+## 2. First activation
 
 The first account is registered as `afasolino@unisa.it`, with Operator capability, the `admin` role, and Quality as its default lane. The password is not predefined.
 
@@ -25,6 +25,8 @@ The first account is registered as `afasolino@unisa.it`, with Operator capabilit
 ![First activation and password creation](user_guide/assets/first_activation.png)
 
 The code stops working after successful activation or after the administrator bootstraps/resets the account again. Laplace accepts password-manager values longer than 64 characters without truncation.
+
+`frcapone@unisa.it` is activated through the same screen with a separate one-time code. It is a normal user account with Chat, Agent, and personal-corpus capabilities; it has no administrative access and no repository until an administrator grants one.
 
 ## 3. Sign in and sign out
 
@@ -50,9 +52,7 @@ Assistant Markdown is treated as untrusted. Laplace escapes embedded HTML, rejec
 - **Standard** balances quality and response time.
 - **Economy** uses an eligible faster route. The CodeV specialist is eligible only for RTL/SystemVerilog work; non-RTL work never routes to CodeV.
 
-Choose **SystemVerilog** in the adjacent Question domain selector when that
-specialist routing is intended. The default General domain keeps Economy on the
-main route with economy limits.
+The server-provided domain registry exposes **Auto / General**, **Python**, **Structured JSON**, and **SystemVerilog** only on surfaces that actually implement them. Auto / General is the Chat/Research default. Python and SystemVerilog are the Agent domains. Each option describes eligible routes and deterministic validation; an indexable file extension alone never creates an Agent domain.
 
 Capability and quality are independent. A chat-only account may still select any permitted quality lane.
 
@@ -72,7 +72,19 @@ Conversation history is stored server-side per user. Use **+** for a new convers
 
 Use **Retry** after a transient failure. Regeneration sends the preserved user request through the selected lane again and records a new request identity.
 
-## 9. Use the Plus repository agent
+## 9. Upload a personal reference folder
+
+Open **Knowledge**, create a corpus, then select a folder, drop files/folders, or choose a controlled ZIP. Select **Preview selected folder** and inspect every acceptance decision before selecting **Index accepted files**. The source cards show logical name, type, size, short hash, owner, storage class, retention, indexing state, download, and delete.
+
+Interrupted staging can resume after reload by reselecting the same files; no file content is kept in browser storage. Deletion removes indexed chunks from retrieval immediately, then applies the configured soft-delete policy. See [PERSONAL_CORPUS.md](PERSONAL_CORPUS.md).
+
+## 10. Select retrieval sources
+
+Chat and Agent provide **No retrieval**, **My personal corpus**, **Shared governed corpus**, **Both permitted corpora**, and **Selected personal corpus**. Response details report what was requested and what was actually used, including snapshot revision and file/page/section/chunk citations. Content still in staging is never used.
+
+Personal context is read-only to Agent and is not mounted in a repository. Shared governed retrieval remains a separate pipeline in this release; when it is requested but unavailable in the tiered path, response details say `retrieval_used=false`.
+
+## 11. Use the repository agent
 
 Only Plus capability exposes the Agent workspace. Select a repository from the server-populated list—there is no filesystem-path field—choose a lane, enter a bounded task, and select **Start isolated agent**.
 
@@ -80,7 +92,9 @@ Only Plus capability exposes the Agent workspace. Select a repository from the s
 
 The server binds the session to the authenticated user, logical repository ID, canonical server-owned repository root, base revision, isolated worktree, and tool policy before the first model call. Network access is denied. Absolute paths, traversal, links, mounts, nested repositories, submodules, sibling worktrees, and changed grants fail closed.
 
-## 10. Read diffs and verification results
+If the repository list is empty, ask an administrator to register and grant a logical ID. After a grant or revoke, sign in again because the access change closes existing sessions.
+
+## 12. Manage worktrees and verification
 
 The result separates the plan/status, changed-file summary, unified diff, and test/verification outcomes. There is no browser shell.
 
@@ -88,7 +102,9 @@ The result separates the plan/status, changed-file summary, unified diff, and te
 
 Use **Cancel** to block further work and release a clean Laplace-owned worktree. A dirty worktree is preserved for inspection rather than silently discarded.
 
-## 11. Start and cancel Deep Research
+The history view supports resume, clean close, export request, patch download, event history, and confirmed discard. It shows logical IDs, commit/grant revision, state, changed paths, diff hash, verification, and expiry without canonical paths. See [AGENT_WORKTREES.md](AGENT_WORKTREES.md).
+
+## 13. Start and cancel Deep Research
 
 Operator-capable accounts can select **Research**, enter a question and scope, choose a research mode, source policy, and available backend, then create a job. Laplace admits at most two research jobs globally and one per user; the interface shows a queue reason and position.
 
@@ -96,25 +112,25 @@ Select **Run admitted job** when capacity is available. Select **Cancel** for a 
 
 ![Deep Research stage timeline, sources, evidence, and report](user_guide/assets/deep_research.png)
 
-## 12. Read citations and evidence
+## 14. Read citations and evidence
 
 The research view separates stage progress, source title/domain/retrieval time/type, claim and evidence information, conflicts, and the cited report. Local source storage paths are not shown. Indexed-document answers retain file, page, section when available, and chunk identifiers in their evidence records.
 
 Conflicting sources remain visible. Exploratory research is not promoted into governed knowledge or a measured run automatically.
 
-## 13. Download artifacts
+## 15. Download artifacts
 
 Select **Export report** after research completes. Laplace registers an internal ULID, owner pseudonym, content hash, source fingerprint, model route, lineage, visibility, and authorization policy. The browser receives a clean filename and clean report content, not internal provenance.
 
 Every read/export verifies the stored SHA-256. A mismatch is rejected as `artifact_integrity_failure`. Cross-user and cross-repository reads return a not-found response.
 
-## 14. Inspect available functionality
+## 16. Inspect available functionality
 
 **Help** lists only functions available to the authenticated capability. **System** shows the application/Git/API versions, role, capability, sanitized lane display names, context/output limits, guardrails, deployment mode, and documentation names.
 
 ![Sanitized system and remote-access mode](user_guide/assets/remote_access_status.png)
 
-Basic is chat-only. Plus adds repository-bound agents. Operator adds administrative users, repositories, queues, approvals, model/profile lifecycle, GPU status, audit, provenance, health, readiness, and session controls.
+Navigation is derived from independent effective capabilities, not an exact tier. Basic defaults to Chat. Plus defaults to Chat, Agent, and personal corpus. Operator defaults to administrative functions; Agent and personal corpus can be combined independently.
 
 ![Operator dashboard with deployment, queue, and provenance status](user_guide/assets/operator_dashboard.png)
 
@@ -122,10 +138,13 @@ Basic is chat-only. Plus adds repository-bound agents. Operator adds administrat
 
 ![Local model and GPU status without private model paths](user_guide/assets/model_and_gpu_status.png)
 
-## 15. Interpret errors
+## 17. Interpret errors
 
 - **Session expired/revoked:** sign in again; the visible unsent draft is preserved.
 - **Repository not authorized:** ask an administrator to grant the logical repository ID.
+- **Stale grant:** create a new worktree after the administrator restores or updates authorization.
+- **Worktree quota:** close a clean worktree or export and explicitly discard a retained one.
+- **Corpus quota/disk pressure:** cancel staging and ask an Operator to review policy and protected free space.
 - **Queued/capacity guardrail:** wait for the displayed admission state to change.
 - **Model unavailable:** keep the draft and ask an Operator to inspect readiness.
 - **Validation failed:** inspect the friendly reason; escalation is bounded to one Quality retry.
@@ -134,13 +153,13 @@ Basic is chat-only. Plus adds repository-bound agents. Operator adds administrat
 
 See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for operator diagnostics.
 
-## 16. Privacy, isolation, and provenance
+## 18. Privacy, isolation, and provenance
 
 Laplace distinguishes your own work from external literature in source metadata. Browser storage contains no password, bearer token, session ID, or refresh token. The `laplace_session` cookie is HttpOnly, so JavaScript cannot read it.
 
-Conversation, research, repository, worktree, cache, log, prompt, and artifact access is owner-scoped. Normal users cannot enumerate internal artifact IDs, owner pseudonyms, or other users' resources. Only an explicit Operator provenance export includes internal lineage.
+Conversation messages, drafts, attachments, personal sources, shared knowledge, repository files, worktrees, artifacts, and audit logs have separate lifecycle rules. The GUI Help/Account/System views and [STORAGE_AND_RETENTION.md](STORAGE_AND_RETENTION.md) explain ownership, logical location, indexing, deletion, retention, and access. Normal users cannot enumerate another user's corpus names, filenames, hashes, chunks, or owner pseudonyms.
 
-## 17. Remote access through SSH or HTTPS
+## 19. Remote access through SSH or HTTPS
 
 The fastest safe remote method is:
 
@@ -150,7 +169,7 @@ ssh -L 8765:127.0.0.1:8765 <server>
 
 Then open `http://127.0.0.1:8765` locally. For multi-user production access, use the documented Caddy or Nginx TLS reverse proxy while Uvicorn and both model ports remain bound to loopback. See [REMOTE_ACCESS.md](REMOTE_ACCESS.md).
 
-## 18. Safe shutdown
+## 20. Safe shutdown
 
 Stop the Operator service first, then invoke the repository-owned model lifecycle stop command or systemd unit. Laplace validates recorded ownership before signalling a model PID and never force-kills a process after a graceful timeout.
 
@@ -165,4 +184,8 @@ Screenshot regeneration:
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/capture_user_guide_screenshots.py
+PYTHONPATH=src .venv/bin/python \
+  scripts/capture_agent_personal_corpus_gui_v6_screenshots.py
 ```
+
+The v6 fixture set includes [domain selection](user_guide/assets/domain_selector.png), [no-repository state](user_guide/assets/agent_no_repository.png), [new worktree](user_guide/assets/agent_new_worktree.png), [worktree history](user_guide/assets/agent_worktree_history.png), [Agent progress](user_guide/assets/agent_progress.png), [empty personal corpus](user_guide/assets/personal_corpus_empty.png), [upload manifest](user_guide/assets/folder_upload_manifest.png), [indexed corpus](user_guide/assets/personal_corpus_indexed.png), [retrieval selector](user_guide/assets/retrieval_source_selector.png), [Chat processing](user_guide/assets/chat_processing_state.png), [mobile Markdown table](user_guide/assets/markdown_table.png), and [independent capability controls](user_guide/assets/admin_capabilities.png).

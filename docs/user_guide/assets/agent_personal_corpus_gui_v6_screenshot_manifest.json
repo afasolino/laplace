@@ -1,0 +1,91 @@
+{
+  "contains_live_secrets": false,
+  "contains_private_documents": false,
+  "files": [
+    {
+      "file": "domain_selector.png",
+      "fixture_data_only": true,
+      "sha256": "d7a19a7623361ffbfb478aace04fdd6c87f0cb94fcd1a1bf370bbdd296824806",
+      "size_bytes": 74374
+    },
+    {
+      "file": "agent_no_repository.png",
+      "fixture_data_only": true,
+      "sha256": "25f1ac78e6046f854d424ada7e22d383c7241faa9dfac3d316a8978e1c2a1a02",
+      "size_bytes": 153222
+    },
+    {
+      "file": "agent_new_worktree.png",
+      "fixture_data_only": true,
+      "sha256": "748be4f63cab0d72feddd3bc982659ea46095d149b7413da7df88210ee1f81db",
+      "size_bytes": 150451
+    },
+    {
+      "file": "agent_worktree_history.png",
+      "fixture_data_only": true,
+      "sha256": "944ca9616f6d97aaf4ce1cee6c9702640837e1a2acf2ba5ea5a025e3c2d596ae",
+      "size_bytes": 206049
+    },
+    {
+      "file": "agent_progress.png",
+      "fixture_data_only": true,
+      "sha256": "a1a9d2dbcf6e3bf0ae64fd9e9593cc61b7893a6fba26703be4fc9c35dcdbbbf9",
+      "size_bytes": 158975
+    },
+    {
+      "file": "personal_corpus_empty.png",
+      "fixture_data_only": true,
+      "sha256": "246e7694e23f9ac7d8b9ed5e78535dfdaa2546aafb553c1ec42411f1a0bc2a85",
+      "size_bytes": 165541
+    },
+    {
+      "file": "folder_upload_manifest.png",
+      "fixture_data_only": true,
+      "sha256": "1cfa0047bc42ebaac4f36a3bcf4cc613cb23635f90ef8cb58a7ab3e2cd351ecc",
+      "size_bytes": 176729
+    },
+    {
+      "file": "personal_corpus_indexed.png",
+      "fixture_data_only": true,
+      "sha256": "c2fdc9d1582a95da6be5a30df01b194266b7cd6803d31da4c48fe91388c9c7c4",
+      "size_bytes": 190236
+    },
+    {
+      "file": "retrieval_source_selector.png",
+      "fixture_data_only": true,
+      "sha256": "6351a44a070c3ff3e9069493b1509099569f7d5d000e92fbff7b0fd7faa9b6dc",
+      "size_bytes": 94325
+    },
+    {
+      "file": "chat_processing_state.png",
+      "fixture_data_only": true,
+      "sha256": "4020935a708d8fbe074fc004fd6fd85732af7a6bde6939201936eeede86c6639",
+      "size_bytes": 89613
+    },
+    {
+      "file": "markdown_table.png",
+      "fixture_data_only": true,
+      "sha256": "1c7e56bb15d8ed762acd7e35d4e33c747a9e0fb79d87585bbab436b2764b289f",
+      "size_bytes": 27897
+    },
+    {
+      "file": "admin_capabilities.png",
+      "fixture_data_only": true,
+      "sha256": "0924b6c8e6b57fb3bfd47ee2d672544156a330ef7d2081595ba0cb838e176015",
+      "size_bytes": 120985
+    }
+  ],
+  "schema_version": 1,
+  "viewport": {
+    "desktop": {
+      "height": 960,
+      "scale": 1,
+      "width": 1440
+    },
+    "mobile": {
+      "height": 844,
+      "scale": 1,
+      "width": 390
+    }
+  }
+}

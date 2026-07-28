@@ -17,13 +17,14 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import AsyncIterator, Literal, Mapping, TypeAlias
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.datastructures import UploadFile
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.cors import CORSMiddleware
 
@@ -35,11 +36,22 @@ from .auth_sessions import (
     RegisteredEmailAuth,
 )
 from .conversations import ConversationError, ConversationStore
+from .domain_registry import (
+    DEFAULT_DOMAIN_REGISTRY,
+    DomainRegistry,
+    DomainRegistryError,
+)
 from .operator_service import (
     OperatorService,
     OperatorServiceError,
     RunExecutor,
 )
+from .personal_corpus import (
+    CorpusError,
+    PersonalCorpusStore,
+    RetrievalSelection,
+)
+from .request_state import RequestStateError, RequestStateStore
 from .agent_sandbox import AgentSandboxError, AgentToolPolicy
 from .research_models import ResearchJobRequest
 from .research_admission import ResearchAdmissionError, ResearchAdmissionStore
@@ -51,7 +63,12 @@ from .serving_profile_runtime import (
     ServingProfileOperator,
     ServingRuntimeError,
 )
-from .user_capabilities import CapabilityTier, UserCapabilityError
+from .user_capabilities import (
+    Capability,
+    CapabilityTier,
+    UserCapabilityError,
+    default_capabilities,
+)
 
 JsonObject: TypeAlias = dict[str, object]
 LOGGER = logging.getLogger("laplace.operator")
@@ -96,6 +113,7 @@ class ResearchCreateRequest(BaseModel):
 
     job: ResearchJobRequest
     research_job_id: str | None = Field(default=None, max_length=160)
+    domain: str = Field(default="general", min_length=1, max_length=80)
 
 
 class TierChatMessage(BaseModel):
@@ -117,6 +135,15 @@ class TierChatRequest(BaseModel):
         default=None, pattern=r"^conv-[a-f0-9]{32}$"
     )
     messages: list[TierChatMessage] = Field(min_length=1, max_length=200)
+    request_id: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{7,159}$"
+    )
+    retrieval_selection: Literal[
+        "none", "personal", "shared", "both", "selected_personal"
+    ] = "none"
+    personal_corpus_id: str | None = Field(
+        default=None, pattern=r"^pc_[a-f0-9]{32}$"
+    )
 
 
 class LoginRequest(BaseModel):
@@ -167,6 +194,10 @@ class AgentSessionRequest(BaseModel):
     )
     max_commands: int = Field(default=100, ge=1, le=1_000)
     max_wall_seconds: int = Field(default=1_800, ge=1, le=14_400)
+    task_title: str = Field(default="New Agent task", min_length=1, max_length=200)
+    idempotency_key: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,159}$"
+    )
 
 
 class AgentRunRequest(BaseModel):
@@ -175,6 +206,12 @@ class AgentRunRequest(BaseModel):
     lane: Literal["quality", "standard", "economy"]
     instruction: str = Field(min_length=1, max_length=100_000)
     domain: str = Field(min_length=1, max_length=80)
+    retrieval_selection: Literal[
+        "none", "personal", "shared", "both", "selected_personal"
+    ] = "none"
+    personal_corpus_id: str | None = Field(
+        default=None, pattern=r"^pc_[a-f0-9]{32}$"
+    )
 
 
 class TierUserRequest(BaseModel):
@@ -183,6 +220,75 @@ class TierUserRequest(BaseModel):
     user_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
     tier: Literal["basic", "plus", "operator"]
     enabled: bool = True
+
+
+class CapabilitySetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    capabilities: list[
+        Literal[
+            "chat",
+            "agent",
+            "research",
+            "operator",
+            "admin",
+            "personal_corpus",
+            "shared_corpus_ingest",
+            "repository_admin",
+            "model_admin",
+        ]
+    ] = Field(max_length=9)
+    enabled: bool | None = None
+
+
+class CorpusCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: str = Field(min_length=1, max_length=160)
+
+
+class CorpusUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    archived: bool | None = None
+
+
+class UploadCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    corpus_id: str = Field(pattern=r"^pc_[a-f0-9]{32}$")
+    idempotency_key: str = Field(
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,159}$"
+    )
+
+
+class IndexUploadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    idempotency_key: str = Field(
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,159}$"
+    )
+
+
+class CorpusSearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    query: str = Field(min_length=1, max_length=4_000)
+    corpus_id: str | None = Field(default=None, pattern=r"^pc_[a-f0-9]{32}$")
+    limit: int = Field(default=8, ge=1, le=50)
+
+
+class WorktreeDiscardRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    confirmation: str = Field(min_length=9, max_length=180)
+
+
+class WorktreeExportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    promotion: bool = False
 
 
 class RepositoryRegistrationRequest(BaseModel):
@@ -305,7 +411,7 @@ class OperatorApiSettings:
     bearer_api_enabled: bool = False
     pwa_enabled: bool = True
     fixture_mode: bool = False
-    maximum_request_bytes: int = 2_000_000
+    maximum_request_bytes: int = 70_000_000
 
     def __post_init__(self) -> None:
         if not 1 <= self.port <= 65_535:
@@ -370,12 +476,19 @@ def create_operator_app(
     conversation_store: ConversationStore | None = None,
     artifact_registry: ArtifactRegistry | None = None,
     research_admission: ResearchAdmissionStore | None = None,
+    personal_corpora: PersonalCorpusStore | None = None,
+    domain_registry: DomainRegistry = DEFAULT_DOMAIN_REGISTRY,
+    request_states: RequestStateStore | None = None,
 ) -> FastAPI:
     """Create the localhost GUI/API application without changing execution semantics."""
 
     if settings.bind_host not in {"127.0.0.1", "localhost", "::1"} and auth is None:
         raise ValueError("authentication is mandatory for non-loopback binding")
     web_root = Path(__file__).with_name("operator_web")
+    corpus_store = personal_corpora or PersonalCorpusStore(operator.state_root)
+    progress_store = request_states or RequestStateStore(
+        operator.state_root / "requests/request_states.sqlite3"
+    )
     app = FastAPI(
         title="Laplace Research and Operator Plane",
         version="1.1",
@@ -540,12 +653,61 @@ def create_operator_app(
             raise HTTPException(status_code=401, detail="authentication_required")
         return auth.authenticate(authorization)
 
+    def _effective_capabilities(authenticated: AuthPrincipal) -> frozenset[Capability]:
+        if tiered is not None:
+            try:
+                return tiered.effective_capabilities(authenticated.user_id)
+            except UserCapabilityError:
+                if authenticated.auth_method == "session":
+                    raise HTTPException(
+                        status_code=401, detail="credential_capability_changed"
+                    )
+        return default_capabilities(authenticated.capability_tier)
+
+    def _require_named(
+        authenticated: AuthPrincipal, required: Capability
+    ) -> AuthPrincipal:
+        if required not in _effective_capabilities(authenticated):
+            raise HTTPException(
+                status_code=403,
+                detail=f"{required.value}_capability_required",
+            )
+        return authenticated
+
     async def operator_principal(
         authenticated: AuthPrincipal = Depends(principal),
     ) -> AuthPrincipal:
-        if authenticated.capability_tier is not CapabilityTier.OPERATOR:
-            raise HTTPException(status_code=403, detail="operator_capability_required")
-        return authenticated
+        return _require_named(authenticated, Capability.OPERATOR)
+
+    async def admin_principal(
+        authenticated: AuthPrincipal = Depends(principal),
+    ) -> AuthPrincipal:
+        return _require_named(authenticated, Capability.ADMIN)
+
+    async def personal_corpus_principal(
+        authenticated: AuthPrincipal = Depends(principal),
+    ) -> AuthPrincipal:
+        return _require_named(authenticated, Capability.PERSONAL_CORPUS)
+
+    async def research_principal(
+        authenticated: AuthPrincipal = Depends(principal),
+    ) -> AuthPrincipal:
+        return _require_named(authenticated, Capability.RESEARCH)
+
+    async def chat_principal(
+        authenticated: AuthPrincipal = Depends(principal),
+    ) -> AuthPrincipal:
+        return _require_named(authenticated, Capability.CHAT)
+
+    async def agent_principal(
+        authenticated: AuthPrincipal = Depends(principal),
+    ) -> AuthPrincipal:
+        return _require_named(authenticated, Capability.AGENT)
+
+    async def model_admin_principal(
+        authenticated: AuthPrincipal = Depends(principal),
+    ) -> AuthPrincipal:
+        return _require_named(authenticated, Capability.MODEL_ADMIN)
 
     async def mutation_principal(
         request: Request,
@@ -571,9 +733,78 @@ def create_operator_app(
 
     async def research_mutation_principal(
         request: Request,
-        authenticated: AuthPrincipal = Depends(operator_principal),
+        authenticated: AuthPrincipal = Depends(principal),
         x_csrf_token: str | None = Header(default=None),
     ) -> AuthPrincipal:
+        _require_named(authenticated, Capability.RESEARCH)
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in settings.allowed_origins:
+            raise HTTPException(status_code=403, detail="origin_not_allowed")
+        _validate_csrf(authenticated, x_csrf_token)
+        return authenticated
+
+    async def corpus_mutation_principal(
+        request: Request,
+        authenticated: AuthPrincipal = Depends(personal_corpus_principal),
+        x_csrf_token: str | None = Header(default=None),
+    ) -> AuthPrincipal:
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in settings.allowed_origins:
+            raise HTTPException(status_code=403, detail="origin_not_allowed")
+        _validate_csrf(authenticated, x_csrf_token)
+        return authenticated
+
+    async def chat_mutation_principal(
+        request: Request,
+        authenticated: AuthPrincipal = Depends(chat_principal),
+        x_csrf_token: str | None = Header(default=None),
+    ) -> AuthPrincipal:
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in settings.allowed_origins:
+            raise HTTPException(status_code=403, detail="origin_not_allowed")
+        _validate_csrf(authenticated, x_csrf_token)
+        return authenticated
+
+    async def agent_mutation_principal(
+        request: Request,
+        authenticated: AuthPrincipal = Depends(agent_principal),
+        x_csrf_token: str | None = Header(default=None),
+    ) -> AuthPrincipal:
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in settings.allowed_origins:
+            raise HTTPException(status_code=403, detail="origin_not_allowed")
+        _validate_csrf(authenticated, x_csrf_token)
+        return authenticated
+
+    async def admin_mutation_principal(
+        request: Request,
+        authenticated: AuthPrincipal = Depends(admin_principal),
+        x_csrf_token: str | None = Header(default=None),
+    ) -> AuthPrincipal:
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in settings.allowed_origins:
+            raise HTTPException(status_code=403, detail="origin_not_allowed")
+        _validate_csrf(authenticated, x_csrf_token)
+        return authenticated
+
+    async def repository_admin_mutation_principal(
+        request: Request,
+        authenticated: AuthPrincipal = Depends(principal),
+        x_csrf_token: str | None = Header(default=None),
+    ) -> AuthPrincipal:
+        _require_named(authenticated, Capability.REPOSITORY_ADMIN)
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in settings.allowed_origins:
+            raise HTTPException(status_code=403, detail="origin_not_allowed")
+        _validate_csrf(authenticated, x_csrf_token)
+        return authenticated
+
+    async def model_admin_mutation_principal(
+        request: Request,
+        authenticated: AuthPrincipal = Depends(principal),
+        x_csrf_token: str | None = Header(default=None),
+    ) -> AuthPrincipal:
+        _require_named(authenticated, Capability.MODEL_ADMIN)
         origin = request.headers.get("origin")
         if origin is not None and origin not in settings.allowed_origins:
             raise HTTPException(status_code=403, detail="origin_not_allowed")
@@ -632,6 +863,7 @@ def create_operator_app(
     @app.exception_handler(RepositoryAuthorizationError)
     @app.exception_handler(AgentSandboxError)
     @app.exception_handler(ServingRuntimeError)
+    @app.exception_handler(DomainRegistryError)
     async def tier_error(
         request: Request,
         exc: (
@@ -640,6 +872,7 @@ def create_operator_app(
             | UserCapabilityError
             | RepositoryAuthorizationError
             | ServingRuntimeError
+            | DomainRegistryError
         ),
     ) -> JSONResponse:
         category = getattr(exc, "category", str(exc))
@@ -665,6 +898,36 @@ def create_operator_app(
                 "status": "ERROR",
                 "failure_category": category,
                 "evidence": evidence,
+            },
+        )
+
+    @app.exception_handler(CorpusError)
+    @app.exception_handler(RequestStateError)
+    async def corpus_or_request_error(
+        _request: Request, exc: CorpusError | RequestStateError
+    ) -> JSONResponse:
+        category = exc.category
+        if category.endswith("_not_found"):
+            status_code = 404
+        elif "quota" in category or category in {
+            "disk_pressure",
+            "request_body_too_large",
+        }:
+            status_code = 413
+        elif category in {
+            "corpus_not_found",
+            "source_not_found",
+            "upload_not_found",
+        }:
+            status_code = 404
+        else:
+            status_code = 409
+        return JSONResponse(
+            status_code=status_code,
+            content={
+                "status": "ERROR",
+                "failure_category": category,
+                "evidence": getattr(exc, "evidence", {}),
             },
         )
 
@@ -786,6 +1049,7 @@ def create_operator_app(
             "fixture_mode": settings.fixture_mode,
             "development_http": settings.development_http,
             "deployment_mode": settings.deployment_mode,
+            "personal_corpus": corpus_store.health(),
         }
 
     @app.get("/api/v1/readiness")
@@ -910,12 +1174,16 @@ def create_operator_app(
                     reasons.append(f"state_not_writable:{current.name}")
             except OSError:
                 reasons.append(f"state_unavailable:{current.name}")
+        corpus_health = corpus_store.health()
+        if corpus_health.get("status") != "READY":
+            reasons.append("personal_corpus_store_degraded")
         return JSONResponse(
             status_code=200 if not reasons else 503,
             content={
                 "status": "READY" if not reasons else "DEGRADED",
                 "reasons": reasons,
                 "model_endpoints_required": tiered is not None,
+                "personal_corpus": corpus_health,
             },
         )
 
@@ -1264,7 +1532,7 @@ def create_operator_app(
     @app.post("/api/v1/model-servers/action")
     async def model_server_action(
         body: ModelServerActionRequest,
-        authenticated: AuthPrincipal = Depends(mutation_principal),
+        authenticated: AuthPrincipal = Depends(model_admin_mutation_principal),
     ) -> dict[str, object]:
         return operator.model_server_action(
             body.action,
@@ -1274,7 +1542,7 @@ def create_operator_app(
 
     @app.get("/api/v1/model-servers/status")
     async def model_server_status(
-        authenticated: AuthPrincipal = Depends(operator_principal),
+        authenticated: AuthPrincipal = Depends(model_admin_principal),
     ) -> dict[str, object]:
         return sanitized_model_status(authenticated.role)
 
@@ -1285,7 +1553,15 @@ def create_operator_app(
     ) -> dict[str, object]:
         if research is None:
             raise HTTPException(status_code=503, detail="research_plane_unavailable")
+        selected_domain = domain_registry.require(body.domain, surface="research")
         result = research.create(body.job, job_id=body.research_job_id)
+        result["domain"] = selected_domain.domain_id
+        result["domain_routing"] = {
+            "eligible_model_routes": list(selected_domain.eligible_model_routes),
+            "eligible_verification_tools": list(
+                selected_domain.eligible_verification_tools
+            ),
+        }
         job_id = str(result["research_job_id"])
         if research_admission is not None:
             result["admission"] = research_admission.create(
@@ -1300,7 +1576,8 @@ def create_operator_app(
             payload={
                 "request_sha256": hashlib.sha256(
                     body.job.model_dump_json().encode("utf-8")
-                ).hexdigest()
+                ).hexdigest(),
+                "domain": selected_domain.domain_id,
             },
         )
         return result
@@ -1351,7 +1628,7 @@ def create_operator_app(
     @app.get("/api/v1/research/jobs/{job_id}")
     async def get_research(
         job_id: str,
-        authenticated: AuthPrincipal = Depends(operator_principal),
+        authenticated: AuthPrincipal = Depends(research_principal),
     ) -> dict[str, object]:
         if research is None:
             raise HTTPException(status_code=503, detail="research_plane_unavailable")
@@ -1371,7 +1648,7 @@ def create_operator_app(
     @app.get("/api/v1/research/jobs/{job_id}/report")
     async def get_research_report(
         job_id: str,
-        authenticated: AuthPrincipal = Depends(operator_principal),
+        authenticated: AuthPrincipal = Depends(research_principal),
     ) -> dict[str, object]:
         if research is None:
             raise HTTPException(status_code=503, detail="research_plane_unavailable")
@@ -1623,6 +1900,7 @@ def create_operator_app(
     ) -> dict[str, object]:
         service = require_tiered()
         capability = service.capability(authenticated.user_id)
+        effective = service.effective_capabilities(authenticated.user_id)
         functions: list[dict[str, str]] = [
             {
                 "name": "Chat",
@@ -1647,7 +1925,7 @@ def create_operator_app(
                 "description": "Stop generation or cancel queued work from its active panel.",
             },
         ]
-        if capability is CapabilityTier.BASIC:
+        if effective == default_capabilities(CapabilityTier.BASIC):
             functions.append(
                 {
                     "name": "Basic capability",
@@ -1657,12 +1935,12 @@ def create_operator_app(
                     ),
                 }
             )
-        if capability is CapabilityTier.PLUS:
+        if Capability.AGENT in effective:
             functions.extend(
                 [
                     {
-                        "name": "Plus capability",
-                        "description": "Chat plus explicitly authorized repository work.",
+                        "name": "Agent capability",
+                        "description": "Explicitly authorized repository work.",
                     },
                     {
                         "name": "Repository-bound agent",
@@ -1673,16 +1951,29 @@ def create_operator_app(
                     },
                 ]
             )
-        if capability is CapabilityTier.OPERATOR:
+        if Capability.PERSONAL_CORPUS in effective:
+            functions.append(
+                {
+                    "name": "My corpus",
+                    "description": (
+                        "Owner-private folder upload, validation, deterministic "
+                        "indexing, retrieval snapshots, and deletion."
+                    ),
+                }
+            )
+        if Capability.RESEARCH in effective:
+            functions.append(
+                {
+                    "name": "Deep Research",
+                    "description": (
+                        "Governed knowledge and RAG sources, visible citations and "
+                        "conflicts, bounded queueing, export, and cancellation."
+                    ),
+                }
+            )
+        if Capability.OPERATOR in effective:
             functions.extend(
                 [
-                    {
-                        "name": "Deep Research",
-                        "description": (
-                            "Governed knowledge and RAG sources, visible citations and "
-                            "conflicts, bounded queueing, export, and cancellation."
-                        ),
-                    },
                     {
                         "name": "Operator controls",
                         "description": (
@@ -1706,6 +1997,7 @@ def create_operator_app(
         return {
             "status": "OK",
             "capability_tier": capability.value,
+            "capabilities": sorted(item.value for item in effective),
             "role": authenticated.role,
             "functions": functions,
             "guardrails": service.scheduler.snapshot(),
@@ -1745,9 +2037,26 @@ def create_operator_app(
                 "QUICKSTART.md",
                 "ADMIN_GUIDE.md",
                 "REMOTE_ACCESS.md",
+                "PERSONAL_CORPUS.md",
+                "AGENT_WORKTREES.md",
+                "STORAGE_AND_RETENTION.md",
             ],
         }
 
+    @app.get("/api/v1/domains")
+    async def domains(
+        surface: Literal["chat", "agent", "research"] | None = Query(default=None),
+        _authenticated: AuthPrincipal = Depends(principal),
+    ) -> JsonObject:
+        return domain_registry.public(surface=surface)
+
+    @app.get("/api/v1/personal-corpus/policy")
+    async def personal_corpus_policy(
+        _authenticated: AuthPrincipal = Depends(principal),
+    ) -> JsonObject:
+        return corpus_store.policy.public()
+
+    @app.get("/api/v1/capabilities")
     @app.get("/api/v1/tier/capabilities")
     async def tier_capabilities(
         authenticated: AuthPrincipal = Depends(principal),
@@ -1756,20 +2065,26 @@ def create_operator_app(
         effective = service.capability(authenticated.user_id)
         if effective is not authenticated.capability_tier:
             raise HTTPException(status_code=401, detail="credential_capability_changed")
+        capabilities = service.effective_capabilities(authenticated.user_id)
         result: dict[str, object] = {
             "status": "OK",
             "display_name": authenticated.display_name or authenticated.user_id,
             "capability_tier": effective.value,
+            "capability_schema_version": 2,
+            "capabilities": sorted(item.value for item in capabilities),
             "role": authenticated.role,
             "default_lane": authenticated.default_lane,
-            "chat_enabled": effective
-            in {
-                CapabilityTier.BASIC,
-                CapabilityTier.PLUS,
-                CapabilityTier.OPERATOR,
-            },
-            "agent_enabled": effective is CapabilityTier.PLUS,
-            "operator_enabled": effective is CapabilityTier.OPERATOR,
+            "chat_enabled": Capability.CHAT in capabilities,
+            "agent_enabled": Capability.AGENT in capabilities,
+            "research_enabled": Capability.RESEARCH in capabilities,
+            "operator_enabled": Capability.OPERATOR in capabilities,
+            "admin_enabled": Capability.ADMIN in capabilities,
+            "personal_corpus_enabled": Capability.PERSONAL_CORPUS in capabilities,
+            "shared_corpus_ingest_enabled": (
+                Capability.SHARED_CORPUS_INGEST in capabilities
+            ),
+            "repository_admin_enabled": Capability.REPOSITORY_ADMIN in capabilities,
+            "model_admin_enabled": Capability.MODEL_ADMIN in capabilities,
             "model_lanes": [lane.value for lane in ModelLane],
             "lane_axis_independent": True,
             "routes": {
@@ -1786,8 +2101,9 @@ def create_operator_app(
                 "economy_capacity": service.lane_policy.economy_capacity,
                 "agent_network_enabled": False,
             },
+            "domain_registry": domain_registry.public(),
         }
-        if effective is CapabilityTier.PLUS:
+        if Capability.AGENT in capabilities:
             authorized = service.sandboxes.authorizations.authorized_for_user(
                 authenticated.user_id
             )
@@ -1800,6 +2116,10 @@ def create_operator_app(
                     item for item in authorized if item.get("repo_id") in allowed
                 ]
             result["authorized_repositories"] = authorized
+            result["worktree_quota"] = {
+                "per_user": service.sandboxes.per_user_quota,
+                "global": service.sandboxes.global_quota,
+            }
         if authenticated.auth_method == "bearer":
             # Backwards-compatible non-browser API clients may need their configured ID.
             result["user_id"] = authenticated.user_id
@@ -1808,10 +2128,89 @@ def create_operator_app(
     @app.post("/api/v1/chat")
     async def tier_chat(
         body: TierChatRequest,
-        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
+        request: Request,
+        authenticated: AuthPrincipal = Depends(chat_mutation_principal),
     ) -> dict[str, object]:
         service = require_tiered()
+        _require_named(authenticated, Capability.CHAT)
+        domain_registry.require(body.domain, surface="chat")
+        progress_id = body.request_id or f"ui-chat-{uuid.uuid4().hex}"
+        progress_store.create(
+            progress_id,
+            owner_user_id=authenticated.user_id,
+            request_type="chat",
+            trace_id=str(request.state.trace_id),
+            requested_lane=body.lane,
+        )
         messages = [message.model_dump() for message in body.messages]
+        retrieval: JsonObject = {
+            "selection": body.retrieval_selection,
+            "retrieval_used": False,
+            "personal": None,
+            "shared": {
+                "requested": body.retrieval_selection in {"shared", "both"},
+                "retrieval_used": False,
+            },
+        }
+        if body.retrieval_selection in {"personal", "both", "selected_personal"}:
+            _require_named(authenticated, Capability.PERSONAL_CORPUS)
+            if (
+                body.retrieval_selection == RetrievalSelection.SELECTED_PERSONAL.value
+                and body.personal_corpus_id is None
+            ):
+                raise CorpusError("selected_personal_corpus_required")
+            progress_store.transition(
+                progress_id,
+                owner_user_id=authenticated.user_id,
+                state="RETRIEVING",
+                retrieval=retrieval,
+            )
+            retrieval_query = next(
+                (
+                    message.content
+                    for message in reversed(body.messages)
+                    if message.role == "user"
+                ),
+                "",
+            )
+            personal = corpus_store.search(
+                authenticated.user_id,
+                retrieval_query,
+                corpus_id=(
+                    body.personal_corpus_id
+                    if body.retrieval_selection
+                    == RetrievalSelection.SELECTED_PERSONAL.value
+                    else None
+                ),
+                limit=8,
+            )
+            retrieval["personal"] = personal
+            retrieval["retrieval_used"] = bool(personal["retrieval_used"])
+            raw_personal_results = personal.get("results")
+            if isinstance(raw_personal_results, list) and raw_personal_results:
+                context_parts = [
+                    (
+                        f"[{item['chunk_id']}] file={item['file']} "
+                        f"page={item['page'] or 'n/a'} "
+                        f"section={item['section'] or 'n/a'}\n{item['text']}"
+                    )
+                    for item in raw_personal_results
+                    if isinstance(item, dict)
+                ]
+                messages.insert(
+                    0,
+                    {
+                        "role": "system",
+                        "content": (
+                            "Use the following owner-authorized read-only personal "
+                            "corpus excerpts only when relevant. Cite file, page or "
+                            "section when available, and chunk ID. Do not claim any "
+                            "other source.\n\n" + "\n\n".join(context_parts)
+                        )[:40_000],
+                    },
+                )
+        elif body.personal_corpus_id is not None:
+            raise CorpusError("personal_corpus_id_without_selection")
         conversation_id = body.conversation_id
         if conversation_store is not None:
             if conversation_id is None:
@@ -1839,23 +2238,75 @@ def create_operator_app(
                     content=latest_user,
                     metadata={"requested_lane": body.lane, "domain": body.domain},
                 )
-        if settings.fixture_mode:
-            result = service.chat(
-                user_id=authenticated.user_id,
-                lane=ModelLane(body.lane),
-                messages=messages,
-                domain=body.domain,
-                session_id=body.session_id or conversation_id,
+        try:
+            progress_store.transition(
+                progress_id,
+                owner_user_id=authenticated.user_id,
+                state="PREPARING_CONTEXT",
+                retrieval=retrieval,
             )
-        else:
-            result = await run_in_threadpool(
-                service.chat,
-                user_id=authenticated.user_id,
-                lane=ModelLane(body.lane),
-                messages=messages,
-                domain=body.domain,
-                session_id=body.session_id or conversation_id,
+            progress_store.transition(
+                progress_id,
+                owner_user_id=authenticated.user_id,
+                state="QUEUED",
             )
+            progress_store.transition(
+                progress_id,
+                owner_user_id=authenticated.user_id,
+                state="ADMITTED",
+            )
+            progress_store.transition(
+                progress_id,
+                owner_user_id=authenticated.user_id,
+                state="GENERATING",
+            )
+            if settings.fixture_mode:
+                result = service.chat(
+                    user_id=authenticated.user_id,
+                    lane=ModelLane(body.lane),
+                    messages=messages,
+                    domain=body.domain,
+                    session_id=body.session_id or conversation_id,
+                )
+            else:
+                result = await run_in_threadpool(
+                    service.chat,
+                    user_id=authenticated.user_id,
+                    lane=ModelLane(body.lane),
+                    messages=messages,
+                    domain=body.domain,
+                    session_id=body.session_id or conversation_id,
+                )
+            queue_value = result.get("queue_position")
+            progress_store.transition(
+                progress_id,
+                owner_user_id=authenticated.user_id,
+                state="VALIDATING_OUTPUT",
+                queue_position=(
+                    queue_value
+                    if isinstance(queue_value, int)
+                    else None
+                ),
+                effective_lane=(
+                    str(result["effective_lane"])
+                    if result.get("effective_lane") is not None
+                    else None
+                ),
+                model_name=(
+                    str(result["model_id"])
+                    if result.get("model_id") is not None
+                    else None
+                ),
+                retrieval=retrieval,
+            )
+        except Exception:
+            progress_store.transition(
+                progress_id,
+                owner_user_id=authenticated.user_id,
+                state="FAILED",
+                retrieval=retrieval,
+            )
+            raise
         if conversation_store is not None and conversation_id is not None:
             envelope = result.get("response")
             content = envelope.get("content") if isinstance(envelope, dict) else None
@@ -1882,11 +2333,35 @@ def create_operator_app(
                 )
                 result["conversation_message_id"] = message["message_id"]
             result["conversation_id"] = conversation_id
+        result["client_request_id"] = progress_id
+        result["retrieval"] = retrieval
+        progress_store.transition(
+            progress_id,
+            owner_user_id=authenticated.user_id,
+            state="COMPLETE",
+            effective_lane=str(result.get("effective_lane") or ""),
+            model_name=str(result.get("model_id") or ""),
+            retrieval=retrieval,
+        )
         return result
+
+    @app.get("/api/v1/requests/{request_id}")
+    async def request_status(
+        request_id: str,
+        authenticated: AuthPrincipal = Depends(principal),
+    ) -> JsonObject:
+        return progress_store.get(authenticated.user_id, request_id)
+
+    @app.post("/api/v1/requests/{request_id}/cancel")
+    async def cancel_request(
+        request_id: str,
+        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
+    ) -> JsonObject:
+        return progress_store.cancel(authenticated.user_id, request_id)
 
     @app.get("/api/v1/conversations")
     async def list_conversations(
-        authenticated: AuthPrincipal = Depends(principal),
+        authenticated: AuthPrincipal = Depends(chat_principal),
         include_archived: bool = Query(default=True),
     ) -> dict[str, object]:
         if conversation_store is None:
@@ -1902,7 +2377,7 @@ def create_operator_app(
     @app.post("/api/v1/conversations")
     async def create_conversation(
         body: ConversationCreateRequest,
-        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
+        authenticated: AuthPrincipal = Depends(chat_mutation_principal),
     ) -> dict[str, object]:
         if conversation_store is None:
             raise HTTPException(status_code=503, detail="conversation_store_unavailable")
@@ -1917,7 +2392,7 @@ def create_operator_app(
     @app.get("/api/v1/conversations/{conversation_id}")
     async def get_conversation(
         conversation_id: str,
-        authenticated: AuthPrincipal = Depends(principal),
+        authenticated: AuthPrincipal = Depends(chat_principal),
     ) -> dict[str, object]:
         if conversation_store is None:
             raise HTTPException(status_code=503, detail="conversation_store_unavailable")
@@ -1933,7 +2408,7 @@ def create_operator_app(
     async def update_conversation(
         conversation_id: str,
         body: ConversationUpdateRequest,
-        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
+        authenticated: AuthPrincipal = Depends(chat_mutation_principal),
     ) -> dict[str, object]:
         if conversation_store is None:
             raise HTTPException(status_code=503, detail="conversation_store_unavailable")
@@ -1949,13 +2424,257 @@ def create_operator_app(
     @app.delete("/api/v1/conversations/{conversation_id}")
     async def delete_conversation(
         conversation_id: str,
-        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
+        authenticated: AuthPrincipal = Depends(chat_mutation_principal),
     ) -> dict[str, object]:
         if conversation_store is None:
             raise HTTPException(status_code=503, detail="conversation_store_unavailable")
         conversation_store.delete(authenticated.user_id, conversation_id)
         return {"status": "DELETED"}
 
+    @app.get("/api/v1/personal-corpora")
+    async def list_personal_corpora(
+        authenticated: AuthPrincipal = Depends(personal_corpus_principal),
+        include_archived: bool = Query(default=True),
+    ) -> JsonObject:
+        return {
+            "status": "OK",
+            "corpora": corpus_store.list_corpora(
+                authenticated.user_id, include_archived=include_archived
+            ),
+        }
+
+    @app.post("/api/v1/personal-corpora")
+    async def create_personal_corpus(
+        body: CorpusCreateRequest,
+        authenticated: AuthPrincipal = Depends(corpus_mutation_principal),
+    ) -> JsonObject:
+        return {
+            "status": "CREATED",
+            "corpus": corpus_store.create_corpus(
+                authenticated.user_id, body.name
+            ),
+        }
+
+    @app.get("/api/v1/personal-corpora/{corpus_id}")
+    async def get_personal_corpus(
+        corpus_id: str,
+        authenticated: AuthPrincipal = Depends(personal_corpus_principal),
+    ) -> JsonObject:
+        return {
+            "status": "OK",
+            "corpus": corpus_store.require_corpus(
+                authenticated.user_id, corpus_id
+            ),
+            "sources": corpus_store.list_sources(
+                authenticated.user_id, corpus_id
+            ),
+        }
+
+    @app.patch("/api/v1/personal-corpora/{corpus_id}")
+    async def update_personal_corpus(
+        corpus_id: str,
+        body: CorpusUpdateRequest,
+        authenticated: AuthPrincipal = Depends(corpus_mutation_principal),
+    ) -> JsonObject:
+        return {
+            "status": "UPDATED",
+            "corpus": corpus_store.update_corpus(
+                authenticated.user_id,
+                corpus_id,
+                name=body.name,
+                archived=body.archived,
+            ),
+        }
+
+    @app.delete("/api/v1/personal-corpora/{corpus_id}")
+    async def delete_personal_corpus(
+        corpus_id: str,
+        authenticated: AuthPrincipal = Depends(corpus_mutation_principal),
+    ) -> JsonObject:
+        return corpus_store.delete_corpus(authenticated.user_id, corpus_id)
+
+    @app.post("/api/v1/personal-corpus/uploads")
+    async def create_folder_upload(
+        body: UploadCreateRequest,
+        authenticated: AuthPrincipal = Depends(corpus_mutation_principal),
+    ) -> JsonObject:
+        return corpus_store.create_upload(
+            authenticated.user_id,
+            body.corpus_id,
+            idempotency_key=body.idempotency_key,
+        )
+
+    @app.get("/api/v1/personal-corpus/uploads")
+    async def list_folder_uploads(
+        authenticated: AuthPrincipal = Depends(personal_corpus_principal),
+        state: Literal["STAGING", "CANCELLED", "INDEXED"] = Query(
+            default="STAGING"
+        ),
+    ) -> JsonObject:
+        return {
+            "status": "OK",
+            "uploads": corpus_store.list_uploads(
+                authenticated.user_id, state=state
+            ),
+        }
+
+    @app.get("/api/v1/personal-corpus/uploads/{upload_id}")
+    async def folder_upload_manifest(
+        upload_id: str,
+        authenticated: AuthPrincipal = Depends(personal_corpus_principal),
+    ) -> JsonObject:
+        return corpus_store.upload_manifest(authenticated.user_id, upload_id)
+
+    async def _upload_form(
+        request: Request,
+        *,
+        zip_fallback: bool,
+    ) -> tuple[str, bytes, str]:
+        form = await request.form(
+            max_files=1,
+            max_fields=2,
+            max_part_size=corpus_store.policy.max_file_bytes,
+        )
+        expected = {"file"} if zip_fallback else {"file", "relative_path"}
+        if set(form) != expected:
+            raise CorpusError("invalid_multipart_fields")
+        uploaded = form.get("file")
+        if not isinstance(uploaded, UploadFile):
+            raise CorpusError("upload_file_required")
+        content = await uploaded.read(corpus_store.policy.max_file_bytes + 1)
+        if len(content) > corpus_store.policy.max_file_bytes:
+            raise CorpusError("file_size_quota")
+        relative_path = (
+            uploaded.filename or "folder.zip"
+            if zip_fallback
+            else str(form.get("relative_path") or "")
+        )
+        return relative_path, content, uploaded.content_type or ""
+
+    @app.post("/api/v1/personal-corpus/uploads/{upload_id}/files")
+    async def upload_folder_file(
+        upload_id: str,
+        request: Request,
+        _authenticated: AuthPrincipal = Depends(corpus_mutation_principal),
+    ) -> JsonObject:
+        relative_path, content, media_type = await _upload_form(
+            request, zip_fallback=False
+        )
+        return corpus_store.stage_file(
+            _authenticated.user_id,
+            upload_id,
+            logical_path=relative_path,
+            content=content,
+            client_mime=media_type,
+        )
+
+    @app.post("/api/v1/personal-corpus/uploads/{upload_id}/zip")
+    async def upload_folder_zip(
+        upload_id: str,
+        request: Request,
+        _authenticated: AuthPrincipal = Depends(corpus_mutation_principal),
+    ) -> JsonObject:
+        _name, content, _media_type = await _upload_form(
+            request, zip_fallback=True
+        )
+        return corpus_store.stage_zip_fallback(
+            _authenticated.user_id, upload_id, content=content
+        )
+
+    @app.post("/api/v1/personal-corpus/uploads/{upload_id}/cancel")
+    async def cancel_folder_upload(
+        upload_id: str,
+        authenticated: AuthPrincipal = Depends(corpus_mutation_principal),
+    ) -> JsonObject:
+        return corpus_store.cancel_upload(authenticated.user_id, upload_id)
+
+    @app.post("/api/v1/personal-corpus/uploads/{upload_id}/index")
+    async def index_folder_upload(
+        upload_id: str,
+        body: IndexUploadRequest,
+        authenticated: AuthPrincipal = Depends(corpus_mutation_principal),
+    ) -> JsonObject:
+        if settings.fixture_mode:
+            return corpus_store.index_upload(
+                authenticated.user_id,
+                upload_id,
+                idempotency_key=body.idempotency_key,
+            )
+        return await run_in_threadpool(
+            corpus_store.index_upload,
+            authenticated.user_id,
+            upload_id,
+            idempotency_key=body.idempotency_key,
+        )
+
+    @app.post("/api/v1/personal-corpora/{corpus_id}/search-test")
+    async def personal_corpus_search_test(
+        corpus_id: str,
+        body: CorpusSearchRequest,
+        authenticated: AuthPrincipal = Depends(corpus_mutation_principal),
+    ) -> JsonObject:
+        if body.corpus_id is not None and body.corpus_id != corpus_id:
+            raise CorpusError("conflicting_corpus_id")
+        return corpus_store.search(
+            authenticated.user_id,
+            body.query,
+            corpus_id=corpus_id,
+            limit=body.limit,
+        )
+
+    @app.post("/api/v1/personal-corpora/{corpus_id}/reindex")
+    async def reindex_personal_corpus(
+        corpus_id: str,
+        body: IndexUploadRequest,
+        authenticated: AuthPrincipal = Depends(corpus_mutation_principal),
+    ) -> JsonObject:
+        if settings.fixture_mode:
+            return corpus_store.reindex_corpus(
+                authenticated.user_id,
+                corpus_id,
+                idempotency_key=body.idempotency_key,
+            )
+        return await run_in_threadpool(
+            corpus_store.reindex_corpus,
+            authenticated.user_id,
+            corpus_id,
+            idempotency_key=body.idempotency_key,
+        )
+
+    @app.delete(
+        "/api/v1/personal-corpora/{corpus_id}/sources/{source_id}"
+    )
+    async def delete_personal_source(
+        corpus_id: str,
+        source_id: str,
+        authenticated: AuthPrincipal = Depends(corpus_mutation_principal),
+    ) -> JsonObject:
+        return corpus_store.delete_source(
+            authenticated.user_id, corpus_id, source_id
+        )
+
+    @app.get(
+        "/api/v1/personal-corpora/{corpus_id}/sources/{source_id}/download"
+    )
+    async def download_personal_source(
+        corpus_id: str,
+        source_id: str,
+        authenticated: AuthPrincipal = Depends(personal_corpus_principal),
+    ) -> Response:
+        name, media_type, content = corpus_store.source_content(
+            authenticated.user_id, corpus_id, source_id
+        )
+        safe_name = PurePosixPath(name).name.replace('"', "")
+        return Response(
+            content,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{safe_name}"',
+                "X-Content-SHA256": hashlib.sha256(content).hexdigest(),
+            },
+        )
+
+    @app.post("/api/v1/worktrees")
     @app.post("/api/v1/agent/sessions")
     async def create_agent_session(
         body: AgentSessionRequest,
@@ -1982,6 +2701,8 @@ def create_operator_app(
                 repo_id=body.repo_id,
                 session_id=body.session_id,
                 tool_policy=tool_policy,
+                task_title=body.task_title,
+                idempotency_key=body.idempotency_key,
             )
         else:
             result = await run_in_threadpool(
@@ -1990,6 +2711,8 @@ def create_operator_app(
                 repo_id=body.repo_id,
                 session_id=body.session_id,
                 tool_policy=tool_policy,
+                task_title=body.task_title,
+                idempotency_key=body.idempotency_key,
             )
         binding = result.get("binding")
         if isinstance(binding, dict):
@@ -2013,27 +2736,84 @@ def create_operator_app(
         authenticated: AuthPrincipal = Depends(tier_mutation_principal),
     ) -> dict[str, object]:
         service = require_tiered()
+        _require_named(authenticated, Capability.AGENT)
+        instruction = body.instruction
+        retrieval: JsonObject = {
+            "selection": body.retrieval_selection,
+            "retrieval_used": False,
+            "personal": None,
+            "shared": {
+                "requested": body.retrieval_selection in {"shared", "both"},
+                "retrieval_used": False,
+            },
+            "repository_write_policy": "personal_corpus_copy_denied",
+        }
+        if body.retrieval_selection in {"personal", "both", "selected_personal"}:
+            _require_named(authenticated, Capability.PERSONAL_CORPUS)
+            if (
+                body.retrieval_selection == RetrievalSelection.SELECTED_PERSONAL.value
+                and body.personal_corpus_id is None
+            ):
+                raise CorpusError("selected_personal_corpus_required")
+            personal = corpus_store.search(
+                authenticated.user_id,
+                body.instruction,
+                corpus_id=(
+                    body.personal_corpus_id
+                    if body.retrieval_selection
+                    == RetrievalSelection.SELECTED_PERSONAL.value
+                    else None
+                ),
+                limit=8,
+            )
+            retrieval["personal"] = personal
+            retrieval["retrieval_used"] = bool(personal["retrieval_used"])
+            raw_results = personal.get("results")
+            if isinstance(raw_results, list) and raw_results:
+                excerpts = [
+                    (
+                        f"[{item['chunk_id']}] file={item['file']} "
+                        f"page={item['page'] or 'n/a'} "
+                        f"section={item['section'] or 'n/a'}\n{item['text']}"
+                    )
+                    for item in raw_results
+                    if isinstance(item, dict)
+                ]
+                instruction = (
+                    "Owner-authorized personal-corpus reference excerpts follow. "
+                    "They are read-only context: do not copy, reproduce, or write "
+                    "their content into the repository. Cite logical file/page/"
+                    "section/chunk identifiers in the explanation when used.\n\n"
+                    + "\n\n".join(excerpts)
+                    + "\n\nUSER TASK:\n"
+                    + body.instruction
+                )[:100_000]
+        elif body.personal_corpus_id is not None:
+            raise CorpusError("personal_corpus_id_without_selection")
         if settings.fixture_mode:
-            return service.agent(
+            result = service.agent(
                 user_id=authenticated.user_id,
                 session_id=session_id,
                 lane=ModelLane(body.lane),
-                instruction=body.instruction,
+                instruction=instruction,
                 domain=body.domain,
             )
-        return await run_in_threadpool(
-            service.agent,
-            user_id=authenticated.user_id,
-            session_id=session_id,
-            lane=ModelLane(body.lane),
-            instruction=body.instruction,
-            domain=body.domain,
-        )
+        else:
+            result = await run_in_threadpool(
+                service.agent,
+                user_id=authenticated.user_id,
+                session_id=session_id,
+                lane=ModelLane(body.lane),
+                instruction=instruction,
+                domain=body.domain,
+            )
+        result["retrieval"] = retrieval
+        return result
 
     @app.get("/api/v1/agent/sessions/{session_id}/status")
     async def agent_session_status(
         session_id: str,
-        authenticated: AuthPrincipal = Depends(principal),
+        authenticated: AuthPrincipal = Depends(agent_principal),
     ) -> dict[str, object]:
         service = require_tiered()
         if settings.fixture_mode:
@@ -2056,6 +2836,7 @@ def create_operator_app(
             }
         return result
 
+    @app.post("/api/v1/worktrees/{session_id}/cancel")
     @app.post("/api/v1/agent/sessions/{session_id}/cancel")
     async def cancel_agent_session(
         session_id: str,
@@ -2076,10 +2857,171 @@ def create_operator_app(
         result.pop("worktree_root", None)
         return result
 
+    @app.get("/api/v1/worktrees")
+    async def list_worktrees(
+        authenticated: AuthPrincipal = Depends(agent_principal),
+    ) -> JsonObject:
+        return {
+            "status": "OK",
+            "worktrees": require_tiered().sandboxes.list_mine(
+                authenticated.user_id
+            ),
+        }
+
+    @app.get("/api/v1/worktrees/{session_id}")
+    async def inspect_worktree(
+        session_id: str,
+        authenticated: AuthPrincipal = Depends(agent_principal),
+    ) -> JsonObject:
+        return {
+            "status": "OK",
+            "worktree": require_tiered().sandboxes.inspect(
+                session_id, user_id=authenticated.user_id
+            ),
+        }
+
+    @app.get("/api/v1/worktrees/{session_id}/history")
+    async def worktree_history(
+        session_id: str,
+        authenticated: AuthPrincipal = Depends(agent_principal),
+    ) -> JsonObject:
+        return {
+            "status": "OK",
+            "events": require_tiered().sandboxes.history(
+                session_id, user_id=authenticated.user_id
+            ),
+        }
+
+    @app.post("/api/v1/worktrees/{session_id}/resume")
+    async def resume_worktree(
+        session_id: str,
+        authenticated: AuthPrincipal = Depends(agent_mutation_principal),
+    ) -> JsonObject:
+        return {
+            "status": "RESUMED",
+            "worktree": require_tiered().sandboxes.resume(
+                session_id, user_id=authenticated.user_id
+            ),
+        }
+
+    @app.post("/api/v1/worktrees/{session_id}/close")
+    async def close_worktree(
+        session_id: str,
+        authenticated: AuthPrincipal = Depends(agent_mutation_principal),
+    ) -> JsonObject:
+        return require_tiered().sandboxes.close_if_clean(
+            session_id, user_id=authenticated.user_id
+        )
+
+    @app.post("/api/v1/worktrees/{session_id}/discard")
+    async def discard_worktree(
+        session_id: str,
+        body: WorktreeDiscardRequest,
+        authenticated: AuthPrincipal = Depends(agent_mutation_principal),
+    ) -> JsonObject:
+        return require_tiered().sandboxes.discard(
+            session_id,
+            user_id=authenticated.user_id,
+            confirmation=body.confirmation,
+        )
+
+    @app.post("/api/v1/worktrees/{session_id}/export")
+    async def request_worktree_export(
+        session_id: str,
+        body: WorktreeExportRequest,
+        authenticated: AuthPrincipal = Depends(agent_mutation_principal),
+    ) -> JsonObject:
+        return require_tiered().sandboxes.request_export(
+            session_id,
+            user_id=authenticated.user_id,
+            promotion=body.promotion,
+        )
+
+    @app.get("/api/v1/worktrees/{session_id}/patch")
+    async def download_worktree_patch(
+        session_id: str,
+        authenticated: AuthPrincipal = Depends(agent_principal),
+    ) -> Response:
+        content = require_tiered().sandboxes.patch(
+            session_id, user_id=authenticated.user_id
+        )
+        return Response(
+            content,
+            media_type="text/x-diff",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{session_id}.patch"'
+                ),
+                "X-Content-SHA256": hashlib.sha256(content).hexdigest(),
+            },
+        )
+
+    @app.get("/api/v1/admin/worktrees")
+    async def operator_worktree_inventory(
+        _authenticated: AuthPrincipal = Depends(operator_principal),
+    ) -> JsonObject:
+        return {
+            "status": "OK",
+            "worktrees": require_tiered().sandboxes.operator_inventory(),
+        }
+
+    @app.get("/api/v1/admin/personal-corpora")
+    async def operator_personal_corpus_inventory(
+        authenticated: AuthPrincipal = Depends(operator_principal),
+    ) -> JsonObject:
+        inventory = corpus_store.sanitized_inventory()
+        operator.record_action(
+            actor_role=authenticated.role,
+            action="PERSONAL_CORPUS_SANITIZED_INVENTORY_VIEWED",
+            entity_type="personal_corpus_inventory",
+            entity_id="all",
+            payload={"corpus_count": len(inventory), "content_access": False},
+        )
+        return {
+            "status": "OK",
+            "content_access": "DISABLED_BY_POLICY",
+            "corpora": inventory,
+        }
+
+    @app.get("/api/v1/admin/worktrees/{session_id}")
+    async def operator_inspect_worktree(
+        session_id: str,
+        authenticated: AuthPrincipal = Depends(operator_principal),
+    ) -> JsonObject:
+        return {
+            "status": "OK",
+            "worktree": require_tiered().sandboxes.inspect(
+                session_id,
+                user_id=authenticated.user_id,
+                operator=True,
+            ),
+        }
+
+    @app.post("/api/v1/admin/worktrees/{session_id}/discard")
+    async def operator_discard_worktree(
+        session_id: str,
+        body: WorktreeDiscardRequest,
+        authenticated: AuthPrincipal = Depends(mutation_principal),
+    ) -> JsonObject:
+        result = require_tiered().sandboxes.discard(
+            session_id,
+            user_id=authenticated.user_id,
+            confirmation=body.confirmation,
+            operator=True,
+        )
+        operator.record_action(
+            actor_role=authenticated.role,
+            action="WORKTREE_FORCE_DISCARD",
+            entity_type="worktree",
+            entity_id=session_id,
+            payload={"status": result["status"]},
+        )
+        return result
+
     @app.post("/api/v1/admin/tier/users")
     async def set_tier_user(
         body: TierUserRequest,
-        authenticated: AuthPrincipal = Depends(mutation_principal),
+        authenticated: AuthPrincipal = Depends(admin_mutation_principal),
     ) -> dict[str, object]:
         if authenticated.role != "admin":
             raise HTTPException(status_code=403, detail="admin_role_required")
@@ -2091,6 +3033,7 @@ def create_operator_app(
                 body.user_id,
                 capability_tier=CapabilityTier(body.tier),
                 enabled=body.enabled,
+                capabilities=default_capabilities(CapabilityTier(body.tier)),
             )
             registered_auth.sessions.revoke_user(body.user_id)
         operator.record_action(
@@ -2104,11 +3047,64 @@ def create_operator_app(
                 "revision": capability.revision,
             },
         )
-        return {"status": "UPDATED", "capability": asdict(capability)}
+        return {"status": "UPDATED", "capability": capability.public()}
+
+    @app.patch("/api/v1/admin/users/{user_id}/capabilities")
+    async def set_user_capabilities(
+        user_id: str,
+        body: CapabilitySetRequest,
+        authenticated: AuthPrincipal = Depends(admin_mutation_principal),
+    ) -> JsonObject:
+        if authenticated.role != "admin":
+            raise HTTPException(status_code=403, detail="admin_role_required")
+        values = frozenset(Capability(item) for item in body.capabilities)
+        service = require_tiered()
+        current = service.users.get(user_id)
+        capability = service.users.set_user(
+            user_id,
+            current.tier,
+            enabled=current.enabled if body.enabled is None else body.enabled,
+            capabilities=values,
+        )
+        revoked = 0
+        if registered_auth is not None:
+            registered_auth.registry.update_user(
+                user_id,
+                capabilities=values,
+                **(
+                    {"enabled": body.enabled}
+                    if body.enabled is not None
+                    else {}
+                ),
+            )
+            revoked = registered_auth.sessions.revoke_user(user_id)
+            registered_auth.audit.append(
+                "CAPABILITY_CHANGE",
+                outcome="SUCCESS",
+                user_id=user_id,
+                reason=f"sessions_revoked:{revoked}",
+            )
+        operator.record_action(
+            actor_role=authenticated.role,
+            action="USER_CAPABILITIES_SET",
+            entity_type="user",
+            entity_id=user_id,
+            payload={
+                "capabilities": sorted(item.value for item in values),
+                "enabled": capability.enabled,
+                "revision": capability.revision,
+                "sessions_revoked": revoked,
+            },
+        )
+        return {
+            "status": "UPDATED",
+            "capability": capability.public(),
+            "sessions_revoked": revoked,
+        }
 
     @app.get("/api/v1/admin/users")
     async def registered_users(
-        authenticated: AuthPrincipal = Depends(operator_principal),
+        authenticated: AuthPrincipal = Depends(admin_principal),
     ) -> dict[str, object]:
         if authenticated.role != "admin":
             raise HTTPException(status_code=403, detail="admin_role_required")
@@ -2129,7 +3125,7 @@ def create_operator_app(
     @app.post("/api/v1/admin/registry/reload")
     async def reload_registry(
         request: Request,
-        authenticated: AuthPrincipal = Depends(mutation_principal),
+        authenticated: AuthPrincipal = Depends(admin_mutation_principal),
     ) -> dict[str, object]:
         if authenticated.role != "admin":
             raise HTTPException(status_code=403, detail="admin_role_required")
@@ -2163,6 +3159,7 @@ def create_operator_app(
                     user_id,
                     current.capability_tier,
                     enabled=current.enabled,
+                    capabilities=current.effective_capabilities,
                 )
         registered_auth.audit.append(
             "REGISTRY_RELOAD",
@@ -2181,7 +3178,7 @@ def create_operator_app(
     async def revoke_user_sessions(
         user_id: str,
         request: Request,
-        authenticated: AuthPrincipal = Depends(mutation_principal),
+        authenticated: AuthPrincipal = Depends(admin_mutation_principal),
     ) -> dict[str, object]:
         if authenticated.role != "admin":
             raise HTTPException(status_code=403, detail="admin_role_required")
@@ -2201,7 +3198,7 @@ def create_operator_app(
     @app.post("/api/v1/admin/repositories")
     async def register_repository(
         body: RepositoryRegistrationRequest,
-        authenticated: AuthPrincipal = Depends(mutation_principal),
+        authenticated: AuthPrincipal = Depends(repository_admin_mutation_principal),
     ) -> dict[str, object]:
         if authenticated.role != "admin":
             raise HTTPException(status_code=403, detail="admin_role_required")
@@ -2226,7 +3223,7 @@ def create_operator_app(
     @app.post("/api/v1/admin/repository-grants")
     async def grant_repository(
         body: RepositoryGrantRequest,
-        authenticated: AuthPrincipal = Depends(mutation_principal),
+        authenticated: AuthPrincipal = Depends(repository_admin_mutation_principal),
     ) -> dict[str, object]:
         if authenticated.role != "admin":
             raise HTTPException(status_code=403, detail="admin_role_required")
@@ -2264,7 +3261,7 @@ def create_operator_app(
     @app.post("/api/v1/admin/repository-grants/revoke")
     async def revoke_repository(
         body: RepositoryGrantRequest,
-        authenticated: AuthPrincipal = Depends(mutation_principal),
+        authenticated: AuthPrincipal = Depends(repository_admin_mutation_principal),
     ) -> dict[str, object]:
         if authenticated.role != "admin":
             raise HTTPException(status_code=403, detail="admin_role_required")
@@ -2296,7 +3293,7 @@ def create_operator_app(
 
     @app.get("/api/v1/serving-profiles/status")
     async def serving_profile_status(
-        authenticated: AuthPrincipal = Depends(operator_principal),
+        authenticated: AuthPrincipal = Depends(model_admin_principal),
     ) -> dict[str, object]:
         if serving_profile_operator is None:
             raise HTTPException(status_code=503, detail="serving_profile_runtime_unavailable")
@@ -2305,7 +3302,7 @@ def create_operator_app(
     @app.post("/api/v1/serving-profiles/action")
     async def serving_profile_action(
         body: ServingProfileActionRequest,
-        authenticated: AuthPrincipal = Depends(mutation_principal),
+        authenticated: AuthPrincipal = Depends(model_admin_mutation_principal),
     ) -> dict[str, object]:
         if authenticated.role != "admin":
             raise HTTPException(status_code=403, detail="admin_role_required")

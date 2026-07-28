@@ -89,4 +89,6 @@ Direct non-loopback HTTP is rejected unless `--allow-insecure-lan-http` is expli
 
 Caddy's `flush_interval -1` and Nginx's `proxy_buffering off` preserve SSE/streaming and cancellation behavior. Proxy timeouts permit bounded chat/research calls without unlimited bodies.
 
+Folder selection and drag-and-drop run in the user's browser over the same authenticated HTTPS origin. The browser sends selected bytes and relative logical names only; the server never receives a client canonical path. Configure the proxy request-body limit to match the Operator service and per-file corpus policy while retaining bounded multipart timeouts.
+
 Stop the reverse proxy only if it is dedicated to Laplace and the operator authorized it. Stop the Operator service before model servers. The model lifecycle unit validates ownership before signalling PIDs.

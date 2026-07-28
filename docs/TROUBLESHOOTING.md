@@ -19,6 +19,8 @@ After repeated failures, wait for the `Retry-After` interval. Do not weaken rate
 
 Sign in again. The visible composer text remains in the page, and an active conversation draft is saved server-side when possible. Role, tier, enabled state, default lane, password, registry access, and repository changes revoke affected sessions.
 
+Independent capability changes also revoke sessions. Sign in again before deciding that a newly granted navigation item or repository is missing.
+
 ## Readiness is degraded
 
 Inspect:
@@ -39,6 +41,19 @@ Keep the draft. Check the selected lane, queue position, model display name, and
 The client list is server-generated. Confirm both the repository authorization DB grant and the user's external `authorized_repo_ids`. Revoke/re-grant only by logical ID. Never work around a rejection by accepting a client filesystem path.
 
 Path failures for traversal, symlink, hard link, mount, nested Git, worktree, submodule, environment, or subprocess CWD are security decisions. Inspect the audit record without exposing protected paths to the user.
+
+For `per_user_worktree_quota`, close a clean worktree or export/download its patch and confirm discard. A dirty worktree is intentionally retained. `repository_grant_changed`/`STALE_GRANT` requires a fresh worktree after reauthorization.
+
+## Personal corpus upload or indexing fails
+
+- Read the exact manifest reason; do not rename an executable merely to match an allowed extension.
+- Parser timeout, encrypted PDF, macro content, external DOCX relationship, MIME/magic mismatch, nested archive, traversal, and Unicode collision are security rejections.
+- For interrupted staging, reopen Knowledge, reselect the same bytes, and preview again. Identical staged content is idempotent.
+- For disk pressure or quota, cancel staging. Do not delete another user's source or active SQLite/WAL files.
+- Only accepted files are indexable, and retrieval remains disabled until explicit index confirmation.
+- A deleted source disappears from retrieval immediately even though bytes may remain during soft-delete retention.
+
+See [PERSONAL_CORPUS.md](PERSONAL_CORPUS.md) for formats, defaults, backup, and recovery.
 
 ## Artifact download reports an integrity failure
 

@@ -14,6 +14,15 @@ PYTHONPATH=src .venv/bin/python -m research_workspace.user_admin bootstrap \
   --user-id usr_afasolino \
   --display-name "Alfonso Fasolino" \
   --capability-tier operator \
+  --capability chat \
+  --capability agent \
+  --capability research \
+  --capability operator \
+  --capability admin \
+  --capability personal_corpus \
+  --capability shared_corpus_ingest \
+  --capability repository_admin \
+  --capability model_admin \
   --role admin \
   --default-lane quality
 ```
@@ -24,7 +33,7 @@ Available commands are:
 
 ```text
 bootstrap  add  list  validate  disable  enable
-set-role  set-tier  set-default-lane
+set-role  set-tier  set-capabilities  set-default-lane
 authorize-repo  revoke-repo
 reset-password  revoke-sessions  reload
 ```
@@ -33,11 +42,24 @@ Every command takes `--registry`. `reset-password`, `revoke-sessions`, and boots
 
 ## Roles, capabilities, and model lanes
 
-Roles and capabilities are separate:
+Roles, legacy profiles, named capabilities, and quality lanes are separate:
 
 - Basic: chat only, with no repository IDs, tools, agent endpoints, or background work.
-- Plus: chat plus an agent bound to an explicitly authorized logical repository ID.
-- Operator: users, repositories, queues, approvals, models, GPU, audit, provenance, health, and lifecycle.
+- Plus default: Chat, Agent, and personal corpus, with Agent bound to an explicitly authorized logical repository ID.
+- Operator legacy default: Chat, Research, Operator, Admin, shared ingestion, repository admin, and model admin. Agent and personal corpus are deliberately independent.
+
+The example `afasolino@unisa.it` combines all nine capabilities. `frcapone@unisa.it` is a normal user with `chat`, `agent`, and `personal_corpus`. To change an existing assignment locally:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m research_workspace.user_admin set-capabilities \
+  --registry /var/lib/laplace/auth/registered_users.yaml \
+  --email frcapone@unisa.it \
+  --capability chat \
+  --capability agent \
+  --capability personal_corpus
+```
+
+The Operator **Users** table provides the same independent checkboxes. Both paths revoke the affected user's sessions and record an audit event. Hidden navigation is not authorization; every endpoint checks its named capability server-side.
 
 Quality, Standard, and Economy are model-quality lanes, not privileges. Changing a role, capability, enabled state, default lane, password, or repository authorization invalidates the affected user's active sessions.
 
@@ -45,7 +67,14 @@ Quality, Standard, and Economy are model-quality lanes, not privileges. Changing
 
 Repositories are registered server-side by an admin. The canonical root is resolved, required to equal the Git top-level directory, and pinned by device/inode identity. A user registry entry may reference only a registered repository ID at server startup.
 
-Use the authenticated admin API/GUI to register a root and grant a base revision, or maintain the authorization store through a controlled local administration workflow. Then synchronize the external user entry:
+Use **Operations → Repository onboarding** with `admin` role plus the independent `repository_admin` capability:
+
+1. Register a logical ID and canonical server-side Git root.
+2. Grant the logical ID to the user's stable user ID with `HEAD`, an exact commit, or another server-resolved ref.
+3. The server pins the resolved commit, updates both authorization stores, revokes the user's sessions, and audits the action.
+4. The user signs in again and confirms the logical ID appears in the Agent repository selector.
+
+The equivalent registry-only synchronization command is:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m research_workspace.user_admin authorize-repo \
@@ -55,6 +84,8 @@ PYTHONPATH=src .venv/bin/python -m research_workspace.user_admin authorize-repo 
 ```
 
 Revocation prevents all new/resumed actions. Existing audit evidence is retained.
+
+Never add a repository path to a normal-user form. Canonical paths are accepted only by the administrator registration endpoint and shown only to Operator/admin inspection.
 
 ## Session and registry operations
 
@@ -105,7 +136,9 @@ Use [REMOTE_ACCESS.md](REMOTE_ACCESS.md) and the Caddy/Nginx examples. Uvicorn a
 5. Deploy the new revision and run health/readiness/auth/chat smokes.
 6. On failure, stop only the new service, restore the prior code revision and compatible state backup, then verify hashes and readiness.
 
-Database schema changes must be versioned, backed up before migration, applied transactionally, and rolled back from the pre-migration copy on failure. The current new stores initialize schema version 1 on first use.
+Database schema changes must be versioned, backed up before migration, applied transactionally, and rolled back from the pre-migration copy on failure. Registered-user and capability stores migrate legacy profile records to capability schema v2. Corpus and worktree stores initialize their versioned schemas idempotently.
+
+Personal-corpus backup/restore, quotas, purge, and HMAC-key handling are documented in [PERSONAL_CORPUS.md](PERSONAL_CORPUS.md) and [STORAGE_AND_RETENTION.md](STORAGE_AND_RETENTION.md). Worktree cleanup and recovery are in [AGENT_WORKTREES.md](AGENT_WORKTREES.md).
 
 ## Emergency shutdown
 

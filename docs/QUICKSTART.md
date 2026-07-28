@@ -34,11 +34,38 @@ PYTHONPATH=src .venv/bin/python -m research_workspace.user_admin bootstrap \
   --user-id usr_afasolino \
   --display-name "Alfonso Fasolino" \
   --capability-tier operator \
+  --capability chat \
+  --capability agent \
+  --capability research \
+  --capability operator \
+  --capability admin \
+  --capability personal_corpus \
+  --capability shared_corpus_ingest \
+  --capability repository_admin \
+  --capability model_admin \
   --role admin \
   --default-lane quality
 ```
 
 The one-time activation code is printed once. It is not written to the registry or audit log. Do not paste it into a guide, shell history argument, screenshot, or issue.
+
+Add the normal Chat/Agent/personal-corpus account separately:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m research_workspace.user_admin add \
+  --registry "$HOME/.local/state/laplace/auth/registered_users.yaml" \
+  --email frcapone@unisa.it \
+  --user-id usr_frcapone \
+  --display-name "Francesco R. Capone" \
+  --capability-tier plus \
+  --capability chat \
+  --capability agent \
+  --capability personal_corpus \
+  --role user \
+  --default-lane standard
+```
+
+Give that activation code only to the named user. Repository access remains empty until an administrator registers and grants a logical repository.
 
 ## 3. Start the local Operator service
 
@@ -64,3 +91,5 @@ curl --fail http://127.0.0.1:8765/api/v1/readiness
 Health proves process liveness. Readiness also checks the registered-user registry, session store, external state directories, and lane routing.
 
 For remote use, continue with [REMOTE_ACCESS.md](REMOTE_ACCESS.md). For user and lifecycle administration, read [ADMIN_GUIDE.md](ADMIN_GUIDE.md).
+
+For personal-folder ingestion and isolated Agent work, continue with [PERSONAL_CORPUS.md](PERSONAL_CORPUS.md) and [AGENT_WORKTREES.md](AGENT_WORKTREES.md).

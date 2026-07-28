@@ -303,6 +303,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             registered_user.user_id,
             registered_user.capability_tier,
             enabled=registered_user.enabled,
+            capabilities=registered_user.effective_capabilities,
         )
     for value in token_roles.values():
         credential = (
@@ -411,6 +412,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     user_id,
                     current.capability_tier,
                     enabled=current.enabled,
+                    capabilities=current.effective_capabilities,
                 )
         registered_auth.audit.append(
             "REGISTRY_RELOAD",

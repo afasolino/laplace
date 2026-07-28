@@ -20,7 +20,7 @@ from .auth_registry import (
     write_registry,
 )
 from .auth_sessions import AuthAuditLog, SessionStore
-from .user_capabilities import CapabilityTier
+from .user_capabilities import Capability, CapabilityTier, default_capabilities
 
 
 def _registry_path(value: str | None) -> Path:
@@ -43,17 +43,31 @@ def _default_display_name(email: str) -> str:
 
 def _user_from_arguments(arguments: argparse.Namespace, code: str) -> RegisteredUser:
     email = str(arguments.email).strip()
+    tier = CapabilityTier(str(arguments.capability_tier))
+    selected = getattr(arguments, "capabilities", None)
+    capabilities = tuple(
+        sorted(
+            (
+                Capability(str(item))
+                for item in selected
+            )
+            if selected
+            else default_capabilities(tier),
+            key=str,
+        )
+    )
     return RegisteredUser(
         email=email,
         user_id=str(arguments.user_id or f"usr_{normalize_email(email).split('@', 1)[0]}"),
         display_name=str(arguments.display_name or _default_display_name(email)),
         enabled=True,
-        capability_tier=CapabilityTier(str(arguments.capability_tier)),
+        capability_tier=tier,
         role=str(arguments.role),
         default_lane=str(arguments.default_lane),
         authorized_repo_ids=(),
         password_hash=hash_secret(code),
         must_change_password=True,
+        capabilities=capabilities,
     )
 
 
@@ -77,6 +91,16 @@ def _add_common_user_arguments(parser: argparse.ArgumentParser) -> None:
         "--capability-tier",
         choices=[item.value for item in CapabilityTier],
         required=True,
+    )
+    parser.add_argument(
+        "--capability",
+        dest="capabilities",
+        action="append",
+        choices=[item.value for item in Capability],
+        help=(
+            "Independent capability; repeat as needed. If omitted, secure legacy "
+            "defaults for the selected tier are used."
+        ),
     )
     parser.add_argument("--role", choices=["user", "operator", "auditor", "admin"], required=True)
     parser.add_argument(
@@ -121,6 +145,18 @@ def _parser() -> argparse.ArgumentParser:
         current.add_argument("--registry", required=True)
         current.add_argument("--email", required=True)
         current.add_argument(flag, choices=choices, required=True)
+
+    set_capabilities = subparsers.add_parser("set-capabilities")
+    set_capabilities.add_argument("--registry", required=True)
+    set_capabilities.add_argument("--email", required=True)
+    set_capabilities.add_argument(
+        "--capability",
+        dest="capabilities",
+        action="append",
+        choices=[item.value for item in Capability],
+        default=[],
+        help="Repeat to grant multiple independent capabilities; omit all to deny all.",
+    )
 
     for command in ("authorize-repo", "revoke-repo"):
         current = subparsers.add_parser(command)
@@ -266,6 +302,31 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "status": "UPDATED",
                     "email": user.email,
                     "capability_tier": tier.value,
+                }
+            )
+            return 0
+        if command == "set-capabilities":
+            capabilities = tuple(
+                sorted(
+                    {Capability(str(item)) for item in arguments.capabilities},
+                    key=str,
+                )
+            )
+            registry.update_user(user.user_id, capabilities=capabilities)
+            revoked = SessionStore(path.parent / "sessions.sqlite3").revoke_user(
+                user.user_id
+            )
+            audit.append(
+                "CAPABILITY_CHANGE",
+                outcome="SUCCESS",
+                user_id=user.user_id,
+                reason=f"sessions_revoked:{revoked}",
+            )
+            _json(
+                {
+                    "status": "UPDATED",
+                    "email": user.email,
+                    "capabilities": [item.value for item in capabilities],
                 }
             )
             return 0

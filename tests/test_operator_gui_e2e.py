@@ -31,7 +31,12 @@ from research_workspace.service_tiers import (
     TierAuditLog,
     TieredServingService,
 )
-from research_workspace.user_capabilities import CapabilityTier, UserCapabilityStore
+from research_workspace.user_capabilities import (
+    Capability,
+    CapabilityTier,
+    UserCapabilityStore,
+    default_capabilities,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -76,10 +81,12 @@ class _ServingProfiles:
 
 class _ChatBackend:
     def complete(self, **_kwargs: object) -> dict[str, object]:
+        time.sleep(0.2)
         return {
             "content": (
                 "## Evidence-led answer\n\n"
                 "Laplace returned readable **Markdown**.\n\n"
+                "| Source | State |\n| --- | --- |\n| fixture | verified |\n\n"
                 "```python\nresult = \"local\"\nprint(result)\n```"
             ),
             "finish_reason": "stop",
@@ -137,7 +144,17 @@ def _free_port() -> int:
 
 def _tiered(root: Path) -> TieredServingService:
     users = UserCapabilityStore(root / "tier/users.sqlite3")
-    users.set_user("usr_afasolino", CapabilityTier.OPERATOR)
+    users.set_user(
+        "usr_afasolino",
+        CapabilityTier.OPERATOR,
+        capabilities=frozenset(
+            {
+                *default_capabilities(CapabilityTier.OPERATOR),
+                Capability.AGENT,
+                Capability.PERSONAL_CORPUS,
+            }
+        ),
+    )
     routes = {
         lane: ModelRoute(
             lane=lane,
@@ -185,6 +202,16 @@ def gui_server(tmp_path: Path) -> Iterator[str]:
         authorized_repo_ids=(),
         password_hash=hash_secret(PASSWORD, password_policy=True),
         must_change_password=False,
+        capabilities=tuple(
+            sorted(
+                {
+                    *default_capabilities(CapabilityTier.OPERATOR),
+                    Capability.AGENT,
+                    Capability.PERSONAL_CORPUS,
+                },
+                key=str,
+            )
+        ),
     )
     registry_path = tmp_path / "auth/registered_users.yaml"
     write_registry(registry_path, [account])
@@ -246,6 +273,7 @@ def _authenticate(page: object, base_url: str) -> None:
 
 def test_registered_gui_chat_research_operator_accessibility_and_responsive(
     gui_server: str,
+    tmp_path: Path,
 ) -> None:
     playwright = pytest.importorskip("playwright.sync_api")
     console_errors: list[str] = []
@@ -272,14 +300,69 @@ def test_registered_gui_chat_research_operator_accessibility_and_responsive(
         page.on("pageerror", lambda error: page_errors.append(str(error)))
         _authenticate(page, gui_server)
 
+        chat_domains = page.locator("#chat-domain option").all_text_contents()
+        assert chat_domains == [
+            "Auto / General",
+            "Python",
+            "Structured JSON",
+            "SystemVerilog",
+        ]
+        for domain_id in ("general", "python", "json", "systemverilog"):
+            page.locator("#chat-domain").select_option(domain_id)
+            assert page.locator("#chat-domain").input_value() == domain_id
+        page.locator("#chat-domain").select_option("general")
         page.locator("#chat-message").fill("Show a readable local response.")
         page.get_by_role("button", name="Send", exact=True).click()  # type: ignore[attr-defined]
+        assert page.locator("#chat-message").input_value() == ""
+        page.locator("#chat-message").fill("This unsent draft must survive generation.")
         page.get_by_role("heading", name="Evidence-led answer").wait_for()  # type: ignore[attr-defined]
+        assert page.locator("#chat-message").input_value() == "This unsent draft must survive generation."
         page.locator(".code-block").get_by_text('result = "local"', exact=False).wait_for()
+        page.get_by_role("columnheader", name="Source", exact=True).wait_for()
+        page.get_by_role("button", name="Copy as TSV", exact=True).wait_for()
         page.get_by_text("Response details", exact=True).click()
         assert page.locator(".metadata-grid").is_visible()
 
+        page.get_by_role("button", name="Agent", exact=True).click()
+        page.get_by_text("No repository is authorized for this account.", exact=True).wait_for()
+        assert page.locator("#agent-domain option").all_text_contents() == [
+            "Python",
+            "SystemVerilog",
+        ]
+        for domain_id in ("python", "systemverilog"):
+            page.locator("#agent-domain").select_option(domain_id)
+            assert page.locator("#agent-domain").input_value() == domain_id
+
+        page.get_by_role("button", name="Knowledge", exact=True).click()
+        page.get_by_label("Corpus name").fill("Browser fixture corpus")
+        page.get_by_role("button", name="Create corpus", exact=True).click()
+        page.get_by_text("Browser fixture corpus", exact=True).wait_for()
+        browser_folder = tmp_path / "browser-fixture-folder"
+        browser_folder.mkdir()
+        (browser_folder / "browser-reference.md").write_text(
+            "Browser personal corpus marker.\n",
+            encoding="utf-8",
+        )
+        page.locator("#corpus-folder-input").set_input_files(str(browser_folder))
+        page.get_by_role("button", name="Preview selected folder", exact=True).click()
+        page.get_by_role("cell", name="ACCEPTED", exact=True).wait_for()
+        page.get_by_role("button", name="Index accepted files", exact=True).click()
+        page.get_by_text("Indexed 1 source(s)", exact=False).wait_for()
+        page.locator("#corpus-sources").get_by_text(
+            "browser-reference.md", exact=False
+        ).wait_for()
+
         page.get_by_role("button", name="Research", exact=True).click()
+        assert page.locator("#research-domain option").all_text_contents() == [
+            "Auto / General",
+            "Python",
+            "Structured JSON",
+            "SystemVerilog",
+        ]
+        for domain_id in ("general", "python", "json", "systemverilog"):
+            page.locator("#research-domain").select_option(domain_id)
+            assert page.locator("#research-domain").input_value() == domain_id
+        page.locator("#research-domain").select_option("general")
         page.get_by_label("Research question").fill("What supports the responsive operator view?")
         page.get_by_role("button", name="Create research job").click()
         page.get_by_role("button", name="Run admitted job").click()
@@ -365,5 +448,9 @@ def test_registered_gui_chat_research_operator_accessibility_and_responsive(
             "sidebarPosition": "fixed",
             "composerVisible": True,
         }
+        selector_box = page.locator("#chat-domain").bounding_box()
+        assert selector_box is not None
+        assert selector_box["x"] >= 0
+        assert selector_box["x"] + selector_box["width"] <= 390
         assert console_errors == []
         browser.close()

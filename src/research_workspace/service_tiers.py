@@ -27,11 +27,13 @@ from .agent_sandbox import (
     AgentSessionBinding,
     AgentToolPolicy,
 )
+from .domain_registry import DEFAULT_DOMAIN_REGISTRY, DomainRegistry
 from .repository_authorization import (
     RepositoryAuthorizationError,
     validate_workspace_path,
 )
 from .user_capabilities import (
+    Capability,
     CapabilityTier,
     UserCapabilityError,
     UserCapabilityStore,
@@ -618,6 +620,7 @@ class TieredServingService:
         audit_log: TierAuditLog,
         validator: ResponseValidator | None = None,
         scheduler: PriorityAdmissionScheduler | None = None,
+        domain_registry: DomainRegistry = DEFAULT_DOMAIN_REGISTRY,
     ) -> None:
         self.users = users
         self.sandboxes = sandboxes
@@ -627,6 +630,7 @@ class TieredServingService:
         self.audit_log = audit_log
         self.validator = validator or StrictResponseValidator()
         self.scheduler = scheduler or PriorityAdmissionScheduler(lane_policy)
+        self.domain_registry = domain_registry
         self._session_lock = threading.Lock()
         self._session_results: dict[str, JsonObject] = {}
         self._cancelled_sessions: dict[str, str] = {}
@@ -671,6 +675,12 @@ class TieredServingService:
             frozenset({CapabilityTier.BASIC, CapabilityTier.PLUS, CapabilityTier.OPERATOR}),
         ).tier
 
+    def effective_capabilities(self, user_id: str) -> frozenset[Capability]:
+        assignment = self.users.get(user_id)
+        if not assignment.enabled:
+            raise UserCapabilityError("user_disabled")
+        return assignment.capabilities
+
     def _route(self, lane: ModelLane, *, domain: str) -> ModelRoute:
         if lane is ModelLane.ECONOMY and domain != "systemverilog":
             standard = self.lane_policy.routes[ModelLane.STANDARD]
@@ -695,17 +705,9 @@ class TieredServingService:
         session_id: str | None = None,
     ) -> JsonObject:
         effective_session_id = session_id or f"chat-session-{uuid.uuid4().hex}"
+        self.domain_registry.require(domain, surface="chat")
         try:
-            capability = self.users.require(
-                user_id,
-                frozenset(
-                    {
-                        CapabilityTier.BASIC,
-                        CapabilityTier.PLUS,
-                        CapabilityTier.OPERATOR,
-                    }
-                ),
-            )
+            capability = self.users.require_capability(user_id, Capability.CHAT)
         except UserCapabilityError as exc:
             self._audit_denial(
                 user_id=user_id,
@@ -839,14 +841,24 @@ class TieredServingService:
         repo_id: str,
         session_id: str,
         tool_policy: AgentToolPolicy,
+        task_title: str = "New Agent task",
+        instruction_digest: str = "",
+        lane: str | None = None,
+        sanitized_model_name: str | None = None,
+        idempotency_key: str | None = None,
     ) -> JsonObject:
         try:
-            capability = self.users.require(user_id, frozenset({CapabilityTier.PLUS}))
+            capability = self.users.require_capability(user_id, Capability.AGENT)
             binding = self.sandboxes.create(
                 user_id=user_id,
                 repo_id=repo_id,
                 session_id=session_id,
                 tool_policy=tool_policy,
+                task_title=task_title,
+                instruction_digest=instruction_digest,
+                lane=lane,
+                sanitized_model_name=sanitized_model_name,
+                idempotency_key=idempotency_key,
             )
         except (
             AgentSandboxError,
@@ -899,7 +911,8 @@ class TieredServingService:
         instruction: str,
         domain: str,
     ) -> JsonObject:
-        capability = self.users.require(user_id, frozenset({CapabilityTier.PLUS}))
+        self.domain_registry.require(domain, surface="agent")
+        capability = self.users.require_capability(user_id, Capability.AGENT)
         if not instruction.strip() or len(instruction) > 100_000:
             raise ServiceTierError("invalid_agent_instruction")
         with self._session_lock:
@@ -917,6 +930,13 @@ class TieredServingService:
             )
             raise
         route = self._route(lane, domain=domain)
+        self.sandboxes.start_task(
+            session_id,
+            user_id=user_id,
+            lane=lane.value,
+            sanitized_model_name=route.model_id,
+            instruction_digest=hashlib.sha256(instruction.encode("utf-8")).hexdigest(),
+        )
         request_id = f"agent-{uuid.uuid4().hex}"
         trace_id = f"trace-{uuid.uuid4().hex}"
         with self.scheduler.admit(lane) as ticket:
@@ -982,6 +1002,13 @@ class TieredServingService:
             }
         )
         if not validation.passed:
+            self.sandboxes.record_result(
+                session_id,
+                user_id=user_id,
+                command_count=0,
+                verification_summary=f"FAILED:{validation.gate_id}",
+                failed=True,
+            )
             raise ServiceTierError(
                 "agent_validation_failed",
                 {"gate_id": validation.gate_id, "reason": validation.reason},
@@ -1004,12 +1031,26 @@ class TieredServingService:
         }
         with self._session_lock:
             self._session_results[session_id] = result
+        command_count = 0
+        raw_command_count = response.get("command_count")
+        if isinstance(raw_command_count, int) and raw_command_count >= 0:
+            command_count = raw_command_count
+        self.sandboxes.record_result(
+            session_id,
+            user_id=user_id,
+            command_count=command_count,
+            verification_summary=(
+                f"PASSED:{validation.gate_id}"
+                if validation.passed
+                else f"FAILED:{validation.gate_id}"
+            ),
+        )
         return result
 
     def agent_session_status(self, *, user_id: str, session_id: str) -> JsonObject:
         """Return only the authenticated user's binding and last result."""
 
-        self.users.require(user_id, frozenset({CapabilityTier.PLUS}))
+        self.users.require_capability(user_id, Capability.AGENT)
         with self._session_lock:
             cancelled_repo = self._cancelled_sessions.get(session_id)
             result = self._session_results.get(session_id)
@@ -1035,9 +1076,9 @@ class TieredServingService:
     def cancel_agent_session(self, *, user_id: str, session_id: str) -> JsonObject:
         """Cancel future work and release only a clean owned worktree."""
 
-        self.users.require(user_id, frozenset({CapabilityTier.PLUS}))
+        self.users.require_capability(user_id, Capability.AGENT)
         binding = self.sandboxes.require_active(session_id, user_id=user_id)
-        result = self.sandboxes.close_if_clean(session_id, user_id=user_id)
+        result = self.sandboxes.cancel(session_id, user_id=user_id)
         with self._session_lock:
             self._cancelled_sessions[session_id] = binding.repo_id
             last_result = self._session_results.get(session_id)

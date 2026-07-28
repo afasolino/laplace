@@ -4,11 +4,20 @@ const state = {
   csrf: null,
   account: null,
   capabilities: null,
+  domains: [],
+  corpusPolicy: null,
+  corpora: [],
+  activeUploadId: null,
+  selectedCorpusId: null,
+  droppedCorpusFiles: [],
   conversationId: null,
   conversations: [],
   messages: [],
   lastChatRequest: null,
   chatController: null,
+  chatProgressTimer: null,
+  activeChatRequestId: null,
+  activeChatContent: null,
   agentSessionId: null,
   researchJobId: null,
   draftTimer: null,
@@ -64,6 +73,14 @@ const friendlyErrors = {
   origin_not_allowed: "This browser origin is not authorized.",
   host_not_allowed: "This host name is not authorized.",
   repository_not_authorized: "That repository is not authorized for this account.",
+  repository_unavailable: "The authorized repository is currently unavailable. Ask an operator to inspect its registration.",
+  repository_authorization_revoked: "This repository grant changed or was revoked. Create a new worktree only after authorization is restored.",
+  worktree_unavailable: "The retained worktree is unavailable. Ask an operator to inspect its lifecycle record.",
+  per_user_worktree_quota: "Your retained worktree quota is full. Close or discard an existing worktree first.",
+  global_worktree_quota: "The system worktree quota is full. Ask an operator to review retained worktrees.",
+  user_storage_quota: "Your personal-corpus storage quota is full.",
+  disk_pressure: "Personal-corpus ingestion paused because protected free disk space would be crossed.",
+  parser_timeout: "A document parser reached its safety timeout; the file was rejected.",
   capacity_guardrail: "This job is queued until research capacity is available.",
   model_endpoint_unavailable: "The selected local model is unavailable. Your draft was preserved.",
   response_validation_failed: "The model response did not pass deterministic validation.",
@@ -86,14 +103,15 @@ class ApiError extends Error {
 
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
-  if (options.body !== undefined && !headers.has("Content-Type")) {
+  const multipart = options.body instanceof FormData;
+  if (options.body !== undefined && !multipart && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
   if (options.mutation && state.csrf) headers.set("X-CSRF-Token", state.csrf);
   const response = await fetch(path, {
     method: options.method || "GET",
     headers,
-    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    body: options.body === undefined ? undefined : (multipart ? options.body : JSON.stringify(options.body)),
     credentials: "same-origin",
     signal: options.signal,
     cache: "no-store",
@@ -156,7 +174,8 @@ function hideAuthentication() {
 
 async function submitLogin(event) {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
+  const target = event.currentTarget;
+  const form = new FormData(target);
   $("#auth-error").textContent = "";
   try {
     const result = await api("/api/v1/auth/login", {
@@ -164,7 +183,7 @@ async function submitLogin(event) {
       body: {email: form.get("email"), password: form.get("password")},
     });
     await acceptSession(result);
-    event.currentTarget.reset();
+    target.reset();
   } catch (error) {
     $("#auth-error").textContent = errorMessage(error);
   }
@@ -172,7 +191,8 @@ async function submitLogin(event) {
 
 async function submitActivation(event) {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
+  const target = event.currentTarget;
+  const form = new FormData(target);
   if (form.get("new_password") !== form.get("confirm_password")) {
     $("#auth-error").textContent = "The new passwords do not match.";
     return;
@@ -188,7 +208,7 @@ async function submitActivation(event) {
       },
     });
     await acceptSession(result);
-    event.currentTarget.reset();
+    target.reset();
   } catch (error) {
     $("#auth-error").textContent = errorMessage(error);
   }
@@ -227,11 +247,15 @@ function navDefinition() {
     ["help", "Help", "?"],
     ["about", "System", "i"],
   ];
-  if (state.capabilities?.agent_enabled) items.splice(1, 0, ["agent", "Agent", "A"]);
-  if (state.capabilities?.operator_enabled) {
-    items.splice(1, 0, ["research", "Research", "R"]);
-    items.splice(items.length - 2, 0, ["operations", "Operations", "O"], ["users", "Users", "U"], ["models", "Models & GPU", "M"]);
+  let insert = 1;
+  if (state.capabilities?.agent_enabled) items.splice(insert++, 0, ["agent", "Agent", "A"]);
+  if (state.capabilities?.personal_corpus_enabled) items.splice(insert++, 0, ["knowledge", "Knowledge", "K"]);
+  if (state.capabilities?.research_enabled) items.splice(insert++, 0, ["research", "Research", "R"]);
+  if (state.capabilities?.operator_enabled || state.capabilities?.repository_admin_enabled) {
+    items.splice(items.length - 2, 0, ["operations", "Operations", "O"]);
   }
+  if (state.capabilities?.admin_enabled) items.splice(items.length - 2, 0, ["users", "Users", "U"]);
+  if (state.capabilities?.model_admin_enabled) items.splice(items.length - 2, 0, ["models", "Models & GPU", "M"]);
   return items;
 }
 
@@ -263,6 +287,7 @@ function activateView(id) {
   $("#view-title").textContent = target.dataset.title || "Laplace";
   $("#view-eyebrow").textContent = (
     id === "agent" ? "Repository-bound workspace" :
+    id === "knowledge" ? "Owner-private reference corpus" :
     id === "research" ? "Evidence-led workflow" :
     id === "operations" || id === "users" || id === "models" ? "Operator controls" :
     "Private local inference"
@@ -272,19 +297,31 @@ function activateView(id) {
   if (id === "operations") loadOperations();
   if (id === "users") loadUsers();
   if (id === "models") loadModels();
+  if (id === "knowledge") loadCorpora();
+  if (id === "agent") loadWorktrees();
 }
 
 async function initializeWorkspace() {
   clearNotice();
-  const [capabilities, help, about] = await Promise.all([
+  const [capabilities, help, about, domains, corpusPolicy] = await Promise.all([
     api("/api/v1/tier/capabilities"),
     api("/api/v1/help"),
     api("/api/v1/about"),
+    api("/api/v1/domains"),
+    api("/api/v1/personal-corpus/policy"),
   ]);
   state.capabilities = capabilities;
+  state.domains = domains.domains || [];
+  state.corpusPolicy = corpusPolicy;
   $("#account-name").textContent = state.account.display_name || state.account.email;
   $("#account-tier").textContent = `${capabilities.capability_tier} · ${capabilities.role}`;
   $("#chat-lane").value = capabilities.default_lane;
+  populateDomainSelect($("#chat-domain"), "chat", domains.default_domain_id);
+  populateDomainSelect($("#research-domain"), "research", domains.default_domain_id);
+  const retrieval = $("#chat-retrieval");
+  if (!capabilities.personal_corpus_enabled) {
+    [...retrieval.options].filter((option) => ["personal", "both", "selected_personal"].includes(option.value)).forEach((option) => option.remove());
+  }
   $("#connection-label").textContent = "Local API online";
   $("#connection-dot").className = "status-dot online";
   buildNavigation();
@@ -292,6 +329,7 @@ async function initializeWorkspace() {
   renderHelp(help);
   renderAbout(about);
   renderAccount();
+  if (capabilities.personal_corpus_enabled) await restoreCorpusUpload();
   await loadConversations();
   const requested = window.location.hash.slice(1);
   const allowed = navDefinition().some(([id]) => id === requested);
@@ -303,8 +341,27 @@ function buildRoleWorkspace() {
   const mount = $("#role-workspace");
   mount.replaceChildren();
   if (state.capabilities?.agent_enabled) mount.append(buildAgentView());
-  if (state.capabilities?.operator_enabled) {
-    mount.append(buildOperationsView(), buildUsersView(), buildModelsView());
+  if (state.capabilities?.personal_corpus_enabled) mount.append(buildKnowledgeView());
+  if (state.capabilities?.operator_enabled || state.capabilities?.repository_admin_enabled) {
+    mount.append(buildOperationsView());
+  }
+  if (state.capabilities?.admin_enabled) mount.append(buildUsersView());
+  if (state.capabilities?.model_admin_enabled) mount.append(buildModelsView());
+}
+
+function populateDomainSelect(select, surface, defaultId = "general") {
+  if (!select) return;
+  select.replaceChildren();
+  for (const domain of state.domains) {
+    if (!domain.enabled || !domain.available_in?.[surface]) continue;
+    const option = element("option", {value: domain.domain_id, text: domain.display_name});
+    option.title = domain.description;
+    select.append(option);
+  }
+  if ([...select.options].some((option) => option.value === defaultId)) select.value = defaultId;
+  if (!select.options.length) {
+    select.append(element("option", {value: "", text: "No domain currently available", disabled: true, selected: true}));
+    select.disabled = true;
   }
 }
 
@@ -314,10 +371,22 @@ function buildAgentView() {
   for (const repo of state.capabilities.authorized_repositories || []) {
     repoSelect.append(element("option", {value: repo.repo_id, text: repo.logical_name || repo.repo_id}));
   }
-  const domainSelect = element("select", {id: "agent-domain", name: "domain"}, [
-    element("option", {value: "python", text: "Python"}),
-    element("option", {value: "systemverilog", text: "SystemVerilog"}),
+  const domainSelect = element("select", {id: "agent-domain", name: "domain"});
+  populateDomainSelect(domainSelect, "agent", "python");
+  const retrievalSelect = element("select", {id: "agent-retrieval", name: "retrieval_selection"}, [
+    element("option", {value: "none", text: "No retrieval", selected: true}),
+    element("option", {value: "personal", text: "My personal corpus"}),
+    element("option", {value: "shared", text: "Shared governed corpus"}),
+    element("option", {value: "both", text: "Both permitted corpora"}),
+    element("option", {value: "selected_personal", text: "Selected personal corpus"}),
   ]);
+  if (!state.capabilities.personal_corpus_enabled) {
+    [...retrievalSelect.options]
+      .filter((option) => ["personal", "both", "selected_personal"].includes(option.value))
+      .forEach((option) => option.remove());
+  }
+  const noRepository = !(state.capabilities.authorized_repositories || []).length;
+  if (noRepository) repoSelect.disabled = true;
   const form = element("form", {id: "agent-form", className: "surface form-grid"}, [
     element("label", {text: "Authorized repository"}, [repoSelect]),
     element("label", {text: "Quality lane"}, [
@@ -328,6 +397,7 @@ function buildAgentView() {
       ]),
     ]),
     element("label", {text: "Engineering domain"}, [domainSelect]),
+    element("label", {text: "Reference sources"}, [retrievalSelect]),
     element("label", {className: "wide", text: "Bounded task"}, [
       element("textarea", {name: "instruction", rows: 6, required: true, placeholder: "Describe the requested repository change…"}),
     ]),
@@ -336,8 +406,15 @@ function buildAgentView() {
       element("button", {id: "cancel-agent", className: "button danger", type: "button", text: "Cancel", disabled: true}),
     ]),
   ]);
+  if (noRepository) {
+    form.querySelector("button[type=submit]").disabled = true;
+    form.prepend(element("div", {className: "wide empty-state compact", attributes: {role: "status"}}, [
+      element("h3", {text: "No repository is authorized for this account."}),
+      element("p", {text: "Ask an administrator to register and grant one."}),
+    ]));
+  }
   form.addEventListener("submit", runAgent);
-  return element("section", {id: "agent", className: "view", dataset: {title: "Repository Agent"}}, [
+  const view = element("section", {id: "agent", className: "view", dataset: {title: "Repository Agent"}}, [
     element("div", {className: "page-intro"}, [
       element("div", {}, [element("p", {className: "eyebrow", text: "Plus capability"}), element("h2", {text: "Repository-bound agent"})]),
       element("p", {text: "The server resolves this logical repository ID, creates an isolated worktree, denies network access, and verifies the resulting patch."}),
@@ -350,17 +427,410 @@ function buildAgentView() {
     element("article", {className: "surface"}, [element("h3", {text: "File changes"}), element("div", {id: "agent-files", className: "stack-list"})]),
     element("article", {className: "surface"}, [element("h3", {text: "Unified diff"}), element("pre", {id: "agent-diff", className: "diff-view", text: "No diff yet."})]),
     element("article", {className: "surface"}, [element("h3", {text: "Tests and verification"}), element("ul", {id: "agent-tests", className: "verification-list"})]),
+    element("article", {className: "surface"}, [
+      element("div", {className: "section-heading"}, [
+        element("h3", {text: "My worktree history"}),
+        element("button", {id: "refresh-worktrees", className: "button secondary", type: "button", text: "Refresh"}),
+      ]),
+      element("div", {id: "agent-worktree-history", className: "table-wrap"}, [
+        element("p", {className: "subtle", text: "No worktrees loaded."}),
+      ]),
+    ]),
     element("details", {className: "help-card"}, [
       element("summary", {text: "Repository isolation and allowed tools"}),
       element("p", {text: "Allowed tools are read_file, apply_patch, and run_validation. The client cannot submit a filesystem path. Absolute paths, traversal, links, mounts, submodules, nested repositories, and sibling worktrees are rejected server-side."}),
     ]),
   ]);
+  $("#cancel-agent", view).addEventListener("click", cancelAgent);
+  $("#refresh-worktrees", view).addEventListener("click", loadWorktrees);
+  return view;
+}
+
+function buildKnowledgeView() {
+  const createForm = element("form", {id: "create-corpus-form", className: "surface inline-form"}, [
+    element("label", {text: "Corpus name"}, [
+      element("input", {name: "name", required: true, maxLength: 160, placeholder: "My references"}),
+    ]),
+    element("button", {className: "button primary", type: "submit", text: "Create corpus"}),
+  ]);
+  createForm.addEventListener("submit", createCorpus);
+  const directoryInput = element("input", {
+    id: "corpus-folder-input", type: "file", multiple: true,
+    attributes: {webkitdirectory: "", directory: "", "aria-describedby": "folder-help"},
+  });
+  const dropZone = element("div", {
+    id: "corpus-drop-zone",
+    className: "drop-zone",
+    text: "Or drag selected files or a folder here",
+    tabIndex: 0,
+    attributes: {
+      role: "button",
+      "aria-label": "Drop personal corpus files or folder",
+      "aria-describedby": "folder-help",
+    },
+  });
+  dropZone.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    dropZone.classList.add("drag-active");
+  });
+  dropZone.addEventListener("dragleave", () => dropZone.classList.remove("drag-active"));
+  dropZone.addEventListener("drop", acceptCorpusDrop);
+  dropZone.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") directoryInput.click();
+  });
+  directoryInput.addEventListener("change", () => {
+    state.droppedCorpusFiles = [];
+    const count = directoryInput.files.length;
+    $("#upload-progress").textContent = count ?
+      `${count} selected file(s). Preview to validate them.` :
+      "Select a corpus and files.";
+  });
+  const zipInput = element("input", {id: "corpus-zip-input", type: "file", accept: ".zip,application/zip"});
+  const uploadButton = element("button", {id: "upload-folder", className: "button primary", type: "button", text: "Preview selected folder"});
+  const indexButton = element("button", {id: "index-upload", className: "button secondary", type: "button", text: "Index accepted files", disabled: true});
+  const cancelButton = element("button", {id: "cancel-upload", className: "button danger", type: "button", text: "Cancel upload", disabled: true});
+  uploadButton.addEventListener("click", uploadSelectedFolder);
+  indexButton.addEventListener("click", indexAcceptedFiles);
+  cancelButton.addEventListener("click", cancelCorpusUpload);
+  const searchForm = element("form", {id: "corpus-search-form", className: "inline-form"}, [
+    element("label", {text: "Search test"}, [
+      element("input", {name: "query", required: true, maxLength: 4000, placeholder: "Term in your indexed sources"}),
+    ]),
+    element("button", {className: "button secondary", type: "submit", text: "Search"}),
+  ]);
+  searchForm.addEventListener("submit", searchCorpus);
+  const view = element("section", {id: "knowledge", className: "view", dataset: {title: "Knowledge / My corpus"}}, [
+    element("div", {className: "page-intro"}, [
+      element("div", {}, [element("p", {className: "eyebrow", text: "Owner-private retrieval"}), element("h2", {text: "My corpus"})]),
+      element("p", {text: "Your browser uploads only files you explicitly select. It never reveals arbitrary local paths."}),
+    ]),
+    createForm,
+    element("div", {className: "two-column"}, [
+      element("article", {className: "surface"}, [
+        element("div", {className: "section-heading"}, [
+          element("h3", {text: "Personal corpora"}),
+          element("button", {id: "refresh-corpora", className: "button secondary", type: "button", text: "Refresh"}),
+        ]),
+        element("div", {id: "corpus-list", className: "stack-list"}, [element("p", {className: "subtle", text: "No corpus loaded."})]),
+      ]),
+      element("article", {className: "surface"}, [
+        element("h3", {text: "Upload a local references folder"}),
+        element("p", {id: "folder-help", className: "subtle", text: "Choose a folder when supported, or use a controlled ZIP fallback. A manifest is shown before indexing."}),
+        element("label", {text: "Folder selection"}, [directoryInput]),
+        dropZone,
+        element("label", {text: "ZIP fallback"}, [zipInput]),
+        element("div", {className: "button-row"}, [uploadButton, cancelButton]),
+        element("p", {id: "upload-progress", className: "subtle", attributes: {role: "status", "aria-live": "polite"}, text: "Select a corpus and files."}),
+      ]),
+    ]),
+    element("article", {className: "surface"}, [
+      element("div", {className: "section-heading"}, [
+        element("h3", {text: "Upload manifest"}),
+        indexButton,
+      ]),
+      element("div", {id: "upload-manifest", className: "table-wrap"}, [element("p", {className: "subtle", text: "No staged upload."})]),
+    ]),
+    element("article", {className: "surface"}, [
+      element("div", {className: "section-heading"}, [element("h3", {text: "Indexed sources"}), searchForm]),
+      element("div", {id: "corpus-sources", className: "source-grid"}, [element("p", {className: "subtle", text: "Select a corpus."})]),
+      element("div", {id: "corpus-search-results", className: "stack-list"}),
+    ]),
+    element("details", {className: "help-card"}, [
+      element("summary", {text: "Storage, indexing, retention, and access"}),
+      element("p", {text: `Sources are stored in private external state under a pseudonymous owner directory. Accepted files remain quarantined until you confirm indexing. Soft-deleted content is removed from retrieval immediately and retained for up to ${state.corpusPolicy?.soft_delete_days || 30} days before purge. Operators see sanitized inventory by default; there is no automatic promotion to the shared corpus.`}),
+    ]),
+  ]);
+  $("#refresh-corpora", view).addEventListener("click", loadCorpora);
+  return view;
+}
+
+function readDroppedFile(entry) {
+  return new Promise((resolve, reject) => entry.file(resolve, reject));
+}
+
+function readDroppedDirectory(reader) {
+  return new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+}
+
+async function collectDroppedEntry(entry, prefix = "") {
+  if (!entry) return [];
+  const logicalPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+  if (entry.isFile) {
+    const file = await readDroppedFile(entry);
+    return [{file, logicalPath}];
+  }
+  if (!entry.isDirectory) return [];
+  const reader = entry.createReader();
+  const children = [];
+  while (true) {
+    const batch = await readDroppedDirectory(reader);
+    if (!batch.length) break;
+    children.push(...batch);
+  }
+  const nested = [];
+  for (const child of children) nested.push(...await collectDroppedEntry(child, logicalPath));
+  return nested;
+}
+
+async function acceptCorpusDrop(event) {
+  event.preventDefault();
+  const zone = event.currentTarget;
+  zone.classList.remove("drag-active");
+  try {
+    const items = [...(event.dataTransfer?.items || [])];
+    const entries = items.map((item) => item.webkitGetAsEntry?.()).filter(Boolean);
+    const selected = [];
+    if (entries.length) {
+      for (const entry of entries) selected.push(...await collectDroppedEntry(entry));
+    } else {
+      for (const file of [...(event.dataTransfer?.files || [])]) {
+        selected.push({file, logicalPath: file.name});
+      }
+    }
+    state.droppedCorpusFiles = selected;
+    $("#corpus-folder-input").value = "";
+    $("#upload-progress").textContent = selected.length ?
+      `${selected.length} dropped file(s). Preview to validate them.` :
+      "No readable files were present in the drop.";
+  } catch {
+    showNotice("The dropped folder could not be read by this browser. Use folder selection or ZIP fallback.", "error");
+  }
+}
+
+async function createCorpus(event) {
+  event.preventDefault();
+  const target = event.currentTarget;
+  const form = new FormData(target);
+  try {
+    const result = await api("/api/v1/personal-corpora", {method: "POST", mutation: true, body: {name: form.get("name")}});
+    state.selectedCorpusId = result.corpus.corpus_id;
+    target.reset();
+    await loadCorpora();
+  } catch (error) {
+    showNotice(errorMessage(error), "error");
+  }
+}
+
+async function loadCorpora() {
+  const mount = $("#corpus-list");
+  if (!mount) return;
+  try {
+    const result = await api("/api/v1/personal-corpora");
+    state.corpora = result.corpora || [];
+    if (state.selectedCorpusId && !state.corpora.some((item) => item.corpus_id === state.selectedCorpusId)) state.selectedCorpusId = null;
+    if (!state.selectedCorpusId && state.corpora.length) state.selectedCorpusId = state.corpora[0].corpus_id;
+    mount.replaceChildren();
+    if (!state.corpora.length) {
+      mount.append(element("div", {className: "empty-state compact"}, [element("h3", {text: "Your personal corpus is empty"}), element("p", {text: "Create a corpus, select a local folder, review the manifest, then explicitly index accepted files."})]));
+      $("#corpus-sources")?.replaceChildren(element("p", {className: "subtle", text: "Create a corpus to begin."}));
+      return;
+    }
+    for (const corpus of state.corpora) {
+      const select = element("button", {className: `stack-item selectable${corpus.corpus_id === state.selectedCorpusId ? " selected" : ""}`, type: "button"}, [
+        element("strong", {text: corpus.name}),
+        element("small", {text: `${corpus.state} · ${corpus.source_count} source(s) · revision ${corpus.revision}`}),
+      ]);
+      select.addEventListener("click", async () => { state.selectedCorpusId = corpus.corpus_id; await loadCorpora(); });
+      const rename = element("button", {className: "text-button", type: "button", text: "Rename"});
+      rename.addEventListener("click", () => updateCorpus(corpus, "rename"));
+      const archive = element("button", {className: "text-button", type: "button", text: corpus.state === "ARCHIVED" ? "Reopen" : "Archive"});
+      archive.addEventListener("click", () => updateCorpus(corpus, "archive"));
+      const remove = element("button", {className: "text-button danger-text", type: "button", text: "Delete"});
+      remove.addEventListener("click", () => updateCorpus(corpus, "delete"));
+      mount.append(element("div", {className: "corpus-row"}, [select, element("div", {className: "button-row"}, [rename, archive, remove])]));
+    }
+    await loadCorpusSources();
+  } catch (error) {
+    showNotice(errorMessage(error), "error");
+  }
+}
+
+async function updateCorpus(corpus, action) {
+  try {
+    if (action === "delete") {
+      if (!window.confirm(`Delete “${corpus.name}” from retrieval?`)) return;
+      await api(`/api/v1/personal-corpora/${encodeURIComponent(corpus.corpus_id)}`, {method: "DELETE", mutation: true});
+      if (state.selectedCorpusId === corpus.corpus_id) state.selectedCorpusId = null;
+    } else {
+      const body = action === "rename" ? {name: window.prompt("Corpus name", corpus.name)} : {archived: corpus.state !== "ARCHIVED"};
+      if (action === "rename" && !body.name) return;
+      await api(`/api/v1/personal-corpora/${encodeURIComponent(corpus.corpus_id)}`, {method: "PATCH", mutation: true, body});
+    }
+    await loadCorpora();
+  } catch (error) {
+    showNotice(errorMessage(error), "error");
+  }
+}
+
+async function uploadSelectedFolder() {
+  if (!state.selectedCorpusId) {
+    showNotice("Create or select a personal corpus first.", "error");
+    return;
+  }
+  const files = state.droppedCorpusFiles.length ?
+    state.droppedCorpusFiles :
+    [...$("#corpus-folder-input").files].map((file) => ({
+      file,
+      logicalPath: file.webkitRelativePath || file.name,
+    }));
+  const zip = $("#corpus-zip-input").files[0];
+  if (!files.length && !zip) {
+    showNotice("Select a folder or ZIP fallback.", "error");
+    return;
+  }
+  try {
+    let created;
+    if (state.activeUploadId) {
+      created = await api(`/api/v1/personal-corpus/uploads/${encodeURIComponent(state.activeUploadId)}`);
+      if (created.corpus_id !== state.selectedCorpusId || created.state !== "STAGING") {
+        showNotice("Finish or cancel the existing staged upload before starting one for another corpus.", "error");
+        return;
+      }
+    } else {
+      created = await api("/api/v1/personal-corpus/uploads", {
+        method: "POST", mutation: true,
+        body: {corpus_id: state.selectedCorpusId, idempotency_key: `upload:${crypto.randomUUID()}`},
+      });
+    }
+    state.activeUploadId = created.upload_id;
+    $("#cancel-upload").disabled = false;
+    const selected = zip ? [{file: zip, logicalPath: zip.name}] : files;
+    let completed = 0;
+    for (const selectedFile of selected) {
+      const file = selectedFile.file;
+      const form = new FormData();
+      form.append("file", file, file.name);
+      let endpoint = `/api/v1/personal-corpus/uploads/${encodeURIComponent(created.upload_id)}/zip`;
+      if (!zip) {
+        endpoint = `/api/v1/personal-corpus/uploads/${encodeURIComponent(created.upload_id)}/files`;
+        form.append("relative_path", selectedFile.logicalPath);
+      }
+      await api(endpoint, {method: "POST", mutation: true, body: form});
+      completed += 1;
+      $("#upload-progress").textContent = `Validated ${completed} of ${selected.length} selected file(s).`;
+    }
+    await renderUploadManifest();
+  } catch (error) {
+    showNotice(errorMessage(error), "error");
+  }
+}
+
+async function renderUploadManifest() {
+  if (!state.activeUploadId) return;
+  const manifest = await api(`/api/v1/personal-corpus/uploads/${encodeURIComponent(state.activeUploadId)}`);
+  const rows = (manifest.files || []).map((file) => [
+    file.logical_path, file.state, file.reason || "—", file.support_label,
+    formatBytes(file.size_bytes), (file.warnings || []).join(", ") || "None",
+  ]);
+  $("#upload-manifest").replaceChildren(makeTable(["File", "Decision", "Reason", "Support", "Size", "Warnings"], rows));
+  $("#index-upload").disabled = !manifest.accepted_count;
+  $("#upload-progress").textContent = `${manifest.accepted_count} accepted · ${manifest.rejected_count} rejected. Review before indexing.`;
+}
+
+async function restoreCorpusUpload() {
+  try {
+    const active = await api("/api/v1/personal-corpus/uploads?state=STAGING");
+    const manifest = active.uploads?.[0];
+    if (!manifest) return;
+    state.activeUploadId = manifest.upload_id;
+    state.selectedCorpusId = manifest.corpus_id;
+    $("#cancel-upload").disabled = false;
+    await loadCorpora();
+    await renderUploadManifest();
+    $("#upload-progress").textContent = `${manifest.accepted_count} accepted · ${manifest.rejected_count} rejected. Reselect the same files to resume validation, or index accepted files.`;
+  } catch {
+    // No owner-visible staging session is available to resume.
+  }
+}
+
+async function indexAcceptedFiles() {
+  if (!state.activeUploadId) return;
+  try {
+    $("#index-upload").disabled = true;
+    $("#upload-progress").textContent = "Indexing accepted files…";
+    const result = await api(`/api/v1/personal-corpus/uploads/${encodeURIComponent(state.activeUploadId)}/index`, {
+      method: "POST", mutation: true, body: {idempotency_key: `index:${state.activeUploadId}`},
+    });
+    $("#upload-progress").textContent = `Indexed ${result.indexed_sources} source(s) at snapshot revision ${result.snapshot_revision}.`;
+    state.activeUploadId = null;
+    $("#cancel-upload").disabled = true;
+    await loadCorpora();
+  } catch (error) {
+    $("#index-upload").disabled = false;
+    showNotice(errorMessage(error), "error");
+  }
+}
+
+async function cancelCorpusUpload() {
+  if (!state.activeUploadId) return;
+  try {
+    await api(`/api/v1/personal-corpus/uploads/${encodeURIComponent(state.activeUploadId)}/cancel`, {method: "POST", mutation: true});
+    state.activeUploadId = null;
+    $("#cancel-upload").disabled = true;
+    $("#index-upload").disabled = true;
+    $("#upload-progress").textContent = "Upload cancelled; quarantined temporary content was removed.";
+  } catch (error) {
+    showNotice(errorMessage(error), "error");
+  }
+}
+
+async function loadCorpusSources() {
+  if (!state.selectedCorpusId || !$("#corpus-sources")) return;
+  const result = await api(`/api/v1/personal-corpora/${encodeURIComponent(state.selectedCorpusId)}`);
+  const mount = $("#corpus-sources");
+  mount.replaceChildren();
+  for (const source of result.sources || []) {
+    const download = element("a", {className: "text-button", text: "Download", href: `/api/v1/personal-corpora/${encodeURIComponent(state.selectedCorpusId)}/sources/${encodeURIComponent(source.source_id)}/download`});
+    const remove = element("button", {className: "text-button danger-text", type: "button", text: "Delete"});
+    remove.addEventListener("click", () => deleteCorpusSource(source));
+    mount.append(element("article", {className: "source-card"}, [
+      element("strong", {text: source.name}),
+      element("small", {text: `${source.type} · ${formatBytes(source.size_bytes)} · ${source.hash_short} · ${source.indexing_state}`}),
+      element("small", {text: `${source.owner} · ${source.storage_class} · ${source.retention}`}),
+      element("div", {className: "button-row"}, [download, remove]),
+    ]));
+  }
+  if (!mount.children.length) mount.append(element("p", {className: "subtle", text: "No indexed sources in this corpus."}));
+}
+
+async function deleteCorpusSource(source) {
+  if (!window.confirm(`Delete “${source.name}” from retrieval?`)) return;
+  try {
+    await api(`/api/v1/personal-corpora/${encodeURIComponent(state.selectedCorpusId)}/sources/${encodeURIComponent(source.source_id)}`, {method: "DELETE", mutation: true});
+    await loadCorpora();
+  } catch (error) {
+    showNotice(errorMessage(error), "error");
+  }
+}
+
+async function searchCorpus(event) {
+  event.preventDefault();
+  if (!state.selectedCorpusId) return;
+  const form = new FormData(event.currentTarget);
+  try {
+    const result = await api(`/api/v1/personal-corpora/${encodeURIComponent(state.selectedCorpusId)}/search-test`, {
+      method: "POST", mutation: true, body: {query: form.get("query"), corpus_id: state.selectedCorpusId, limit: 8},
+    });
+    const mount = $("#corpus-search-results");
+    mount.replaceChildren();
+    for (const item of result.results || []) mount.append(stackItem(`${item.file} · ${item.chunk_id}`, `page ${item.page || "n/a"} · revision ${item.snapshot_revision} · score ${item.score}`));
+    if (!mount.children.length) mount.append(element("p", {className: "subtle", text: "No matching indexed chunks."}));
+  } catch (error) {
+    showNotice(errorMessage(error), "error");
+  }
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 function buildOperationsView() {
   const reload = element("button", {className: "button secondary", type: "button", text: "Reload registry"});
   reload.addEventListener("click", reloadRegistry);
-  return element("section", {id: "operations", className: "view", dataset: {title: "Operations"}}, [
+  const children = [
     element("div", {className: "page-intro"}, [
       element("div", {}, [element("p", {className: "eyebrow", text: "Non-secret state"}), element("h2", {text: "Operator dashboard"})]),
       reload,
@@ -371,8 +841,71 @@ function buildOperationsView() {
       element("article", {className: "surface"}, [element("h3", {text: "Readiness"}), element("div", {id: "operations-readiness", className: "stack-list"})]),
     ]),
     element("article", {className: "surface"}, [element("h3", {text: "Repositories and approvals"}), element("div", {id: "operations-repositories", className: "table-wrap"})]),
-    element("details", {className: "help-card"}, [element("summary", {text: "About approvals, queues, and safe lifecycle controls"}), element("p", {text: "Risk-bearing server actions require the configured approval role. Queue reservations keep Quality available. Stop controls act only on Laplace-owned PIDs recorded by the lifecycle manager."})]),
-  ]);
+  ];
+  if (state.capabilities.repository_admin_enabled && state.capabilities.admin_enabled) {
+    const register = element("form", {id: "register-repository-form", className: "form-grid"}, [
+      element("label", {text: "Logical repository ID"}, [element("input", {name: "repo_id", required: true, pattern: "[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"})]),
+      element("label", {text: "Canonical server path"}, [element("input", {name: "canonical_root", required: true, autocomplete: "off"})]),
+      element("button", {className: "button secondary", type: "submit", text: "Register repository"}),
+    ]);
+    register.addEventListener("submit", registerRepository);
+    const grant = element("form", {id: "grant-repository-form", className: "form-grid"}, [
+      element("label", {text: "User ID"}, [element("input", {name: "user_id", required: true})]),
+      element("label", {text: "Logical repository ID"}, [element("input", {name: "repo_id", required: true})]),
+      element("label", {text: "Base commit or ref"}, [element("input", {name: "base_revision", value: "HEAD", required: true})]),
+      element("div", {className: "button-row"}, [
+        element("button", {className: "button primary", type: "submit", value: "grant", text: "Grant repository"}),
+        element("button", {className: "button danger", type: "submit", value: "revoke", text: "Revoke repository"}),
+      ]),
+    ]);
+    grant.addEventListener("submit", changeRepositoryGrant);
+    children.push(element("article", {className: "surface"}, [
+      element("h3", {text: "Repository onboarding"}),
+      element("p", {className: "subtle", text: "Canonical paths are accepted only in this administrator control. Users receive logical IDs; grants revoke their active sessions."}),
+      register,
+      grant,
+    ]));
+  }
+  children.push(element("details", {className: "help-card"}, [element("summary", {text: "About approvals, queues, and safe lifecycle controls"}), element("p", {text: "Risk-bearing server actions require the configured approval role. Queue reservations keep Quality available. Stop controls act only on Laplace-owned PIDs recorded by the lifecycle manager."})]));
+  return element("section", {id: "operations", className: "view", dataset: {title: "Operations"}}, children);
+}
+
+async function registerRepository(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  try {
+    const result = await api("/api/v1/admin/repositories", {
+      method: "POST", mutation: true,
+      body: {repo_id: form.get("repo_id"), canonical_root: form.get("canonical_root")},
+    });
+    showNotice(`Registered logical repository ${result.repository.repo_id}.`);
+    await loadOperations();
+  } catch (error) {
+    showNotice(errorMessage(error), "error");
+  }
+}
+
+async function changeRepositoryGrant(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const action = event.submitter?.value || "grant";
+  try {
+    const result = await api(
+      action === "revoke" ? "/api/v1/admin/repository-grants/revoke" : "/api/v1/admin/repository-grants",
+      {
+        method: "POST", mutation: true,
+        body: {
+          user_id: form.get("user_id"),
+          repo_id: form.get("repo_id"),
+          base_revision: form.get("base_revision"),
+        },
+      },
+    );
+    showNotice(`${result.status}: ${result.repo_id} for ${result.user_id}. The user's sessions were revoked.`);
+    await loadOperations();
+  } catch (error) {
+    showNotice(errorMessage(error), "error");
+  }
 }
 
 function buildUsersView() {
@@ -441,6 +974,7 @@ function renderAccount() {
     ["Display name", state.account.display_name],
     ["Role", state.account.role],
     ["Capability", state.account.capability_tier],
+    ["Independent capabilities", (state.capabilities.capabilities || []).join(", ")],
     ["Default lane", state.account.default_lane],
     ["Authorized repositories", (state.capabilities.authorized_repositories || []).map((repo) => repo.logical_name || repo.repo_id).join(", ") || "None"],
   ];
@@ -456,12 +990,36 @@ function infoCard(label, value, description = "") {
 }
 
 function makeTable(headers, rows) {
-  const table = element("table");
-  table.append(element("thead", {}, [element("tr", {}, headers.map((name) => element("th", {text: name})))]));
+  const table = element("table", {attributes: {"data-copyable": "true"}});
+  table.append(element("thead", {}, [element("tr", {}, headers.map((name) => element("th", {text: name, attributes: {scope: "col"}})))]));
   const body = element("tbody");
-  for (const row of rows) body.append(element("tr", {}, row.map((value) => element("td", {text: value ?? "—"}))));
+  for (const row of rows) {
+    body.append(element("tr", {}, row.map((value) => (
+      value instanceof Node ? element("td", {}, [value]) : element("td", {text: value ?? "—"})
+    ))));
+  }
   table.append(body);
-  return table;
+  const copyTsv = element("button", {className: "text-button", type: "button", text: "Copy as TSV"});
+  const copyMarkdown = element("button", {className: "text-button", type: "button", text: "Copy as Markdown"});
+  copyTsv.addEventListener("click", () => copyTable(table, "tsv", copyTsv));
+  copyMarkdown.addEventListener("click", () => copyTable(table, "markdown", copyMarkdown));
+  return element("div", {className: "data-table"}, [
+    element("div", {className: "table-actions", attributes: {"aria-label": "Table copy actions"}}, [copyTsv, copyMarkdown]),
+    element("div", {className: "table-scroll", attributes: {tabindex: "0"}}, [table]),
+  ]);
+}
+
+async function copyTable(table, format, button) {
+  const rows = [...table.rows].map((row) => [...row.cells].map((cell) => cell.textContent.trim().replaceAll("\t", " ").replaceAll("\n", " ")));
+  let text;
+  if (format === "markdown") {
+    const escape = (value) => value.replaceAll("|", "\\|");
+    text = `| ${rows[0].map(escape).join(" | ")} |\n| ${rows[0].map(() => "---").join(" | ")} |\n` +
+      rows.slice(1).map((row) => `| ${row.map(escape).join(" | ")} |`).join("\n");
+  } else {
+    text = rows.map((row) => row.join("\t")).join("\n");
+  }
+  await copyText(text, button);
 }
 
 async function loadConversations() {
@@ -580,6 +1138,9 @@ function messageCard(message) {
     element("span", {className: "message-label", text: isUser ? "You" : "Laplace"}),
     content,
   ]);
+  if (isUser && message.metadata?.failed) {
+    card.append(element("small", {className: "error", text: "Submission failed; use Retry to edit and resend."}));
+  }
   if (!isUser) {
     const copy = element("button", {className: "text-button", type: "button", text: "Copy response"});
     copy.addEventListener("click", () => copyText(message.content, copy));
@@ -603,6 +1164,7 @@ function responseDetails(metadata, raw = null) {
     ["Finish reason", metadata.finish_reason],
     ["Token usage", metadata.token_usage ? JSON.stringify(metadata.token_usage) : null],
     ["Escalation", metadata.escalation ? JSON.stringify(metadata.escalation) : "None"],
+    ["Retrieval", metadata.retrieval ? JSON.stringify(metadata.retrieval) : "Not used"],
   ].filter(([, value]) => value !== undefined && value !== null);
   const dl = element("dl", {className: "metadata-grid"});
   for (const [label, value] of rows) dl.append(element("dt", {text: label}), element("dd", {text: value}));
@@ -640,6 +1202,22 @@ function renderMarkdown(source) {
       index += 1;
       continue;
     }
+    if (
+      index + 1 < lines.length &&
+      line.includes("|") &&
+      /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[index + 1])
+    ) {
+      const headers = markdownTableCells(line);
+      const rows = [];
+      index += 2;
+      while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
+        const cells = markdownTableCells(lines[index]);
+        rows.push(headers.map((_, cellIndex) => cells[cellIndex] ?? ""));
+        index += 1;
+      }
+      root.append(makeTable(headers, rows));
+      continue;
+    }
     if (/^\s*[-*]\s+/.test(line)) {
       const list = element("ul");
       while (index < lines.length && /^\s*[-*]\s+/.test(lines[index])) {
@@ -675,6 +1253,30 @@ function renderMarkdown(source) {
     root.append(element("p", {}, inlineMarkdown(paragraph.join(" "))));
   }
   return root;
+}
+
+function markdownTableCells(line) {
+  let value = String(line).trim();
+  if (value.startsWith("|")) value = value.slice(1);
+  if (value.endsWith("|")) value = value.slice(0, -1);
+  const cells = [];
+  let current = "";
+  let escaped = false;
+  for (const character of value) {
+    if (escaped) {
+      current += character;
+      escaped = false;
+    } else if (character === "\\") {
+      escaped = true;
+    } else if (character === "|") {
+      cells.push(current.trim());
+      current = "";
+    } else {
+      current += character;
+    }
+  }
+  cells.push(current.trim());
+  return cells;
 }
 
 function inlineMarkdown(text) {
@@ -735,16 +1337,32 @@ async function submitChat(event) {
   const textarea = $("#chat-message");
   const content = textarea.value.trim();
   if (!content) return;
+  if (state.activeChatRequestId) {
+    showNotice(
+      state.activeChatContent === content ?
+        "That exact request is already active." :
+        "A request is already active. Your new draft is preserved for the next message.",
+      "error",
+    );
+    return;
+  }
   const requestMessages = [...state.messages.map(({role, content: messageContent}) => ({role, content: messageContent})), {role: "user", content}];
   state.lastChatRequest = {content, messages: requestMessages};
   state.messages.push({role: "user", content, metadata: {}});
+  textarea.value = "";
+  autoSizeComposer();
+  persistDraft("").catch(() => { /* The cleared local draft remains authoritative. */ });
   renderMessages();
-  $("#chat-state").textContent = "Queued · waiting for the selected local lane";
+  const requestId = `ui-chat-${crypto.randomUUID().replaceAll("-", "")}`;
+  state.activeChatRequestId = requestId;
+  state.activeChatContent = content;
+  $("#chat-state").textContent = "VALIDATING · request accepted by the browser";
   $("#stop-chat").hidden = false;
   $("#retry-chat").hidden = true;
   const started = performance.now();
   const controller = new AbortController();
   state.chatController = controller;
+  beginChatProgressPolling(requestId);
   try {
     const result = await api("/api/v1/chat", {
       method: "POST",
@@ -754,6 +1372,9 @@ async function submitChat(event) {
         lane: $("#chat-lane").value,
         domain: $("#chat-domain").value,
         conversation_id: state.conversationId,
+        request_id: requestId,
+        retrieval_selection: $("#chat-retrieval").value,
+        personal_corpus_id: $("#chat-retrieval").value === "selected_personal" ? state.selectedCorpusId : null,
         messages: requestMessages,
       },
     });
@@ -775,12 +1396,11 @@ async function submitChat(event) {
         finish_reason: response.finish_reason,
         token_usage: response.usage,
         escalation: result.escalation,
+        retrieval: result.retrieval,
         raw: result,
       },
     };
     state.messages.push(assistant);
-    textarea.value = "";
-    autoSizeComposer();
     renderMessages();
     const lastCard = $("#message-list .message-card:last-child");
     const existingDetails = lastCard?.querySelector(".response-details");
@@ -790,25 +1410,69 @@ async function submitChat(event) {
         element("pre", {className: "diff-view", text: JSON.stringify(result, null, 2)}),
       ]));
     }
-    $("#chat-state").textContent = `Complete · ${result.effective_lane} · ${result.model_id} · ${((performance.now() - started) / 1000).toFixed(1)}s`;
+    $("#chat-state").textContent = `COMPLETE · ${result.effective_lane} · ${result.model_id} · ${((performance.now() - started) / 1000).toFixed(1)}s`;
     await loadConversations();
   } catch (error) {
-    state.messages.pop();
+    const submitted = state.messages.findLast?.((message) => message.role === "user" && message.content === content);
+    if (submitted) submitted.metadata = {...(submitted.metadata || {}), failed: true, request_id: requestId};
     renderMessages();
     $("#retry-chat").hidden = false;
-    $("#chat-state").textContent = error?.name === "AbortError" ? "Cancelled" : "Failed · draft preserved";
+    $("#chat-state").textContent = error?.name === "AbortError" ? "CANCELLED · new draft preserved" : "FAILED · new draft preserved";
     showNotice(errorMessage(error), error?.name === "AbortError" ? "info" : "error");
   } finally {
+    window.clearInterval(state.chatProgressTimer);
+    state.chatProgressTimer = null;
     state.chatController = null;
+    state.activeChatRequestId = null;
+    state.activeChatContent = null;
     $("#stop-chat").hidden = true;
   }
 }
 
 async function retryChat() {
   if (!state.lastChatRequest) return;
+  if ($("#chat-message").value && !window.confirm("Replace the new unsent draft with the failed message?")) return;
+  const last = state.messages[state.messages.length - 1];
+  if (last?.role === "user" && last.content === state.lastChatRequest.content && last.metadata?.failed) {
+    state.messages.pop();
+    renderMessages();
+  }
   $("#chat-message").value = state.lastChatRequest.content;
   autoSizeComposer();
   $("#chat-form").requestSubmit();
+}
+
+function beginChatProgressPolling(requestId) {
+  window.clearInterval(state.chatProgressTimer);
+  state.chatProgressTimer = window.setInterval(async () => {
+    try {
+      const progress = await api(`/api/v1/requests/${encodeURIComponent(requestId)}`);
+      const details = [
+        progress.state,
+        `${Number(progress.elapsed_seconds || 0).toFixed(1)}s`,
+        progress.queue_position !== null ? `queue ${progress.queue_position}` : null,
+        progress.effective_lane || progress.requested_lane,
+        progress.model_name,
+      ].filter(Boolean);
+      $("#chat-state").textContent = details.join(" · ");
+      if (["COMPLETE", "CANCELLED", "TIMED_OUT", "FAILED"].includes(progress.state)) {
+        window.clearInterval(state.chatProgressTimer);
+      }
+    } catch {
+      // The primary request still owns the visible failure state.
+    }
+  }, 650);
+}
+
+async function stopActiveChat() {
+  if (state.activeChatRequestId) {
+    try {
+      await api(`/api/v1/requests/${encodeURIComponent(state.activeChatRequestId)}/cancel`, {method: "POST", mutation: true});
+    } catch {
+      // Aborting the active fetch still preserves the draft and submitted message.
+    }
+  }
+  state.chatController?.abort();
 }
 
 function autoSizeComposer() {
@@ -834,6 +1498,13 @@ function saveDraftSoon() {
   }, 450);
 }
 
+async function persistDraft(value) {
+  if (!state.conversationId) return;
+  await api(`/api/v1/conversations/${encodeURIComponent(state.conversationId)}`, {
+    method: "PATCH", mutation: true, body: {draft: value},
+  });
+}
+
 async function runAgent(event) {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
@@ -849,20 +1520,34 @@ async function runAgent(event) {
   try {
     const bound = await api("/api/v1/agent/sessions", {
       method: "POST", mutation: true,
-      body: {repo_id: repoId, session_id: sessionId, allowed_tools: ["read_file", "apply_patch", "run_validation"], max_commands: 100, max_wall_seconds: 1800},
+      body: {
+        repo_id: repoId, session_id: sessionId,
+        task_title: String(form.get("instruction")).trim().slice(0, 120),
+        idempotency_key: `worktree:${sessionId}`,
+        allowed_tools: ["read_file", "apply_patch", "run_validation"],
+        max_commands: 100, max_wall_seconds: 1800,
+      },
     });
     $("#cancel-agent").disabled = false;
     $("#agent-plan").append(stackItem("2 · Execute", `${bound.binding.logical_repository_name} · ${bound.binding.worktree_status}`));
     $("#agent-state").textContent = "Running bounded task";
     const result = await api(`/api/v1/agent/sessions/${encodeURIComponent(sessionId)}/messages`, {
       method: "POST", mutation: true,
-      body: {lane: form.get("lane"), instruction: form.get("instruction"), domain: form.get("domain")},
+      body: {
+        lane: form.get("lane"),
+        instruction: form.get("instruction"),
+        domain: form.get("domain"),
+        retrieval_selection: form.get("retrieval_selection"),
+        personal_corpus_id: form.get("retrieval_selection") === "selected_personal" ? state.selectedCorpusId : null,
+      },
     });
     renderAgentResult(result);
+    await loadWorktrees();
   } catch (error) {
     $("#agent-state").textContent = "Failed";
     $("#agent-state").className = "state-pill error";
     showNotice(errorMessage(error), "error");
+    await loadWorktrees();
   }
 }
 
@@ -871,6 +1556,13 @@ function renderAgentResult(result) {
   $("#agent-state").textContent = "Complete";
   $("#agent-state").className = "state-pill";
   $("#agent-plan").append(stackItem("3 · Verify", `${response.verification_status || "UNKNOWN"} · ${result.effective_lane || "—"} · ${result.model_id || "—"}`));
+  const retrieval = result.retrieval || {};
+  $("#agent-plan").append(stackItem(
+    "4 · Retrieval",
+    retrieval.retrieval_used ?
+      `Used owner-authorized read-only context · ${retrieval.repository_write_policy}` :
+      `Not used · ${retrieval.selection || "none"}`,
+  ));
   const files = $("#agent-files");
   files.replaceChildren();
   for (const path of response.modified_paths || result.modified_paths || []) files.append(stackItem(path, "Modified inside the isolated worktree"));
@@ -891,6 +1583,74 @@ async function cancelAgent() {
     await api(`/api/v1/agent/sessions/${encodeURIComponent(state.agentSessionId)}/cancel`, {method: "POST", mutation: true});
     $("#agent-state").textContent = "Cancelled";
     $("#cancel-agent").disabled = true;
+  } catch (error) {
+    showNotice(errorMessage(error), "error");
+  }
+}
+
+async function loadWorktrees() {
+  const mount = $("#agent-worktree-history");
+  if (!mount) return;
+  try {
+    const result = await api("/api/v1/worktrees");
+    const rows = (result.worktrees || []).map((worktree) => {
+      const actions = element("div", {className: "button-row compact-actions"});
+      const history = element("button", {className: "text-button", type: "button", text: "History"});
+      history.addEventListener("click", () => showWorktreeHistory(worktree.session_id));
+      actions.append(history);
+      if (["ACTIVE", "DIRTY", "FAILED", "CANCELLED_DIRTY"].includes(worktree.state)) {
+        const resume = element("button", {className: "text-button", type: "button", text: "Resume"});
+        resume.addEventListener("click", () => worktreeAction(worktree, "resume"));
+        const close = element("button", {className: "text-button", type: "button", text: "Close clean"});
+        close.addEventListener("click", () => worktreeAction(worktree, "close"));
+        const exportButton = element("button", {className: "text-button", type: "button", text: "Request export"});
+        exportButton.addEventListener("click", () => worktreeAction(worktree, "export"));
+        const patch = element("a", {className: "text-button", text: "Patch", href: `/api/v1/worktrees/${encodeURIComponent(worktree.session_id)}/patch`});
+        actions.append(resume, close, exportButton, patch);
+        if (["DIRTY", "FAILED", "CANCELLED_DIRTY"].includes(worktree.state)) {
+          const discard = element("button", {className: "text-button danger-text", type: "button", text: "Discard"});
+          discard.addEventListener("click", () => worktreeAction(worktree, "discard"));
+          actions.append(discard);
+        }
+      }
+      return [
+        worktree.task_title, worktree.repo_id, worktree.state,
+        String(worktree.base_revision).slice(0, 12),
+        (worktree.changed_paths || []).join(", ") || "None",
+        worktree.verification_summary || "Not run", actions,
+      ];
+    });
+    mount.replaceChildren(makeTable(["Task", "Repository", "State", "Base", "Changed paths", "Verification", "Actions"], rows));
+  } catch (error) {
+    showNotice(errorMessage(error), "error");
+  }
+}
+
+async function worktreeAction(worktree, action) {
+  try {
+    const path = `/api/v1/worktrees/${encodeURIComponent(worktree.session_id)}`;
+    if (action === "resume") {
+      await api(`${path}/resume`, {method: "POST", mutation: true});
+    } else if (action === "close") {
+      const result = await api(`${path}/close`, {method: "POST", mutation: true});
+      if (result.status === "PRESERVED_DIRTY_WORKTREE") showNotice("Dirty worktree preserved for inspection.");
+    } else if (action === "export") {
+      await api(`${path}/export`, {method: "POST", mutation: true, body: {promotion: false}});
+    } else if (action === "discard") {
+      if (!window.confirm(`Permanently discard worktree ${worktree.session_id}?`)) return;
+      await api(`${path}/discard`, {method: "POST", mutation: true, body: {confirmation: `discard:${worktree.session_id}`}});
+    }
+    await loadWorktrees();
+  } catch (error) {
+    showNotice(errorMessage(error), "error");
+  }
+}
+
+async function showWorktreeHistory(sessionId) {
+  try {
+    const result = await api(`/api/v1/worktrees/${encodeURIComponent(sessionId)}/history`);
+    const detail = (result.events || []).map((item) => `${item.timestamp_utc} · ${item.event} · ${item.state}`).join("\n") || "No events.";
+    showNotice(detail);
   } catch (error) {
     showNotice(errorMessage(error), "error");
   }
@@ -920,6 +1680,7 @@ async function createResearch(event) {
       method: "POST", mutation: true,
       body: {
         research_job_id: jobId,
+        domain: form.get("domain"),
         job: {
           question: form.get("question"),
           scope: form.get("scope"),
@@ -1050,15 +1811,16 @@ async function loadUsers() {
   try {
     const result = await api("/api/v1/admin/users");
     const table = element("table");
-    table.append(element("thead", {}, [element("tr", {}, ["Email", "Name", "Enabled", "Capability", "Role", "Default lane", "Repositories", "Sessions"].map((name) => element("th", {text: name})))]));
+    table.append(element("thead", {}, [element("tr", {}, ["Email", "Name", "Enabled", "Legacy profile", "Independent capabilities", "Role", "Default lane", "Repositories", "Sessions"].map((name) => element("th", {text: name, attributes: {scope: "col"}})))]));
     const body = element("tbody");
     for (const user of result.users || []) {
       const revoke = element("button", {className: "text-button", type: "button", text: "Revoke"});
       revoke.addEventListener("click", () => revokeUserSessions(user.user_id));
+      const capabilityEditor = buildCapabilityEditor(user);
       body.append(element("tr", {}, [
         element("td", {text: user.email}), element("td", {text: user.display_name}),
         element("td", {text: user.enabled ? "Enabled" : "Disabled"}),
-        element("td", {text: user.capability_tier}), element("td", {text: user.role}),
+        element("td", {text: user.capability_tier}), element("td", {}, [capabilityEditor]), element("td", {text: user.role}),
         element("td", {text: user.default_lane}),
         element("td", {text: (user.authorized_repo_ids || []).join(", ") || "None"}),
         element("td", {}, [revoke]),
@@ -1069,6 +1831,37 @@ async function loadUsers() {
   } catch (error) {
     showNotice(errorMessage(error), "error");
   }
+}
+
+function buildCapabilityEditor(user) {
+  const known = [
+    "chat", "agent", "research", "operator", "admin", "personal_corpus",
+    "shared_corpus_ingest", "repository_admin", "model_admin",
+  ];
+  const form = element("form", {className: "capability-editor"});
+  for (const capability of known) {
+    const checkbox = element("input", {type: "checkbox", name: "capability", value: capability, checked: (user.capabilities || []).includes(capability)});
+    form.append(element("label", {}, [checkbox, document.createTextNode(capability.replaceAll("_", " "))]));
+  }
+  const save = element("button", {className: "button secondary", type: "submit", text: "Save capabilities"});
+  form.append(save);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const selected = [...form.querySelectorAll("input:checked")].map((input) => input.value);
+    try {
+      await api(`/api/v1/admin/users/${encodeURIComponent(user.user_id)}/capabilities`, {
+        method: "PATCH", mutation: true, body: {capabilities: selected, enabled: user.enabled},
+      });
+      showNotice(`Capabilities updated for ${user.display_name}; active sessions were revoked.`);
+      await loadUsers();
+    } catch (error) {
+      showNotice(errorMessage(error), "error");
+    }
+  });
+  return element("details", {}, [
+    element("summary", {text: (user.capabilities || []).join(", ") || "None"}),
+    form,
+  ]);
 }
 
 async function revokeUserSessions(userId) {
@@ -1125,7 +1918,8 @@ async function signOut(all = false) {
 
 async function changePassword(event) {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
+  const target = event.currentTarget;
+  const form = new FormData(target);
   const current = form.get("current_password");
   const replacement = form.get("new_password");
   if (!current || !replacement) return;
@@ -1136,7 +1930,7 @@ async function changePassword(event) {
     });
     state.csrf = result.csrf_token;
     state.account = result.account;
-    event.currentTarget.reset();
+    target.reset();
     $("#account-dialog").close();
     showNotice("Password changed and prior sessions revoked.");
   } catch (error) {
@@ -1164,7 +1958,7 @@ function bindEvents() {
       $("#chat-form").requestSubmit();
     }
   });
-  $("#stop-chat").addEventListener("click", () => state.chatController?.abort());
+  $("#stop-chat").addEventListener("click", stopActiveChat);
   $("#retry-chat").addEventListener("click", retryChat);
   $("#new-conversation").addEventListener("click", createConversation);
   $("#research-form").addEventListener("submit", createResearch);

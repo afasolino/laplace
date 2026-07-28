@@ -69,8 +69,17 @@
           <div class="lane-control">
             <label for="chat-domain">Question domain</label>
             <select id="chat-domain">
-              <option value="general">General</option>
-              <option value="systemverilog">SystemVerilog</option>
+              <option value="general">Auto / General</option>
+            </select>
+          </div>
+          <div class="lane-control">
+            <label for="chat-retrieval">Sources</label>
+            <select id="chat-retrieval">
+              <option value="none">No retrieval</option>
+              <option value="personal">My personal corpus</option>
+              <option value="shared">Shared governed corpus</option>
+              <option value="both">Both permitted corpora</option>
+              <option value="selected_personal">Selected personal corpus</option>
             </select>
           </div>
         </div>
@@ -124,6 +133,11 @@
               <option value="local_uploaded_documents">Authorized uploaded documents</option>
             </select>
           </label>
+          <label>Domain
+            <select id="research-domain" name="domain">
+              <option value="general">Auto / General</option>
+            </select>
+          </label>
           <div class="wide button-row">
             <button class="button primary" type="submit">Create research job</button>
             <button id="run-research" class="button secondary" type="button" disabled>Run admitted job</button>
@@ -153,7 +167,17 @@
         <div id="help-functions" class="card-grid"></div>
         <article class="surface prose">
           <h3>Privacy and guardrails</h3>
-          <p>Inference stays on configured local model endpoints. Conversations, research, repositories, worktrees, and artifacts are owner-isolated. Generated files have invisible server-side provenance; normal downloads keep clean filenames and content.</p>
+          <p>Inference stays on configured local model endpoints. The following stores have different ownership and lifecycle rules; none is silently promoted into another.</p>
+          <dl class="storage-list">
+            <dt>Conversation messages and drafts</dt><dd>Owned by your account in external application state. Messages persist until their conversation is deleted; drafts are replaced as you type and are not indexed.</dd>
+            <dt>Conversation attachments</dt><dd>Owner-only and request-scoped when enabled. They are not personal-corpus sources and are not indexed for later retrieval automatically.</dd>
+            <dt>Personal corpus sources</dt><dd>Owned by you under a pseudonymous external-state directory. Sources become searchable only after explicit indexing; deletion removes retrieval immediately and starts the configured soft-delete period.</dd>
+            <dt>Shared governed corpus</dt><dd>Administrator-governed local knowledge with separate provenance and access policy. Personal uploads are never promoted automatically.</dd>
+            <dt>Repository files</dt><dd>Remain in an administrator-registered repository. Read or mutation access requires an active user grant and a dedicated worktree.</dd>
+            <dt>Agent worktrees</dt><dd>Owned by the requesting user under external state. Clean worktrees can be released; dirty or failed worktrees are retained until expiry or confirmed cleanup.</dd>
+            <dt>Generated artifacts</dt><dd>Owner-scoped files with server-side hashes and provenance. Downloads use logical filenames and every read rechecks integrity.</dd>
+            <dt>Audit logs</dt><dd>Operator-controlled external records retained by policy. Secrets and normal-user canonical paths are excluded.</dd>
+          </dl>
           <p>Use <strong>Stop</strong> or <strong>Cancel</strong> to end client work. Operators can stop only processes Laplace started and recorded as owned.</p>
         </article>
       </section>
@@ -162,6 +186,7 @@
         <div class="page-intro"><div><p class="eyebrow">Sanitized configuration</p><h2>System Information</h2></div><p>Versions, routes, limits, and health—without secrets or raw model paths.</p></div>
         <div id="about-cards" class="card-grid"></div>
         <article class="surface"><h3>Model lanes</h3><div id="about-lanes" class="table-wrap"></div></article>
+        <article class="surface prose"><h3>Storage boundaries</h3><p>Git contains source and sanitized documentation only. Runtime registries, conversations, personal corpora, worktrees, generated artifacts, sessions, and audit logs live under the configured external state root. Model VRAM, system RAM, iGPU memory, and NPU memory are separate resources.</p></article>
         <article class="surface"><h3>Documentation</h3><div id="documentation-links" class="link-list"></div></article>
       </section>
 
@@ -207,6 +232,10 @@
     <form id="account-form" class="account-card">
       <div class="section-heading"><h2 id="account-title">Account</h2><button id="close-account" class="icon-button" type="button" aria-label="Close account panel">×</button></div>
       <dl id="account-details" class="definition-list"></dl>
+      <details>
+        <summary>My data and deletion</summary>
+        <p class="subtle">Conversation deletion and personal-corpus deletion are separate. Corpus deletion removes indexed chunks from retrieval immediately, then applies the configured soft-delete retention. Repository files, Agent worktrees, generated artifacts, and audit records each follow their own administrator policy.</p>
+      </details>
       <details>
         <summary>Change password</summary>
         <div class="form-stack">

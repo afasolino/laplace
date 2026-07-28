@@ -7,10 +7,12 @@ Use this as a fail-closed release gate.
 - [ ] External state root is outside Git and mode `0700`.
 - [ ] Registered-user parent is `0700`; registry is `0600`.
 - [ ] `afasolino@unisa.it` is enabled, Operator/admin, default Quality.
+- [ ] `afasolino@unisa.it` has independent Agent and personal-corpus rights without losing Operator/admin.
+- [ ] `frcapone@unisa.it` is a normal user with only Chat, Agent, and personal-corpus rights.
 - [ ] Activation was completed with a one-time local code; no password is hardcoded.
 - [ ] Live password hashes, codes, cookies, CSRF values, bearer tokens, and keys are absent from Git and bundles.
 - [ ] Invalid registry reload retains the last valid snapshot.
-- [ ] Role/tier/disable/password/repository changes revoke affected sessions.
+- [ ] Role/tier/capability/disable/password/repository changes revoke affected sessions.
 
 ## Network and authentication
 
@@ -26,8 +28,12 @@ Use this as a fail-closed release gate.
 ## Authorization and isolation
 
 - [ ] Basic receives chat only and no repository IDs/tool schemas/agent controls.
-- [ ] Plus sees only server-authorized logical repositories.
+- [ ] Named capabilities, not tier or hidden navigation, authorize every endpoint.
+- [ ] Plus sees only server-authorized logical repositories present in both stores.
 - [ ] Agent worktree and path-escape tests pass.
+- [ ] Worktree idempotency, quota, restart recovery, stale grant, dirty preservation, export, patch, and confirmed discard pass.
+- [ ] Personal corpus format, parser, ZIP, quota, deduplication, recovery, deletion, citation, and cross-user tests pass.
+- [ ] Operator personal-corpus inventory contains no owner ID, corpus name, filename, or hash.
 - [ ] Conversation, research, and artifact cross-user tests pass.
 - [ ] Repository revocation blocks subsequent/resumed actions.
 - [ ] Artifact read/export verifies SHA-256.
@@ -41,6 +47,8 @@ Use this as a fail-closed release gate.
 - [ ] Deep Research limit is two globally and one per user.
 - [ ] Health and readiness pass; unavailable endpoints show degraded state.
 - [ ] SQLite stores use WAL, busy timeout, private modes, and recover after restart.
+- [ ] Personal-corpus root is outside Git and uses pseudonymous owner directories.
+- [ ] Corpus and worktree quota/retention/disk-pressure policies match documentation.
 - [ ] Cancellation releases the request/admission resource.
 - [ ] Logs have bounded rotation/retention.
 - [ ] Backup and rollback were rehearsed without silently copying secrets.
@@ -51,14 +59,15 @@ Use this as a fail-closed release gate.
 - [ ] Malicious Markdown, link, filename, source-title, repository-name, and error text tests pass.
 - [ ] Chat, response details, diff/tests, research evidence, and Operator status are readable.
 - [ ] Browser storage contains no authentication credential.
-- [ ] All six guides and all 12 screenshots exist.
+- [ ] All ten required guides and all 12 v6 screenshots exist.
 - [ ] Screenshot manifest hashes match and secret scan passes.
 
 ## Live and shutdown
 
 - [ ] Unrelated GPU PIDs were recorded before startup and remain untouched.
 - [ ] Existing local main and CodeV artifacts were used.
-- [ ] Real Quality chat and selected repository-bound Agent smoke pass.
+- [ ] Selected live Quality chat and repository-bound Agent smoke pass, or an exact hardware/toolchain blocker is recorded.
+- [ ] Synthetic mixed corpus accepts safe files, rejects unsafe entries, indexes/retrieves citations, and denies cross-user access.
 - [ ] Reverse-proxy/SSH fixture passes; model ports remain private.
 - [ ] Only Laplace-owned processes are stopped.
 - [ ] Final endpoint/GPU observations and preserved unrelated PID evidence are recorded.

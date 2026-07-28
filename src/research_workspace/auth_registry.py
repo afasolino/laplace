@@ -16,14 +16,18 @@ from argon2 import PasswordHasher, extract_parameters
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from argon2.low_level import Type
 
-from .user_capabilities import CapabilityTier
+from .user_capabilities import (
+    Capability,
+    CapabilityTier,
+    default_capabilities,
+)
 
 JsonObject: TypeAlias = dict[str, object]
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _ROLES = frozenset({"user", "operator", "auditor", "admin"})
 _LANES = frozenset({"quality", "standard", "economy"})
-_USER_FIELDS = frozenset(
+_USER_FIELDS_V1 = frozenset(
     {
         "email",
         "user_id",
@@ -37,6 +41,7 @@ _USER_FIELDS = frozenset(
         "must_change_password",
     }
 )
+_USER_FIELDS_V2 = _USER_FIELDS_V1 | {"capabilities"}
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _EMAIL = re.compile(r"[^@\s]{1,254}@[^@\s]{1,253}")
 
@@ -149,6 +154,7 @@ class RegisteredUser:
     authorized_repo_ids: tuple[str, ...]
     password_hash: str
     must_change_password: bool
+    capabilities: tuple[Capability, ...] | None = None
 
     @property
     def normalized_email(self) -> str:
@@ -163,6 +169,9 @@ class RegisteredUser:
             "default_lane": self.default_lane,
             "authorized_repo_ids": list(self.authorized_repo_ids),
             "must_change_password": self.must_change_password,
+            "capabilities": [
+                item.value for item in sorted(self.effective_capabilities, key=str)
+            ],
         }
         if include_email:
             value["email"] = self.email
@@ -172,7 +181,16 @@ class RegisteredUser:
         value = asdict(self)
         value["capability_tier"] = self.capability_tier.value
         value["authorized_repo_ids"] = list(self.authorized_repo_ids)
+        value["capabilities"] = [
+            item.value for item in sorted(self.effective_capabilities, key=str)
+        ]
         return value
+
+    @property
+    def effective_capabilities(self) -> frozenset[Capability]:
+        if self.capabilities is None:
+            return default_capabilities(self.capability_tier)
+        return frozenset(self.capabilities)
 
 
 @dataclass(frozen=True)
@@ -189,9 +207,14 @@ def _strict_bool(value: object, *, field: str) -> bool:
     return value
 
 
-def _parse_user(value: object) -> RegisteredUser:
-    if not isinstance(value, dict) or set(value) != _USER_FIELDS:
-        unknown = sorted(str(item) for item in set(value or {}) - _USER_FIELDS) if isinstance(value, dict) else []
+def _parse_user(value: object, *, schema_version: int = _SCHEMA_VERSION) -> RegisteredUser:
+    fields = _USER_FIELDS_V1 if schema_version == 1 else _USER_FIELDS_V2
+    if not isinstance(value, dict) or set(value) != fields:
+        unknown = (
+            sorted(str(item) for item in set(value or {}) - fields)
+            if isinstance(value, dict)
+            else []
+        )
         raise AuthRegistryError("invalid_user_schema", {"unknown_fields": unknown})
     try:
         email = str(value["email"])
@@ -217,6 +240,24 @@ def _parse_user(value: object) -> RegisteredUser:
             raise AuthRegistryError("invalid_authorized_repo_ids")
         if len(set(repositories)) != len(repositories):
             raise AuthRegistryError("duplicate_authorized_repo_id")
+        if schema_version == 1:
+            capabilities = tuple(
+                sorted(default_capabilities(capability), key=str)
+            )
+        else:
+            raw_capabilities = value["capabilities"]
+            if (
+                not isinstance(raw_capabilities, list)
+                or any(not isinstance(item, str) for item in raw_capabilities)
+                or len(set(raw_capabilities)) != len(raw_capabilities)
+            ):
+                raise AuthRegistryError("invalid_capabilities")
+            try:
+                capabilities = tuple(
+                    sorted((Capability(item) for item in raw_capabilities), key=str)
+                )
+            except ValueError as exc:
+                raise AuthRegistryError("invalid_capabilities") from exc
         return RegisteredUser(
             email=email,
             user_id=user_id,
@@ -230,6 +271,7 @@ def _parse_user(value: object) -> RegisteredUser:
             must_change_password=_strict_bool(
                 value["must_change_password"], field="must_change_password"
             ),
+            capabilities=capabilities,
         )
     except KeyError as exc:
         raise AuthRegistryError("invalid_user_schema") from exc
@@ -239,20 +281,24 @@ def parse_registry(raw_bytes: bytes) -> RegistrySnapshot:
     if len(raw_bytes) > 4_000_000:
         raise AuthRegistryError("registry_too_large")
     try:
-        raw: object = yaml.load(raw_bytes.decode("utf-8"), Loader=_UniqueKeyLoader)
+        # _UniqueKeyLoader subclasses SafeLoader and only adds duplicate-key rejection.
+        raw: object = yaml.load(  # nosec B506
+            raw_bytes.decode("utf-8"), Loader=_UniqueKeyLoader
+        )
     except (UnicodeDecodeError, yaml.YAMLError) as exc:
         raise AuthRegistryError("malformed_registry") from exc
     if not isinstance(raw, dict) or set(raw) != {"schema_version", "users"}:
         raise AuthRegistryError("invalid_registry_schema")
-    if type(raw["schema_version"]) is not int or raw["schema_version"] != _SCHEMA_VERSION:
+    if type(raw["schema_version"]) is not int or raw["schema_version"] not in {1, 2}:
         raise AuthRegistryError("unsupported_registry_schema")
+    schema_version = int(raw["schema_version"])
     values = raw["users"]
     if not isinstance(values, list):
         raise AuthRegistryError("invalid_registry_users")
     by_email: dict[str, RegisteredUser] = {}
     by_id: dict[str, RegisteredUser] = {}
     for item in values:
-        user = _parse_user(item)
+        user = _parse_user(item, schema_version=schema_version)
         email = user.normalized_email
         if email in by_email:
             raise AuthRegistryError("duplicate_normalized_email")
@@ -399,8 +445,15 @@ class RegisteredUserRegistry:
             repositories = normalized_changes.get("authorized_repo_ids")
             if isinstance(repositories, tuple):
                 normalized_changes["authorized_repo_ids"] = list(repositories)
+            capabilities = normalized_changes.get("capabilities")
+            if isinstance(capabilities, (tuple, frozenset)):
+                normalized_changes["capabilities"] = [
+                    item.value if isinstance(item, Capability) else str(item)
+                    for item in capabilities
+                ]
             values[user_id] = _parse_user(
-                {**current.registry_value(), **normalized_changes}
+                {**current.registry_value(), **normalized_changes},
+                schema_version=_SCHEMA_VERSION,
             )
             return values
 
