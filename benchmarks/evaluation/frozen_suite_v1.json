@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "suite_id": "laplace-v7-frozen-fixtures-1",
+  "fixture_only": true,
+  "cases": [
+    {
+      "case_id": "retrieval_relevant_chunk",
+      "category": "retrieval_relevance",
+      "inputs": {"ranked_chunks": ["paper-a:p2:c4", "paper-b:p1:c1"]},
+      "expected": {"relevant_chunks": ["paper-a:p2:c4"], "top_k": 1}
+    },
+    {
+      "case_id": "citation_adversarial_extra",
+      "category": "citation_precision_recall",
+      "inputs": {"citations": ["paper-a:p2:c4"]},
+      "expected": {"citations": ["paper-a:p2:c4"]}
+    },
+    {
+      "case_id": "unsupported_claim_flag",
+      "category": "unsupported_claim_detection",
+      "inputs": {"unsupported_claim_ids": ["claim-2"]},
+      "expected": {"unsupported_claim_ids": ["claim-2"]}
+    },
+    {
+      "case_id": "personal_owner_boundary",
+      "category": "personal_corpus_isolation",
+      "inputs": {"owner_id": "user-a", "requester_id": "user-b", "scope": "personal", "grants": []},
+      "expected": {"allowed": false}
+    },
+    {
+      "case_id": "shared_explicit_grant",
+      "category": "shared_corpus_permissions",
+      "inputs": {"owner_id": "user-a", "requester_id": "user-b", "scope": "shared", "grants": ["user-b"]},
+      "expected": {"allowed": true}
+    },
+    {
+      "case_id": "conversation_round_trip",
+      "category": "conversation_persistence",
+      "inputs": {"messages": [{"role": "user", "content": "question"}, {"role": "assistant", "content": "fixture answer"}]},
+      "expected": {"messages": [{"role": "user", "content": "question"}, {"role": "assistant", "content": "fixture answer"}]}
+    },
+    {
+      "case_id": "markdown_complete_citation",
+      "category": "markdown_citation_rendering",
+      "inputs": {"markdown": "Grounded fixture result.", "citations": ["file=paper-a.pdf page=2 section=Method chunk=paper-a:p2:c4"]},
+      "expected": {"safe": true}
+    },
+    {
+      "case_id": "python_patch_known_good",
+      "category": "python_patch_applicability",
+      "inputs": {"repository": "python_repo", "file": "calculator.py", "old_text": "return left - right", "new_text": "return left + right"},
+      "expected": {"applicable": true}
+    },
+    {
+      "case_id": "systemverilog_patch_known_bad",
+      "category": "systemverilog_patch_applicability",
+      "inputs": {"repository": "systemverilog_repo", "file": "counter.sv", "old_text": "assign missing = signal;", "new_text": "assign count = next_count;"},
+      "expected": {"applicable": false}
+    },
+    {
+      "case_id": "verification_requires_all_gates",
+      "category": "verification_gates",
+      "inputs": {"required_gates": ["lint", "unit", "adversarial"], "passed_gates": ["lint", "unit"]},
+      "expected": {"accepted": false}
+    },
+    {
+      "case_id": "worktree_owner_namespace",
+      "category": "worktree_isolation",
+      "inputs": {"owner_namespace": "owner-7f", "logical_path": "owner-7f/repo-1/job-1"},
+      "expected": {"isolated": true}
+    },
+    {
+      "case_id": "provider_capability_route",
+      "category": "provider_routing",
+      "inputs": {"requires_tools": true, "providers": [{"provider_id": "fixture-basic", "tools": false, "available": true}, {"provider_id": "fixture-tools", "tools": true, "available": true}]},
+      "expected": {"provider_id": "fixture-tools"}
+    },
+    {
+      "case_id": "timeout_terminal_state",
+      "category": "cancellation_timeouts",
+      "inputs": {"terminal_event": "TIMED_OUT"},
+      "expected": {"terminal_state": "TIMED_OUT"}
+    },
+    {
+      "case_id": "artifact_provenance_complete",
+      "category": "artifact_provenance",
+      "inputs": {"record": {"artifact_id": "artifact-1", "owner_id": "owner-1", "source_id": "source-1", "operation_id": "operation-1", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
+      "expected": {"required_fields": ["artifact_id", "owner_id", "source_id", "operation_id", "sha256"]}
+    }
+  ]
+}
+
