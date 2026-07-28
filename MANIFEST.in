@@ -4,6 +4,7 @@ include requirements.lock
 recursive-include configs *.yaml *.json
 recursive-include docs *.md
 recursive-include schemas *.json
+recursive-include benchmarks/evaluation *.json *.md *.py *.sv
 recursive-include scripts *.py *.ps1 *.sh
 prune outputs
 prune data
