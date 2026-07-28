@@ -1,0 +1,83 @@
+{
+  "contains_live_secrets": false,
+  "files": [
+    {
+      "file": "login.png",
+      "sha256": "e08028ee59e5b32448ca350bb0a3c1c3aa01fa2d4f00ceb2377a59d97757ddd6",
+      "size_bytes": 99965,
+      "synthetic_data": true
+    },
+    {
+      "file": "first_activation.png",
+      "sha256": "46b54f99d0b3ffc474e59cd3e7c7c619312024b442b95a175dd18efaf987ecd1",
+      "size_bytes": 120273,
+      "synthetic_data": true
+    },
+    {
+      "file": "chat.png",
+      "sha256": "211effeb9b69278e3e524252207e58312056eebff4dac36ee05f5388518457f5",
+      "size_bytes": 115292,
+      "synthetic_data": true
+    },
+    {
+      "file": "chat_response_details.png",
+      "sha256": "4f1e63068eeca3aeebc57beba17b2b404c25e7f3571e7ecfcb17f2dc6b954387",
+      "size_bytes": 138620,
+      "synthetic_data": true
+    },
+    {
+      "file": "conversation_history.png",
+      "sha256": "4f1e63068eeca3aeebc57beba17b2b404c25e7f3571e7ecfcb17f2dc6b954387",
+      "size_bytes": 138620,
+      "synthetic_data": true
+    },
+    {
+      "file": "plus_agent.png",
+      "sha256": "e2e5867f586377b31a6de45867f7f0e076312a3c04ce2b997a326dde2424ae9c",
+      "size_bytes": 117580,
+      "synthetic_data": true
+    },
+    {
+      "file": "agent_diff_and_tests.png",
+      "sha256": "794c33d0549420db8ff735bd9b4d5aadcf23ac00d27c8bb5be46bd84a75fd926",
+      "size_bytes": 168700,
+      "synthetic_data": true
+    },
+    {
+      "file": "deep_research.png",
+      "sha256": "7ef387946862d6d24c577daeffd7b5c218a22e1e406d983c837b2dccd0d21b7b",
+      "size_bytes": 265665,
+      "synthetic_data": true
+    },
+    {
+      "file": "operator_dashboard.png",
+      "sha256": "deea332e70dc10db0bcecbaf4ccdd4289c9e3f31ca5c6c1e80d28c5b3b7da051",
+      "size_bytes": 121937,
+      "synthetic_data": true
+    },
+    {
+      "file": "user_management.png",
+      "sha256": "913f71ed882298833781518d35fc3be9c58a7d5cae12178bf8839973d6c8e2d5",
+      "size_bytes": 82084,
+      "synthetic_data": true
+    },
+    {
+      "file": "model_and_gpu_status.png",
+      "sha256": "03fca95fe9bd30ea6f44fa9eef480bc430963d244a63bd392c5fdd13e8891068",
+      "size_bytes": 108915,
+      "synthetic_data": true
+    },
+    {
+      "file": "remote_access_status.png",
+      "sha256": "e4cdd2b435313ef55fcdd93e6a787f0872b83db72015dbbcb4ad5a1389c1b9e8",
+      "size_bytes": 101596,
+      "synthetic_data": true
+    }
+  ],
+  "schema_version": 1,
+  "viewport": {
+    "height": 1000,
+    "scale": 1,
+    "width": 1440
+  }
+}

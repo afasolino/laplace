@@ -1,5 +1,168 @@
-# User guide
+# Laplace user guide
 
-Use `laplace --doctor` for local runtime status, `laplace --init .` to create a project, `laplace --ingest MyWorks` for incremental shared-library ingestion, and `laplace --start` to open the project chat at `http://127.0.0.1:8000/chat`. Create a conversation, select collections and a mode, ask a question, and click numbered citations to inspect exact evidence. Ask/Search/Write remain scriptable as `laplace --ask ...` and `laplace --ask ... --json`; Research keeps provider metadata separate from local evidence. `laplace --stop` terminates only its recorded PID. Every grounded packet contains filename, page, section, and chunk ID; zero evidence is never labelled grounded. The reproducible low-level path remains `research-workspace probe`, `research-workspace ingest path.pdf --class external_literature`, and `POST /search`.
+Laplace is a private research and engineering workspace. Its normal browser login uses a registered email, password, and opaque server-side session; it does not ask you to paste an API token. Model inference and indexed-document processing remain on the configured local machine.
 
-When model citations fail validation, Laplace preserves the original draft as a collapsed secondary message and emits a separate concise grounded fallback. Use `--show-rejected-draft` to print it in the terminal; `--json` includes both revisions and their lifecycle states. The model sees compact `[E1]` evidence markers, while the UI and evidence endpoint expose full provenance.
+The screenshots below contain synthetic fixture data. They contain no live credentials, activation codes, private paths, or unrelated user information.
+
+## 1. Open Laplace
+
+For local use, open `http://127.0.0.1:8765`. Through an SSH tunnel, open the same URL on your client. For production HTTPS, use the exact URL supplied by the administrator.
+
+![Email-and-password login dialog](user_guide/assets/login.png)
+
+The page shows a red persistent warning if an administrator explicitly enabled insecure non-loopback HTTP. Do not enter a password in that mode unless you understand the network risk.
+
+## 2. First activation for afasolino@unisa.it
+
+The first account is registered as `afasolino@unisa.it`, with Operator capability, the `admin` role, and Quality as its default lane. The password is not predefined.
+
+1. Ask the local administrator to run the bootstrap command in [ADMIN_GUIDE.md](ADMIN_GUIDE.md).
+2. Keep the terminal open: the one-time activation code is printed there once.
+3. Select **First activation** in the login dialog.
+4. Enter `afasolino@unisa.it`, the one-time code, and a new password.
+5. Select **Activate account**.
+
+![First activation and password creation](user_guide/assets/first_activation.png)
+
+The code stops working after successful activation or after the administrator bootstraps/resets the account again. Laplace accepts password-manager values longer than 64 characters without truncation.
+
+## 3. Sign in and sign out
+
+Enter the registered email and password, then select **Sign in**. Email matching trims surrounding whitespace and ignores case. Authentication failures are deliberately generic.
+
+Use **Sign out** for the current browser session. Open the account panel and select **Sign out all sessions** to revoke every active session for your account. An expired or revoked session returns to the login dialog while keeping the unsent composer text on screen.
+
+## 4. Change the password
+
+Open the account button in the top-right corner, expand **Change password**, enter the current and new passwords, then submit. A successful change rotates the session identifier and revokes prior sessions. A normal change always requires the current password.
+
+## 5. Start a chat
+
+Select **Chat**, enter a question, and press **Enter** or select **Send**. Use **Shift+Enter** for a newline. Chat calls are tool-free: the model receives no dormant repository, file, shell, or mutation tool schemas.
+
+![Readable chat response with Markdown and code](user_guide/assets/chat.png)
+
+Assistant Markdown is treated as untrusted. Laplace escapes embedded HTML, rejects unsafe link schemes, and constructs the rendered view with DOM text nodes. Copy buttons are available for the response and each fenced code block.
+
+## 6. Select Quality, Standard, or Economy
+
+- **Quality** prioritizes the strongest local route and reserves capacity so it is not starved.
+- **Standard** balances quality and response time.
+- **Economy** uses an eligible faster route. The CodeV specialist is eligible only for RTL/SystemVerilog work; non-RTL work never routes to CodeV.
+
+Choose **SystemVerilog** in the adjacent Question domain selector when that
+specialist routing is intended. The default General domain keeps Economy on the
+main route with economy limits.
+
+Capability and quality are independent. A chat-only account may still select any permitted quality lane.
+
+## 7. Understand queue and response details
+
+During a request, the status progresses through queued, running, complete, cancelled, or failed. **Stop** cancels the browser request; deterministic failure messages explain whether the draft can be retried.
+
+Expand **Response details** to inspect the request and trace IDs, requested/effective lane, model display name, queue wait and position, context/output limits, finish reason, token usage when supplied, and any single bounded escalation. Raw JSON exists only in a separate Operator-only debug disclosure.
+
+![Collapsed evidence expanded below a readable response](user_guide/assets/chat_response_details.png)
+
+## 8. Manage conversations
+
+Conversation history is stored server-side per user. Use **+** for a new conversation. Open the actions menu beside an item to rename, archive/reopen, or delete it. A draft is periodically saved to the active conversation; another user cannot list or open it.
+
+![Owner-isolated conversation history](user_guide/assets/conversation_history.png)
+
+Use **Retry** after a transient failure. Regeneration sends the preserved user request through the selected lane again and records a new request identity.
+
+## 9. Use the Plus repository agent
+
+Only Plus capability exposes the Agent workspace. Select a repository from the server-populated list—there is no filesystem-path field—choose a lane, enter a bounded task, and select **Start isolated agent**.
+
+![Plus repository selector and bounded task form](user_guide/assets/plus_agent.png)
+
+The server binds the session to the authenticated user, logical repository ID, canonical server-owned repository root, base revision, isolated worktree, and tool policy before the first model call. Network access is denied. Absolute paths, traversal, links, mounts, nested repositories, submodules, sibling worktrees, and changed grants fail closed.
+
+## 10. Read diffs and verification results
+
+The result separates the plan/status, changed-file summary, unified diff, and test/verification outcomes. There is no browser shell.
+
+![Readable agent diff and passing test results](user_guide/assets/agent_diff_and_tests.png)
+
+Use **Cancel** to block further work and release a clean Laplace-owned worktree. A dirty worktree is preserved for inspection rather than silently discarded.
+
+## 11. Start and cancel Deep Research
+
+Operator-capable accounts can select **Research**, enter a question and scope, choose a research mode, source policy, and available backend, then create a job. Laplace admits at most two research jobs globally and one per user; the interface shows a queue reason and position.
+
+Select **Run admitted job** when capacity is available. Select **Cancel** for a queued or running admission record. Cancellation does not authorize termination of unrelated work.
+
+![Deep Research stage timeline, sources, evidence, and report](user_guide/assets/deep_research.png)
+
+## 12. Read citations and evidence
+
+The research view separates stage progress, source title/domain/retrieval time/type, claim and evidence information, conflicts, and the cited report. Local source storage paths are not shown. Indexed-document answers retain file, page, section when available, and chunk identifiers in their evidence records.
+
+Conflicting sources remain visible. Exploratory research is not promoted into governed knowledge or a measured run automatically.
+
+## 13. Download artifacts
+
+Select **Export report** after research completes. Laplace registers an internal ULID, owner pseudonym, content hash, source fingerprint, model route, lineage, visibility, and authorization policy. The browser receives a clean filename and clean report content, not internal provenance.
+
+Every read/export verifies the stored SHA-256. A mismatch is rejected as `artifact_integrity_failure`. Cross-user and cross-repository reads return a not-found response.
+
+## 14. Inspect available functionality
+
+**Help** lists only functions available to the authenticated capability. **System** shows the application/Git/API versions, role, capability, sanitized lane display names, context/output limits, guardrails, deployment mode, and documentation names.
+
+![Sanitized system and remote-access mode](user_guide/assets/remote_access_status.png)
+
+Basic is chat-only. Plus adds repository-bound agents. Operator adds administrative users, repositories, queues, approvals, model/profile lifecycle, GPU status, audit, provenance, health, readiness, and session controls.
+
+![Operator dashboard with deployment, queue, and provenance status](user_guide/assets/operator_dashboard.png)
+
+![Operator user-management table with capability and session state](user_guide/assets/user_management.png)
+
+![Local model and GPU status without private model paths](user_guide/assets/model_and_gpu_status.png)
+
+## 15. Interpret errors
+
+- **Session expired/revoked:** sign in again; the visible unsent draft is preserved.
+- **Repository not authorized:** ask an administrator to grant the logical repository ID.
+- **Queued/capacity guardrail:** wait for the displayed admission state to change.
+- **Model unavailable:** keep the draft and ask an Operator to inspect readiness.
+- **Validation failed:** inspect the friendly reason; escalation is bounded to one Quality retry.
+- **Artifact integrity failure:** do not use the file; ask an Operator to inspect provenance events.
+- **Trace ID shown:** include only that ID—not a password or document content—in a support request.
+
+See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for operator diagnostics.
+
+## 16. Privacy, isolation, and provenance
+
+Laplace distinguishes your own work from external literature in source metadata. Browser storage contains no password, bearer token, session ID, or refresh token. The `laplace_session` cookie is HttpOnly, so JavaScript cannot read it.
+
+Conversation, research, repository, worktree, cache, log, prompt, and artifact access is owner-scoped. Normal users cannot enumerate internal artifact IDs, owner pseudonyms, or other users' resources. Only an explicit Operator provenance export includes internal lineage.
+
+## 17. Remote access through SSH or HTTPS
+
+The fastest safe remote method is:
+
+```bash
+ssh -L 8765:127.0.0.1:8765 <server>
+```
+
+Then open `http://127.0.0.1:8765` locally. For multi-user production access, use the documented Caddy or Nginx TLS reverse proxy while Uvicorn and both model ports remain bound to loopback. See [REMOTE_ACCESS.md](REMOTE_ACCESS.md).
+
+## 18. Safe shutdown
+
+Stop the Operator service first, then invoke the repository-owned model lifecycle stop command or systemd unit. Laplace validates recorded ownership before signalling a model PID and never force-kills a process after a graceful timeout.
+
+```bash
+sudo systemctl stop laplace-operator
+sudo systemctl stop laplace-model-servers
+```
+
+For a manual session, press `Ctrl+C` in the Operator terminal, then use the documented owned-profile stop command. Do not use `pkill`, broad GPU process matching, or a command that closes the shell/tmux session.
+
+Screenshot regeneration:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/capture_user_guide_screenshots.py
+```

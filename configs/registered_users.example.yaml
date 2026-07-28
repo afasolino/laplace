@@ -1,0 +1,14 @@
+schema_version: 1
+users:
+  - email: afasolino@unisa.it
+    user_id: usr_afasolino
+    display_name: Alfonso Fasolino
+    enabled: true
+    capability_tier: operator
+    role: admin
+    default_lane: quality
+    authorized_repo_ids: []
+    # Non-secret placeholder. Generate the external runtime registry only with
+    # `python -m research_workspace.user_admin bootstrap`; do not copy this value.
+    password_hash: "BOOTSTRAP_REQUIRED"
+    must_change_password: true

@@ -95,11 +95,14 @@ class RepositoryAuthorizationStore:
                 );
                 """
             )
+        os.chmod(self.path, 0o600)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=15)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA busy_timeout = 15000")
         return connection
 
     def register(self, repo_id: str, root: Path) -> RegisteredRepository:
@@ -264,6 +267,58 @@ class RepositoryAuthorizationStore:
                 },
             )
         return current
+
+    def authorized_for_user(self, user_id: str) -> list[dict[str, object]]:
+        """Return only active logical grants; never infer authorization from a path."""
+
+        user = _identifier(user_id, label="user_id")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT g.repo_id, g.base_revision, g.revision, g.updated_at_utc
+                FROM repository_grants AS g
+                JOIN repositories AS r ON r.repo_id = g.repo_id
+                WHERE g.user_id = ? AND g.active = 1
+                ORDER BY g.repo_id
+                """,
+                (user,),
+            ).fetchall()
+        return [
+            {
+                "repo_id": str(row["repo_id"]),
+                "logical_name": str(row["repo_id"]),
+                "description": "Operator-authorized local repository",
+                "base_revision": str(row["base_revision"]),
+                "grant_revision": int(row["revision"]),
+                "updated_at_utc": str(row["updated_at_utc"]),
+            }
+            for row in rows
+        ]
+
+    def operator_inventory(self) -> list[dict[str, object]]:
+        """Return the administrative repository inventory, including canonical roots."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT r.repo_id, r.canonical_root, r.registered_at_utc,
+                       COUNT(CASE WHEN g.active = 1 THEN 1 END) AS active_grants
+                FROM repositories AS r
+                LEFT JOIN repository_grants AS g ON g.repo_id = r.repo_id
+                GROUP BY r.repo_id, r.canonical_root, r.registered_at_utc
+                ORDER BY r.repo_id
+                """
+            ).fetchall()
+        return [
+            {
+                "repo_id": str(row["repo_id"]),
+                "logical_name": str(row["repo_id"]),
+                "canonical_root": str(row["canonical_root"]),
+                "registered_at_utc": str(row["registered_at_utc"]),
+                "active_grants": int(row["active_grants"]),
+            }
+            for row in rows
+        ]
 
 
 def _submodule_paths(root: Path) -> tuple[PurePosixPath, ...]:

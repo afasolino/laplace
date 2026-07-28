@@ -5,18 +5,36 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
+import logging
+import os
+import re
 import secrets
+import sqlite3
+import subprocess
+import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import AsyncIterator, Literal, Mapping
+from typing import AsyncIterator, Literal, Mapping, TypeAlias
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
+from starlette.middleware.cors import CORSMiddleware
 
+from .artifact_registry import ArtifactRegistry, ArtifactRegistryError
+from .auth_registry import AuthRegistryError
+from .auth_sessions import (
+    AuthSessionError,
+    NewSession,
+    RegisteredEmailAuth,
+)
+from .conversations import ConversationError, ConversationStore
 from .operator_service import (
     OperatorService,
     OperatorServiceError,
@@ -24,6 +42,7 @@ from .operator_service import (
 )
 from .agent_sandbox import AgentSandboxError, AgentToolPolicy
 from .research_models import ResearchJobRequest
+from .research_admission import ResearchAdmissionError, ResearchAdmissionStore
 from .research_plane import DeepResearchService, ResearchPlaneError
 from .research_web_adapters import supported_web_adapter_names
 from .repository_authorization import RepositoryAuthorizationError
@@ -33,6 +52,9 @@ from .serving_profile_runtime import (
     ServingRuntimeError,
 )
 from .user_capabilities import CapabilityTier, UserCapabilityError
+
+JsonObject: TypeAlias = dict[str, object]
+LOGGER = logging.getLogger("laplace.operator")
 
 
 class RunPrepareRequest(BaseModel):
@@ -91,7 +113,46 @@ class TierChatRequest(BaseModel):
     session_id: str | None = Field(
         default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
     )
+    conversation_id: str | None = Field(
+        default=None, pattern=r"^conv-[a-f0-9]{32}$"
+    )
     messages: list[TierChatMessage] = Field(min_length=1, max_length=200)
+
+
+class LoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=1_024)
+
+
+class ActivationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    email: str = Field(min_length=3, max_length=320)
+    activation_code: str = Field(min_length=1, max_length=1_024)
+    new_password: str = Field(min_length=12, max_length=1_024)
+
+
+class PasswordChangeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    current_password: str = Field(min_length=1, max_length=1_024)
+    new_password: str = Field(min_length=12, max_length=1_024)
+
+
+class ConversationCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    title: str = Field(default="New conversation", max_length=160)
+
+
+class ConversationUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    title: str | None = Field(default=None, max_length=160)
+    archived: bool | None = None
+    draft: str | None = Field(default=None, max_length=100_000)
 
 
 class AgentSessionRequest(BaseModel):
@@ -161,14 +222,17 @@ class AuthPrincipal:
     user_id: str
     capability_tier: CapabilityTier
     credential_sha256: str
+    email: str | None = None
+    display_name: str | None = None
+    default_lane: str = "standard"
+    auth_method: Literal["bearer", "session"] = "bearer"
+    session_identifier: str | None = None
 
 
 class OperatorAuth:
     """Bearer-role mapping with in-memory, credential-bound CSRF nonces."""
 
     def __init__(self, token_roles: Mapping[str, str | AuthCredential]) -> None:
-        if not token_roles:
-            raise ValueError("at least one Operator Plane token is required")
         allowed = {"read", "operate", "approve", "admin"}
         credentials: dict[str, AuthCredential] = {}
         for token, value in token_roles.items():
@@ -229,12 +293,19 @@ class OperatorAuth:
 class OperatorApiSettings:
     bind_host: str = "127.0.0.1"
     port: int = 8765
+    deployment_mode: Literal["local", "ssh-tunnel", "reverse-proxy"] = "local"
     allowed_origins: tuple[str, ...] = (
         "http://127.0.0.1:8765",
         "http://localhost:8765",
     )
+    allowed_hosts: tuple[str, ...] = ("127.0.0.1", "localhost")
+    trusted_proxies: tuple[str, ...] = ("127.0.0.1", "::1")
+    external_url: str | None = None
+    allow_insecure_lan_http: bool = False
+    bearer_api_enabled: bool = False
     pwa_enabled: bool = True
     fixture_mode: bool = False
+    maximum_request_bytes: int = 2_000_000
 
     def __post_init__(self) -> None:
         if not 1 <= self.port <= 65_535:
@@ -246,6 +317,40 @@ class OperatorApiSettings:
             for origin in self.allowed_origins
         ):
             raise ValueError("Operator Plane origins must be explicit HTTP origins")
+        if not self.allowed_hosts or any("*" in host or "/" in host for host in self.allowed_hosts):
+            raise ValueError("Operator Plane hosts must be explicit")
+        loopback = self.bind_host in {"127.0.0.1", "localhost", "::1"}
+        if not loopback and not self.allow_insecure_lan_http:
+            raise ValueError(
+                "non-loopback direct binding requires --allow-insecure-lan-http"
+            )
+        if self.deployment_mode in {"local", "ssh-tunnel", "reverse-proxy"} and not loopback:
+            if not self.allow_insecure_lan_http:
+                raise ValueError("production and tunnel modes require loopback binding")
+        if self.deployment_mode == "reverse-proxy":
+            if self.external_url is None:
+                raise ValueError("reverse-proxy mode requires an external URL")
+            external = urlsplit(self.external_url)
+            if external.scheme != "https" or not external.hostname:
+                raise ValueError("reverse-proxy external URL must use HTTPS")
+            if self.external_url.rstrip("/") not in {
+                origin.rstrip("/") for origin in self.allowed_origins
+            }:
+                raise ValueError("external URL must be an explicit allowed origin")
+        if self.maximum_request_bytes < 1_024:
+            raise ValueError("maximum request body is too small")
+
+    @property
+    def secure_cookie(self) -> bool:
+        return self.deployment_mode == "reverse-proxy"
+
+    @property
+    def development_http(self) -> bool:
+        return self.deployment_mode in {"local", "ssh-tunnel"} and self.bind_host in {
+            "127.0.0.1",
+            "localhost",
+            "::1",
+        }
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -261,6 +366,10 @@ def create_operator_app(
     run_executor: RunExecutor | None = None,
     tiered: TieredServingService | None = None,
     serving_profile_operator: ServingProfileOperator | None = None,
+    registered_auth: RegisteredEmailAuth | None = None,
+    conversation_store: ConversationStore | None = None,
+    artifact_registry: ArtifactRegistry | None = None,
+    research_admission: ResearchAdmissionStore | None = None,
 ) -> FastAPI:
     """Create the localhost GUI/API application without changing execution semantics."""
 
@@ -269,10 +378,19 @@ def create_operator_app(
     web_root = Path(__file__).with_name("operator_web")
     app = FastAPI(
         title="Laplace Research and Operator Plane",
-        version="1.0",
+        version="1.1",
         docs_url=None,
         redoc_url=None,
         openapi_url="/api/v1/openapi.json",
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(settings.allowed_origins),
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "X-CSRF-Token", "Authorization", "X-Request-ID"],
+        expose_headers=["X-Trace-Id", "X-Content-SHA256"],
+        max_age=600,
     )
 
     @app.middleware("http")
@@ -280,23 +398,146 @@ def create_operator_app(
         request: Request,
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
-        response = await call_next(request)
+        trace_id = request.headers.get("x-request-id") or f"trace-{uuid.uuid4().hex}"
+        request.state.trace_id = trace_id
+        started = time.monotonic()
+        host = urlsplit(f"//{request.headers.get('host', '')}").hostname or ""
+        response: Response | None = None
+        if host not in settings.allowed_hosts:
+            response = JSONResponse(
+                status_code=400,
+                content={"status": "ERROR", "failure_category": "host_not_allowed"},
+                headers={"X-Trace-Id": trace_id},
+            )
+        forwarded = any(
+            name in request.headers
+            for name in ("x-forwarded-for", "x-forwarded-host", "x-forwarded-proto")
+        )
+        transport_client = request.client.host if request.client is not None else ""
+        if (
+            response is None
+            and forwarded
+            and transport_client not in settings.trusted_proxies
+        ):
+            response = JSONResponse(
+                status_code=400,
+                content={
+                    "status": "ERROR",
+                    "failure_category": "untrusted_forwarded_headers",
+                },
+                headers={"X-Trace-Id": trace_id},
+            )
+        request.state.client_ip = transport_client
+        if response is None and forwarded:
+            forwarded_for = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+            try:
+                request.state.client_ip = str(ipaddress.ip_address(forwarded_for))
+            except ValueError:
+                response = JSONResponse(
+                    status_code=400,
+                    content={
+                        "status": "ERROR",
+                        "failure_category": "invalid_forwarded_client",
+                    },
+                    headers={"X-Trace-Id": trace_id},
+                )
+        if (
+            response is None
+            and settings.deployment_mode == "reverse-proxy"
+            and request.url.path in {"/api/v1/auth/login", "/api/v1/auth/activate"}
+        ):
+            forwarded_host = urlsplit(
+                f"//{request.headers.get('x-forwarded-host', '')}"
+            ).hostname
+            if (
+                request.headers.get("x-forwarded-proto") != "https"
+                or forwarded_host not in settings.allowed_hosts
+            ):
+                response = JSONResponse(
+                    status_code=400,
+                    content={
+                        "status": "ERROR",
+                        "failure_category": "trusted_https_proxy_required",
+                    },
+                    headers={"X-Trace-Id": trace_id},
+                )
+        length = request.headers.get("content-length")
+        if response is None and length is not None:
+            try:
+                too_large = int(length) > settings.maximum_request_bytes
+            except ValueError:
+                too_large = True
+            if too_large:
+                response = JSONResponse(
+                    status_code=413,
+                    content={
+                        "status": "ERROR",
+                        "failure_category": "request_body_too_large",
+                    },
+                    headers={"X-Trace-Id": trace_id},
+                )
+        if response is None:
+            response = await call_next(request)
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; script-src 'self'; style-src 'self'; "
             "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
-            "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+            "base-uri 'none'; frame-ancestors 'none'; form-action 'self'; "
+            "require-trusted-types-for 'script'; trusted-types laplace-markdown"
         )
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         response.headers["Cache-Control"] = (
-            "no-store" if request.url.path.startswith("/api/") else "no-cache"
+            "no-store"
+            if request.url.path.startswith(("/api/", "/auth/"))
+            else "no-cache, no-store, must-revalidate"
+        )
+        response.headers["X-Trace-Id"] = trace_id
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+        if settings.secure_cookie:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000"
+        LOGGER.info(
+            json.dumps(
+                {
+                    "event": "HTTP_REQUEST",
+                    "trace_id": trace_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status_code": response.status_code,
+                    "duration_ms": round((time.monotonic() - started) * 1000, 3),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         )
         return response
 
     async def principal(
+        request: Request,
         authorization: str | None = Header(default=None),
     ) -> AuthPrincipal:
+        cookie = request.cookies.get("laplace_session")
+        if cookie is not None and registered_auth is not None:
+            try:
+                record = registered_auth.sessions.resolve(
+                    cookie, registered_auth.registry
+                )
+            except AuthSessionError as exc:
+                raise HTTPException(status_code=401, detail=exc.category) from exc
+            return AuthPrincipal(
+                role=record.role,
+                user_id=record.user_id,
+                capability_tier=record.capability_tier,
+                credential_sha256=record.session_hash,
+                email=record.email,
+                display_name=record.display_name,
+                default_lane=record.default_lane,
+                auth_method="session",
+                session_identifier=cookie,
+            )
+        if not settings.bearer_api_enabled:
+            raise HTTPException(status_code=401, detail="authentication_required")
         return auth.authenticate(authorization)
 
     async def operator_principal(
@@ -314,7 +555,7 @@ def create_operator_app(
         origin = request.headers.get("origin")
         if origin is not None and origin not in settings.allowed_origins:
             raise HTTPException(status_code=403, detail="origin_not_allowed")
-        auth.validate_csrf(authenticated, x_csrf_token)
+        _validate_csrf(authenticated, x_csrf_token)
         return authenticated
 
     async def tier_mutation_principal(
@@ -325,8 +566,36 @@ def create_operator_app(
         origin = request.headers.get("origin")
         if origin is not None and origin not in settings.allowed_origins:
             raise HTTPException(status_code=403, detail="origin_not_allowed")
-        auth.validate_csrf(authenticated, x_csrf_token)
+        _validate_csrf(authenticated, x_csrf_token)
         return authenticated
+
+    async def research_mutation_principal(
+        request: Request,
+        authenticated: AuthPrincipal = Depends(operator_principal),
+        x_csrf_token: str | None = Header(default=None),
+    ) -> AuthPrincipal:
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in settings.allowed_origins:
+            raise HTTPException(status_code=403, detail="origin_not_allowed")
+        _validate_csrf(authenticated, x_csrf_token)
+        return authenticated
+
+    def _validate_csrf(
+        authenticated: AuthPrincipal,
+        supplied: str | None,
+    ) -> None:
+        if authenticated.auth_method == "session":
+            if registered_auth is None or authenticated.session_identifier is None:
+                raise HTTPException(status_code=401, detail="authentication_required")
+            try:
+                registered_auth.sessions.validate_csrf(
+                    authenticated.session_identifier,
+                    supplied,
+                )
+            except AuthSessionError as exc:
+                raise HTTPException(status_code=403, detail=exc.category) from exc
+        else:
+            auth.validate_csrf(authenticated, supplied)
 
     @app.exception_handler(OperatorServiceError)
     async def operator_error(
@@ -364,7 +633,7 @@ def create_operator_app(
     @app.exception_handler(AgentSandboxError)
     @app.exception_handler(ServingRuntimeError)
     async def tier_error(
-        _request: Request,
+        request: Request,
         exc: (
             AgentSandboxError
             | ServiceTierError
@@ -375,6 +644,21 @@ def create_operator_app(
     ) -> JSONResponse:
         category = getattr(exc, "category", str(exc))
         evidence = getattr(exc, "evidence", {})
+        LOGGER.warning(
+            json.dumps(
+                {
+                    "event": "POLICY_REQUEST_REJECTED",
+                    "trace_id": str(
+                        getattr(request.state, "trace_id", "unavailable")
+                    ),
+                    "method": request.method,
+                    "path": request.url.path,
+                    "failure_category": category,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
         return JSONResponse(
             status_code=403,
             content={
@@ -383,6 +667,78 @@ def create_operator_app(
                 "evidence": evidence,
             },
         )
+
+    @app.exception_handler(ConversationError)
+    @app.exception_handler(ArtifactRegistryError)
+    @app.exception_handler(ResearchAdmissionError)
+    async def isolated_resource_error(
+        _request: Request,
+        exc: ConversationError | ArtifactRegistryError | ResearchAdmissionError,
+    ) -> JSONResponse:
+        category = exc.category
+        status_code = 404 if category.endswith("not_found") else 409
+        if category in {
+            "artifact_integrity_failure",
+            "capacity_guardrail",
+            "research_job_cancelled",
+        }:
+            status_code = 409
+        return JSONResponse(
+            status_code=status_code,
+            content={"status": "ERROR", "failure_category": category},
+        )
+
+    @app.exception_handler(Exception)
+    async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+        LOGGER.error(
+            json.dumps(
+                {
+                    "event": "UNEXPECTED_ERROR",
+                    "trace_id": str(getattr(request.state, "trace_id", "unavailable")),
+                    "error_type": type(exc).__name__,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "ERROR",
+                "failure_category": "internal_error",
+                "trace_id": str(getattr(request.state, "trace_id", "unavailable")),
+            },
+        )
+
+    def _origin_allowed(request: Request) -> None:
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in settings.allowed_origins:
+            raise HTTPException(status_code=403, detail="origin_not_allowed")
+
+    def _set_session_cookie(response: Response, session_value: str) -> None:
+        response.set_cookie(
+            key="laplace_session",
+            value=session_value,
+            max_age=None,
+            httponly=True,
+            secure=settings.secure_cookie,
+            samesite="strict",
+            path="/",
+        )
+
+    def _session_response(session_value: NewSession) -> JsonObject:
+        user = registered_auth.registry.require_user(session_value.record.user_id) if registered_auth else None
+        return {
+            "status": "AUTHENTICATED",
+            "account": session_value.record.public_account(),
+            "role": session_value.record.role,
+            "capability_tier": session_value.record.capability_tier.value,
+            "default_lane": session_value.record.default_lane,
+            "must_change_password": user.must_change_password if user is not None else False,
+            "csrf_token": session_value.csrf_token,
+            "development_http": settings.development_http,
+            "deployment_mode": settings.deployment_mode,
+        }
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
@@ -393,6 +749,7 @@ def create_operator_app(
         allowed = {
             "app.css": "text/css",
             "app.js": "text/javascript",
+            "favicon.svg": "image/svg+xml",
         }
         if asset_name not in allowed:
             raise HTTPException(status_code=404)
@@ -427,7 +784,309 @@ def create_operator_app(
             "local_only": settings.bind_host in {"127.0.0.1", "localhost", "::1"},
             "api_version": "v1",
             "fixture_mode": settings.fixture_mode,
+            "development_http": settings.development_http,
+            "deployment_mode": settings.deployment_mode,
         }
+
+    @app.get("/api/v1/readiness")
+    async def readiness() -> JSONResponse:
+        reasons: list[str] = []
+        if registered_auth is None:
+            reasons.append("registered_email_auth_unavailable")
+        else:
+            try:
+                registered_auth.registry.snapshot
+                registered_auth.sessions.active_count()
+            except (AuthRegistryError, AuthSessionError, OSError, sqlite3.Error) as exc:
+                reasons.append(f"authentication_state:{type(exc).__name__}")
+        if tiered is None:
+            reasons.append("lane_routing_unavailable")
+        elif not settings.fixture_mode:
+            unique_routes = {
+                (route.endpoint, route.model_id): route
+                for route in tiered.lane_policy.routes.values()
+            }
+
+            async def endpoint_failure(
+                endpoint: str,
+                model_id: str,
+                lane: str,
+            ) -> str | None:
+                parsed = urlsplit(endpoint)
+                if (
+                    parsed.scheme != "http"
+                    or parsed.hostname not in {"127.0.0.1", "localhost"}
+                ):
+                    return f"model_endpoint_non_local:{lane}"
+                writer: asyncio.StreamWriter | None = None
+                try:
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection(
+                            parsed.hostname,
+                            parsed.port or 80,
+                        ),
+                        timeout=2,
+                    )
+                    assert writer is not None
+                    path = parsed.path.rstrip("/") + "/models"
+                    writer.write(
+                        (
+                            f"GET {path} HTTP/1.1\r\n"
+                            f"Host: {parsed.hostname}:{parsed.port or 80}\r\n"
+                            "Accept: application/json\r\n"
+                            "Connection: close\r\n\r\n"
+                        ).encode("ascii")
+                    )
+                    await asyncio.wait_for(writer.drain(), timeout=2)
+                    header = await asyncio.wait_for(
+                        reader.readuntil(b"\r\n\r\n"),
+                        timeout=2,
+                    )
+                    status_line = header.split(b"\r\n", 1)[0].split()
+                    if len(status_line) < 2 or status_line[1] != b"200":
+                        return f"model_endpoint_unavailable:{lane}"
+                    length_match = re.search(
+                        rb"(?im)^content-length:\s*(\d+)\s*$",
+                        header,
+                    )
+                    if length_match is not None:
+                        length = int(length_match.group(1))
+                        if length > 2_000_000:
+                            return f"model_endpoint_invalid_response:{lane}"
+                        body = await asyncio.wait_for(
+                            reader.readexactly(length),
+                            timeout=2,
+                        )
+                    else:
+                        body = await asyncio.wait_for(
+                            reader.read(2_000_001),
+                            timeout=2,
+                        )
+                        if len(body) > 2_000_000:
+                            return f"model_endpoint_invalid_response:{lane}"
+                    raw: object = json.loads(body)
+                except (OSError, asyncio.TimeoutError, json.JSONDecodeError):
+                    return f"model_endpoint_unavailable:{lane}"
+                finally:
+                    if writer is not None:
+                        writer.close()
+                        try:
+                            await writer.wait_closed()
+                        except OSError:
+                            pass
+                data = raw.get("data") if isinstance(raw, dict) else None
+                served = {
+                    str(item["id"])
+                    for item in data
+                    if isinstance(item, dict) and isinstance(item.get("id"), str)
+                } if isinstance(data, list) else set()
+                return (
+                    None
+                    if model_id in served
+                    else f"model_identity_mismatch:{lane}"
+                )
+
+            endpoint_checks = await asyncio.gather(
+                *(
+                    endpoint_failure(
+                        route.endpoint,
+                        route.model_id,
+                        route.lane.value,
+                    )
+                    for route in unique_routes.values()
+                )
+            )
+            reasons.extend(
+                reason for reason in endpoint_checks if reason is not None
+            )
+        for current in (
+            operator.state_root,
+            operator.state_root / "auth",
+            operator.state_root / "conversations",
+        ):
+            try:
+                current.mkdir(parents=True, exist_ok=True)
+                if not os.access(current, os.W_OK):
+                    reasons.append(f"state_not_writable:{current.name}")
+            except OSError:
+                reasons.append(f"state_unavailable:{current.name}")
+        return JSONResponse(
+            status_code=200 if not reasons else 503,
+            content={
+                "status": "READY" if not reasons else "DEGRADED",
+                "reasons": reasons,
+                "model_endpoints_required": tiered is not None,
+            },
+        )
+
+    @app.get("/api/v1/version")
+    async def version() -> dict[str, object]:
+        return {
+            "status": "OK",
+            "application": "Laplace",
+            "application_version": "0.1.0",
+            "api_version": "v1",
+            "git_revision": _git_revision(operator.repository_root),
+            "deployment_mode": settings.deployment_mode,
+        }
+
+    @app.post("/api/v1/auth/login")
+    async def login(body: LoginRequest, request: Request, response: Response) -> JsonObject:
+        _origin_allowed(request)
+        if registered_auth is None:
+            raise HTTPException(status_code=503, detail="registered_email_auth_unavailable")
+        started = time.monotonic()
+        try:
+            session_value = registered_auth.login(
+                body.email,
+                body.password,
+                client_ip=str(getattr(request.state, "client_ip", "unknown")),
+                trace_id=str(request.state.trace_id),
+            )
+        except AuthSessionError as exc:
+            headers = (
+                {"Retry-After": str(max(1, int(exc.retry_after_seconds)))}
+                if exc.retry_after_seconds is not None
+                else None
+            )
+            raise HTTPException(
+                status_code=429 if exc.category == "authentication_rate_limited" else 401,
+                detail="authentication_failed",
+                headers=headers,
+            ) from exc
+        if time.monotonic() - started > 15:
+            registered_auth.sessions.revoke(session_value.identifier)
+            raise HTTPException(status_code=408, detail="authentication_timeout")
+        _set_session_cookie(response, session_value.identifier)
+        return _session_response(session_value)
+
+    @app.post("/api/v1/auth/activate")
+    async def activate(
+        body: ActivationRequest,
+        request: Request,
+        response: Response,
+    ) -> JsonObject:
+        _origin_allowed(request)
+        if registered_auth is None:
+            raise HTTPException(status_code=503, detail="registered_email_auth_unavailable")
+        try:
+            session_value = registered_auth.activate(
+                body.email,
+                body.activation_code,
+                body.new_password,
+                client_ip=str(getattr(request.state, "client_ip", "unknown")),
+                trace_id=str(request.state.trace_id),
+            )
+        except (AuthSessionError, AuthRegistryError) as exc:
+            raise HTTPException(status_code=401, detail="authentication_failed") from exc
+        _set_session_cookie(response, session_value.identifier)
+        return _session_response(session_value)
+
+    @app.get("/api/v1/auth/session")
+    async def browser_session(
+        request: Request,
+    ) -> JsonObject:
+        if registered_auth is None:
+            raise HTTPException(status_code=503, detail="registered_email_auth_unavailable")
+        identifier = request.cookies.get("laplace_session")
+        if identifier is None:
+            return {
+                "status": "SIGNED_OUT",
+                "development_http": settings.development_http,
+                "deployment_mode": settings.deployment_mode,
+            }
+        try:
+            record = registered_auth.sessions.resolve(
+                identifier,
+                registered_auth.registry,
+            )
+            csrf = registered_auth.sessions.rotate_csrf(identifier)
+            user = registered_auth.registry.require_user(record.user_id)
+        except (AuthSessionError, AuthRegistryError) as exc:
+            raise HTTPException(status_code=401, detail="authentication_required") from exc
+        return {
+            "status": "AUTHENTICATED",
+            "account": user.public(),
+            "role": user.role,
+            "capability_tier": user.capability_tier.value,
+            "default_lane": user.default_lane,
+            "csrf_token": csrf,
+            "development_http": settings.development_http,
+            "deployment_mode": settings.deployment_mode,
+        }
+
+    @app.post("/api/v1/auth/logout")
+    async def logout(
+        response: Response,
+        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
+    ) -> JsonObject:
+        if authenticated.auth_method == "session" and registered_auth is not None:
+            if authenticated.session_identifier is not None:
+                registered_auth.sessions.revoke(authenticated.session_identifier)
+            registered_auth.audit.append(
+                "LOGOUT",
+                outcome="SUCCESS",
+                user_id=authenticated.user_id,
+            )
+        response.delete_cookie(
+            "laplace_session",
+            path="/",
+            secure=settings.secure_cookie,
+            httponly=True,
+            samesite="strict",
+        )
+        return {"status": "SIGNED_OUT"}
+
+    @app.post("/api/v1/auth/logout-all")
+    async def logout_all(
+        response: Response,
+        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
+    ) -> JsonObject:
+        if registered_auth is None:
+            raise HTTPException(status_code=503, detail="registered_email_auth_unavailable")
+        count = registered_auth.sessions.revoke_user(authenticated.user_id)
+        registered_auth.audit.append(
+            "LOGOUT_ALL",
+            outcome="SUCCESS",
+            user_id=authenticated.user_id,
+        )
+        response.delete_cookie(
+            "laplace_session",
+            path="/",
+            secure=settings.secure_cookie,
+            httponly=True,
+            samesite="strict",
+        )
+        return {"status": "SESSIONS_REVOKED", "count": count}
+
+    @app.post("/api/v1/auth/change-password")
+    async def change_password(
+        body: PasswordChangeRequest,
+        response: Response,
+        request: Request,
+        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
+    ) -> JsonObject:
+        if (
+            registered_auth is None
+            or authenticated.auth_method != "session"
+            or authenticated.session_identifier is None
+        ):
+            raise HTTPException(status_code=401, detail="browser_session_required")
+        record = registered_auth.sessions.resolve(
+            authenticated.session_identifier,
+            registered_auth.registry,
+        )
+        try:
+            session_value = registered_auth.change_password(
+                record,
+                body.current_password,
+                body.new_password,
+                trace_id=str(request.state.trace_id),
+            )
+        except (AuthSessionError, AuthRegistryError) as exc:
+            raise HTTPException(status_code=401, detail="authentication_failed") from exc
+        _set_session_cookie(response, session_value.identifier)
+        return _session_response(session_value)
 
     @app.post("/api/v1/session")
     async def session(
@@ -437,13 +1096,24 @@ def create_operator_app(
         origin = request.headers.get("origin")
         if origin is not None and origin not in settings.allowed_origins:
             raise HTTPException(status_code=403, detail="origin_not_allowed")
+        if authenticated.auth_method == "session" and registered_auth is not None:
+            if authenticated.session_identifier is None:
+                raise HTTPException(status_code=401, detail="authentication_required")
+            csrf_token = registered_auth.sessions.rotate_csrf(
+                authenticated.session_identifier
+            )
+        else:
+            csrf_token = auth.issue_csrf(authenticated)
         return {
             "status": "AUTHENTICATED",
             "role": authenticated.role,
             "user_id": authenticated.user_id,
+            "email": authenticated.email,
+            "display_name": authenticated.display_name,
             "capability_tier": authenticated.capability_tier.value,
+            "default_lane": authenticated.default_lane,
             "model_lanes": [lane.value for lane in ModelLane],
-            "csrf_token": auth.issue_csrf(authenticated),
+            "csrf_token": csrf_token,
         }
 
     def sanitized_model_status(role: str) -> dict[str, object]:
@@ -479,7 +1149,7 @@ def create_operator_app(
                 "status": "UNAVAILABLE",
                 "error_type": type(exc).__name__,
             }
-        return {
+        result: dict[str, object] = {
             **summary,
             "model_servers": model_status,
             "research_jobs": (
@@ -487,8 +1157,42 @@ def create_operator_app(
                 if research is not None
                 else []
             ),
-            "warnings": [],
+            "warnings": (
+                ["Insecure non-loopback HTTP override is active"]
+                if settings.allow_insecure_lan_http
+                else []
+            ),
+            "deployment": {
+                "mode": settings.deployment_mode,
+                "development_http": settings.development_http,
+                "allowed_hosts": list(settings.allowed_hosts),
+                "allowed_origins": list(settings.allowed_origins),
+            },
         }
+        if tiered is not None:
+            result["queue_guardrails"] = tiered.scheduler.snapshot()
+            inventory = tiered.sandboxes.authorizations.operator_inventory()
+            result["repositories"] = (
+                inventory
+                if authenticated.role == "admin"
+                else [
+                    {key: value for key, value in item.items() if key != "canonical_root"}
+                    for item in inventory
+                ]
+            )
+        if registered_auth is not None:
+            result["users"] = [
+                {"user_id": user.user_id, **user.public()}
+                for user in registered_auth.registry.snapshot.users_by_id.values()
+            ]
+            result["registry_revision"] = registered_auth.registry.snapshot.revision
+            result["active_browser_sessions"] = registered_auth.sessions.active_count()
+        if artifact_registry is not None:
+            result["provenance"] = {
+                "status": "AVAILABLE",
+                "registered_artifacts": len(artifact_registry.compact_operator_export()),
+            }
+        return result
 
     @app.post("/api/v1/runs")
     async def prepare_run(
@@ -577,12 +1281,17 @@ def create_operator_app(
     @app.post("/api/v1/research/jobs")
     async def create_research(
         body: ResearchCreateRequest,
-        authenticated: AuthPrincipal = Depends(mutation_principal),
+        authenticated: AuthPrincipal = Depends(research_mutation_principal),
     ) -> dict[str, object]:
         if research is None:
             raise HTTPException(status_code=503, detail="research_plane_unavailable")
         result = research.create(body.job, job_id=body.research_job_id)
         job_id = str(result["research_job_id"])
+        if research_admission is not None:
+            result["admission"] = research_admission.create(
+                authenticated.user_id,
+                job_id,
+            )
         operator.record_action(
             actor_role=authenticated.role,
             action="RESEARCH_JOB_CREATED",
@@ -599,11 +1308,32 @@ def create_operator_app(
     @app.post("/api/v1/research/jobs/{job_id}/run")
     async def run_research(
         job_id: str,
-        authenticated: AuthPrincipal = Depends(mutation_principal),
+        authenticated: AuthPrincipal = Depends(research_mutation_principal),
     ) -> dict[str, object]:
         if research is None:
             raise HTTPException(status_code=503, detail="research_plane_unavailable")
-        result = research.run(job_id)
+        if research_admission is not None:
+            research_admission.begin(authenticated.user_id, job_id)
+        try:
+            result = (
+                research.run(job_id)
+                if settings.fixture_mode
+                else await run_in_threadpool(research.run, job_id)
+            )
+        except Exception:
+            if research_admission is not None:
+                research_admission.finish(
+                    authenticated.user_id,
+                    job_id,
+                    failed=True,
+                )
+            raise
+        if research_admission is not None:
+            research_admission.finish(authenticated.user_id, job_id)
+            result["admission"] = research_admission.status(
+                authenticated.user_id,
+                job_id,
+            )
         operator.record_action(
             actor_role=authenticated.role,
             action="RESEARCH_JOB_RUN",
@@ -623,33 +1353,95 @@ def create_operator_app(
         job_id: str,
         authenticated: AuthPrincipal = Depends(operator_principal),
     ) -> dict[str, object]:
-        del authenticated
         if research is None:
             raise HTTPException(status_code=503, detail="research_plane_unavailable")
-        return research.get(job_id).model_dump(mode="json")
+        admission = (
+            research_admission.status(authenticated.user_id, job_id)
+            if research_admission is not None
+            else None
+        )
+        result = research.get(job_id).model_dump(mode="json")
+        if admission is not None:
+            result["admission"] = admission
+        sanitized = _sanitize_research_payload(result)
+        if not isinstance(sanitized, dict):
+            raise HTTPException(status_code=500, detail="research_record_invalid")
+        return sanitized
 
     @app.get("/api/v1/research/jobs/{job_id}/report")
     async def get_research_report(
         job_id: str,
         authenticated: AuthPrincipal = Depends(operator_principal),
     ) -> dict[str, object]:
-        del authenticated
         if research is None:
             raise HTTPException(status_code=503, detail="research_plane_unavailable")
+        if research_admission is not None:
+            research_admission.status(authenticated.user_id, job_id)
         root = research.layout.research_jobs / job_id
         job = research.get(job_id)
         if job.status != "COMPLETE":
             raise HTTPException(status_code=409, detail="research_job_not_complete")
         return {
             "status": "OK",
-            "job": job.model_dump(mode="json"),
+            "job": _sanitize_research_payload(job.model_dump(mode="json")),
             "report_markdown": (root / "report.md").read_text(encoding="utf-8"),
-            "evidence_ledger": json.loads(
-                (root / "evidence_ledger.json").read_text(encoding="utf-8")
+            "evidence_ledger": _sanitize_research_payload(
+                json.loads(
+                    (root / "evidence_ledger.json").read_text(encoding="utf-8")
+                )
             ),
-            "claim_source_graph": json.loads(
-                (root / "claim_source_graph.json").read_text(encoding="utf-8")
+            "claim_source_graph": _sanitize_research_payload(
+                json.loads(
+                    (root / "claim_source_graph.json").read_text(encoding="utf-8")
+                )
             ),
+        }
+
+    @app.post("/api/v1/research/jobs/{job_id}/cancel")
+    async def cancel_research(
+        job_id: str,
+        authenticated: AuthPrincipal = Depends(research_mutation_principal),
+    ) -> dict[str, object]:
+        if research_admission is None:
+            raise HTTPException(status_code=503, detail="research_admission_unavailable")
+        return {
+            "status": "CANCELLED",
+            "admission": research_admission.cancel(authenticated.user_id, job_id),
+        }
+
+    @app.post("/api/v1/research/jobs/{job_id}/export")
+    async def export_research_report(
+        job_id: str,
+        request: Request,
+        authenticated: AuthPrincipal = Depends(research_mutation_principal),
+    ) -> dict[str, object]:
+        if research is None or artifact_registry is None:
+            raise HTTPException(status_code=503, detail="artifact_export_unavailable")
+        if research_admission is not None:
+            research_admission.status(authenticated.user_id, job_id)
+        job = research.get(job_id)
+        if job.status != "COMPLETE":
+            raise HTTPException(status_code=409, detail="research_job_not_complete")
+        content = (research.layout.research_jobs / job_id / "report.md").read_bytes()
+        source_fingerprint = hashlib.sha256(
+            (
+                research.layout.research_jobs / job_id / "claim_source_graph.json"
+            ).read_bytes()
+        ).hexdigest()
+        record = artifact_registry.create(
+            owner_user_id=authenticated.user_id,
+            content=content,
+            relative_path=f"research/{job_id}/report.md",
+            source_state_fingerprint=source_fingerprint,
+            generator_model_route=job.model_route,
+            capability_tier=authenticated.capability_tier.value,
+            trace_id=str(request.state.trace_id),
+            run_id=job_id,
+        )
+        return {
+            "status": "EXPORTED",
+            "artifact": record.normal(),
+            "download_url": f"/api/v1/generated-artifacts/{record.artifact_id}/download",
         }
 
     @app.get("/api/v1/events")
@@ -728,6 +1520,50 @@ def create_operator_app(
             media_type="application/octet-stream",
         )
 
+    @app.get("/api/v1/generated-artifacts/{artifact_id}/download")
+    async def generated_artifact_download(
+        artifact_id: str,
+        request: Request,
+        authenticated: AuthPrincipal = Depends(principal),
+        repo_id: str | None = Query(default=None),
+    ) -> Response:
+        if artifact_registry is None:
+            raise HTTPException(status_code=503, detail="artifact_registry_unavailable")
+        record = artifact_registry.require(
+            artifact_id,
+            owner_user_id=authenticated.user_id,
+            repo_id=repo_id,
+        )
+        content = artifact_registry.read(
+            artifact_id,
+            owner_user_id=authenticated.user_id,
+            repo_id=repo_id,
+            capability_tier=authenticated.capability_tier.value,
+            trace_id=str(request.state.trace_id),
+        )
+        filename = Path(record.relative_path).name
+        return Response(
+            content=content,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Content-SHA256": record.content_sha256,
+            },
+        )
+
+    @app.get("/api/v1/admin/artifact-provenance")
+    async def artifact_provenance(
+        authenticated: AuthPrincipal = Depends(operator_principal),
+    ) -> dict[str, object]:
+        if authenticated.role != "admin":
+            raise HTTPException(status_code=403, detail="admin_role_required")
+        if artifact_registry is None:
+            raise HTTPException(status_code=503, detail="artifact_registry_unavailable")
+        return {
+            "status": "OK",
+            "artifacts": artifact_registry.compact_operator_export(),
+        }
+
     @app.get("/api/v1/runs/compare/{left_run_id}/{right_run_id}")
     async def compare_runs(
         left_run_id: str,
@@ -781,6 +1617,137 @@ def create_operator_app(
             raise HTTPException(status_code=503, detail="tiered_serving_unavailable")
         return tiered
 
+    @app.get("/api/v1/help")
+    async def role_aware_help(
+        authenticated: AuthPrincipal = Depends(principal),
+    ) -> dict[str, object]:
+        service = require_tiered()
+        capability = service.capability(authenticated.user_id)
+        functions: list[dict[str, str]] = [
+            {
+                "name": "Chat",
+                "description": "Private local chat with no dormant tool schemas.",
+            },
+            {
+                "name": "Model lanes",
+                "description": (
+                    "Quality never downgrades; standard and economy can escalate once "
+                    "after a deterministic validation failure."
+                ),
+            },
+            {
+                "name": "Privacy and provenance",
+                "description": (
+                    "Conversations and artifacts are owner-isolated; generated files keep "
+                    "clean names while internal provenance is stored separately."
+                ),
+            },
+            {
+                "name": "Stop and cancel",
+                "description": "Stop generation or cancel queued work from its active panel.",
+            },
+        ]
+        if capability is CapabilityTier.BASIC:
+            functions.append(
+                {
+                    "name": "Basic capability",
+                    "description": (
+                        "Chat only: no repositories, tools, file mutation, agents, "
+                        "shell, Git actions, or background work."
+                    ),
+                }
+            )
+        if capability is CapabilityTier.PLUS:
+            functions.extend(
+                [
+                    {
+                        "name": "Plus capability",
+                        "description": "Chat plus explicitly authorized repository work.",
+                    },
+                    {
+                        "name": "Repository-bound agent",
+                        "description": (
+                            "Agent work is restricted to an operator-authorized repository "
+                            "and a dedicated isolated worktree."
+                        ),
+                    },
+                ]
+            )
+        if capability is CapabilityTier.OPERATOR:
+            functions.extend(
+                [
+                    {
+                        "name": "Deep Research",
+                        "description": (
+                            "Governed knowledge and RAG sources, visible citations and "
+                            "conflicts, bounded queueing, export, and cancellation."
+                        ),
+                    },
+                    {
+                        "name": "Operator controls",
+                        "description": (
+                            "Inspect users, repositories, queues, approvals, models, GPU, "
+                            "audit events, and readiness without exposing secrets."
+                        ),
+                    },
+                    {
+                        "name": "Serving lifecycle",
+                        "description": "Start or stop only explicitly owned local serving profiles.",
+                    },
+                    {
+                        "name": "Approvals and guardrails",
+                        "description": (
+                            "Risk-bearing actions require approval; concurrency limits "
+                            "and Quality reservation remain visible."
+                        ),
+                    },
+                ]
+            )
+        return {
+            "status": "OK",
+            "capability_tier": capability.value,
+            "role": authenticated.role,
+            "functions": functions,
+            "guardrails": service.scheduler.snapshot(),
+            "privacy": {
+                "local_inference": True,
+                "repository_isolation": True,
+                "artifact_provenance": artifact_registry is not None,
+                "retention": "Operator-configured external state",
+            },
+        }
+
+    @app.get("/api/v1/about")
+    async def about(
+        authenticated: AuthPrincipal = Depends(principal),
+    ) -> dict[str, object]:
+        service = require_tiered()
+        return {
+            "status": "OK",
+            "application_version": "0.1.0",
+            "git_revision": _git_revision(operator.repository_root),
+            "api_version": "v1",
+            "capability_tier": authenticated.capability_tier.value,
+            "role": authenticated.role,
+            "model_lanes": {
+                lane.value: {
+                    "display_name": service.lane_policy.routes[lane].model_id,
+                    "context_limit": service.lane_policy.routes[lane].context_limit,
+                    "output_limit": service.lane_policy.routes[lane].output_limit,
+                }
+                for lane in ModelLane
+            },
+            "guardrails": service.scheduler.snapshot(),
+            "remote_access_mode": settings.deployment_mode,
+            "health": "OK",
+            "documentation": [
+                "USER_GUIDE.md",
+                "QUICKSTART.md",
+                "ADMIN_GUIDE.md",
+                "REMOTE_ACCESS.md",
+            ],
+        }
+
     @app.get("/api/v1/tier/capabilities")
     async def tier_capabilities(
         authenticated: AuthPrincipal = Depends(principal),
@@ -789,11 +1756,18 @@ def create_operator_app(
         effective = service.capability(authenticated.user_id)
         if effective is not authenticated.capability_tier:
             raise HTTPException(status_code=401, detail="credential_capability_changed")
-        return {
+        result: dict[str, object] = {
             "status": "OK",
-            "user_id": authenticated.user_id,
+            "display_name": authenticated.display_name or authenticated.user_id,
             "capability_tier": effective.value,
-            "chat_enabled": effective in {CapabilityTier.BASIC, CapabilityTier.PLUS},
+            "role": authenticated.role,
+            "default_lane": authenticated.default_lane,
+            "chat_enabled": effective
+            in {
+                CapabilityTier.BASIC,
+                CapabilityTier.PLUS,
+                CapabilityTier.OPERATOR,
+            },
             "agent_enabled": effective is CapabilityTier.PLUS,
             "operator_enabled": effective is CapabilityTier.OPERATOR,
             "model_lanes": [lane.value for lane in ModelLane],
@@ -813,6 +1787,23 @@ def create_operator_app(
                 "agent_network_enabled": False,
             },
         }
+        if effective is CapabilityTier.PLUS:
+            authorized = service.sandboxes.authorizations.authorized_for_user(
+                authenticated.user_id
+            )
+            if registered_auth is not None:
+                registry_user = registered_auth.registry.require_user(
+                    authenticated.user_id
+                )
+                allowed = set(registry_user.authorized_repo_ids)
+                authorized = [
+                    item for item in authorized if item.get("repo_id") in allowed
+                ]
+            result["authorized_repositories"] = authorized
+        if authenticated.auth_method == "bearer":
+            # Backwards-compatible non-browser API clients may need their configured ID.
+            result["user_id"] = authenticated.user_id
+        return result
 
     @app.post("/api/v1/chat")
     async def tier_chat(
@@ -821,22 +1812,149 @@ def create_operator_app(
     ) -> dict[str, object]:
         service = require_tiered()
         messages = [message.model_dump() for message in body.messages]
+        conversation_id = body.conversation_id
+        if conversation_store is not None:
+            if conversation_id is None:
+                latest = body.messages[-1].content.strip().replace("\n", " ")
+                conversation = conversation_store.create(
+                    authenticated.user_id,
+                    title=latest[:80] or "New conversation",
+                )
+                conversation_id = conversation.conversation_id
+            else:
+                conversation_store.require(authenticated.user_id, conversation_id)
+            latest_user = next(
+                (
+                    message.content
+                    for message in reversed(body.messages)
+                    if message.role == "user"
+                ),
+                None,
+            )
+            if latest_user is not None:
+                conversation_store.append_message(
+                    authenticated.user_id,
+                    conversation_id,
+                    role="user",
+                    content=latest_user,
+                    metadata={"requested_lane": body.lane, "domain": body.domain},
+                )
         if settings.fixture_mode:
-            return service.chat(
+            result = service.chat(
                 user_id=authenticated.user_id,
                 lane=ModelLane(body.lane),
                 messages=messages,
                 domain=body.domain,
-                session_id=body.session_id,
+                session_id=body.session_id or conversation_id,
             )
-        return await run_in_threadpool(
-            service.chat,
-            user_id=authenticated.user_id,
-            lane=ModelLane(body.lane),
-            messages=messages,
-            domain=body.domain,
-            session_id=body.session_id,
+        else:
+            result = await run_in_threadpool(
+                service.chat,
+                user_id=authenticated.user_id,
+                lane=ModelLane(body.lane),
+                messages=messages,
+                domain=body.domain,
+                session_id=body.session_id or conversation_id,
+            )
+        if conversation_store is not None and conversation_id is not None:
+            envelope = result.get("response")
+            content = envelope.get("content") if isinstance(envelope, dict) else None
+            if isinstance(content, str) and content:
+                message = conversation_store.append_message(
+                    authenticated.user_id,
+                    conversation_id,
+                    role="assistant",
+                    content=content,
+                    metadata={
+                        key: result.get(key)
+                        for key in (
+                            "request_id",
+                            "trace_id",
+                            "requested_lane",
+                            "effective_lane",
+                            "model_id",
+                            "queue_wait_seconds",
+                            "context_limit",
+                            "output_limit",
+                            "escalation",
+                        )
+                    },
+                )
+                result["conversation_message_id"] = message["message_id"]
+            result["conversation_id"] = conversation_id
+        return result
+
+    @app.get("/api/v1/conversations")
+    async def list_conversations(
+        authenticated: AuthPrincipal = Depends(principal),
+        include_archived: bool = Query(default=True),
+    ) -> dict[str, object]:
+        if conversation_store is None:
+            raise HTTPException(status_code=503, detail="conversation_store_unavailable")
+        return {
+            "status": "OK",
+            "conversations": conversation_store.list(
+                authenticated.user_id,
+                include_archived=include_archived,
+            ),
+        }
+
+    @app.post("/api/v1/conversations")
+    async def create_conversation(
+        body: ConversationCreateRequest,
+        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
+    ) -> dict[str, object]:
+        if conversation_store is None:
+            raise HTTPException(status_code=503, detail="conversation_store_unavailable")
+        return {
+            "status": "CREATED",
+            "conversation": conversation_store.create(
+                authenticated.user_id,
+                title=body.title,
+            ).public(),
+        }
+
+    @app.get("/api/v1/conversations/{conversation_id}")
+    async def get_conversation(
+        conversation_id: str,
+        authenticated: AuthPrincipal = Depends(principal),
+    ) -> dict[str, object]:
+        if conversation_store is None:
+            raise HTTPException(status_code=503, detail="conversation_store_unavailable")
+        return {
+            "status": "OK",
+            "conversation": conversation_store.get_with_messages(
+                authenticated.user_id,
+                conversation_id,
+            ),
+        }
+
+    @app.patch("/api/v1/conversations/{conversation_id}")
+    async def update_conversation(
+        conversation_id: str,
+        body: ConversationUpdateRequest,
+        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
+    ) -> dict[str, object]:
+        if conversation_store is None:
+            raise HTTPException(status_code=503, detail="conversation_store_unavailable")
+        updated = conversation_store.update(
+            authenticated.user_id,
+            conversation_id,
+            title=body.title,
+            archived=body.archived,
+            draft=body.draft,
         )
+        return {"status": "UPDATED", "conversation": updated.public()}
+
+    @app.delete("/api/v1/conversations/{conversation_id}")
+    async def delete_conversation(
+        conversation_id: str,
+        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
+    ) -> dict[str, object]:
+        if conversation_store is None:
+            raise HTTPException(status_code=503, detail="conversation_store_unavailable")
+        conversation_store.delete(authenticated.user_id, conversation_id)
+        return {"status": "DELETED"}
 
     @app.post("/api/v1/agent/sessions")
     async def create_agent_session(
@@ -844,6 +1962,13 @@ def create_operator_app(
         authenticated: AuthPrincipal = Depends(tier_mutation_principal),
     ) -> dict[str, object]:
         service = require_tiered()
+        if registered_auth is not None:
+            user = registered_auth.registry.require_user(authenticated.user_id)
+            if body.repo_id not in user.authorized_repo_ids:
+                raise HTTPException(
+                    status_code=403,
+                    detail="repository_not_authorized",
+                )
         tool_policy = AgentToolPolicy(
             policy_id=f"api-{body.session_id}",
             allowed_tools=tuple(body.allowed_tools),
@@ -852,19 +1977,33 @@ def create_operator_app(
             max_wall_seconds=body.max_wall_seconds,
         )
         if settings.fixture_mode:
-            return service.create_agent_session(
+            result = service.create_agent_session(
                 user_id=authenticated.user_id,
                 repo_id=body.repo_id,
                 session_id=body.session_id,
                 tool_policy=tool_policy,
             )
-        return await run_in_threadpool(
-            service.create_agent_session,
-            user_id=authenticated.user_id,
-            repo_id=body.repo_id,
-            session_id=body.session_id,
-            tool_policy=tool_policy,
-        )
+        else:
+            result = await run_in_threadpool(
+                service.create_agent_session,
+                user_id=authenticated.user_id,
+                repo_id=body.repo_id,
+                session_id=body.session_id,
+                tool_policy=tool_policy,
+            )
+        binding = result.get("binding")
+        if isinstance(binding, dict):
+            result["binding"] = {
+                "session_id": binding.get("session_id"),
+                "repo_id": binding.get("repo_id"),
+                "logical_repository_name": binding.get("repo_id"),
+                "base_revision": binding.get("base_revision"),
+                "grant_revision": binding.get("grant_revision"),
+                "tool_policy": binding.get("tool_policy"),
+                "worktree_status": "ACTIVE_ISOLATED",
+                "network_policy": "network-denied-v1",
+            }
+        return result
 
     @app.post("/api/v1/agent/sessions/{session_id}/run")
     @app.post("/api/v1/agent/sessions/{session_id}/messages")
@@ -898,15 +2037,24 @@ def create_operator_app(
     ) -> dict[str, object]:
         service = require_tiered()
         if settings.fixture_mode:
-            return service.agent_session_status(
+            result = service.agent_session_status(
                 user_id=authenticated.user_id,
                 session_id=session_id,
             )
-        return await run_in_threadpool(
-            service.agent_session_status,
-            user_id=authenticated.user_id,
-            session_id=session_id,
-        )
+        else:
+            result = await run_in_threadpool(
+                service.agent_session_status,
+                user_id=authenticated.user_id,
+                session_id=session_id,
+            )
+        worktree = result.get("worktree_status")
+        if isinstance(worktree, dict):
+            result["worktree_status"] = {
+                key: value
+                for key, value in worktree.items()
+                if key != "worktree_root"
+            }
+        return result
 
     @app.post("/api/v1/agent/sessions/{session_id}/cancel")
     async def cancel_agent_session(
@@ -915,15 +2063,18 @@ def create_operator_app(
     ) -> dict[str, object]:
         service = require_tiered()
         if settings.fixture_mode:
-            return service.cancel_agent_session(
+            result = service.cancel_agent_session(
                 user_id=authenticated.user_id,
                 session_id=session_id,
             )
-        return await run_in_threadpool(
-            service.cancel_agent_session,
-            user_id=authenticated.user_id,
-            session_id=session_id,
-        )
+        else:
+            result = await run_in_threadpool(
+                service.cancel_agent_session,
+                user_id=authenticated.user_id,
+                session_id=session_id,
+            )
+        result.pop("worktree_root", None)
+        return result
 
     @app.post("/api/v1/admin/tier/users")
     async def set_tier_user(
@@ -935,6 +2086,13 @@ def create_operator_app(
         capability = require_tiered().users.set_user(
             body.user_id, CapabilityTier(body.tier), enabled=body.enabled
         )
+        if registered_auth is not None:
+            registered_auth.registry.update_user(
+                body.user_id,
+                capability_tier=CapabilityTier(body.tier),
+                enabled=body.enabled,
+            )
+            registered_auth.sessions.revoke_user(body.user_id)
         operator.record_action(
             actor_role=authenticated.role,
             action="USER_CAPABILITY_SET",
@@ -947,6 +2105,98 @@ def create_operator_app(
             },
         )
         return {"status": "UPDATED", "capability": asdict(capability)}
+
+    @app.get("/api/v1/admin/users")
+    async def registered_users(
+        authenticated: AuthPrincipal = Depends(operator_principal),
+    ) -> dict[str, object]:
+        if authenticated.role != "admin":
+            raise HTTPException(status_code=403, detail="admin_role_required")
+        if registered_auth is None:
+            raise HTTPException(status_code=503, detail="registered_email_auth_unavailable")
+        return {
+            "status": "OK",
+            "registry_revision": registered_auth.registry.snapshot.revision,
+            "users": [
+                {"user_id": user.user_id, **user.public()}
+                for user in sorted(
+                    registered_auth.registry.snapshot.users_by_id.values(),
+                    key=lambda item: item.normalized_email,
+                )
+            ],
+        }
+
+    @app.post("/api/v1/admin/registry/reload")
+    async def reload_registry(
+        request: Request,
+        authenticated: AuthPrincipal = Depends(mutation_principal),
+    ) -> dict[str, object]:
+        if authenticated.role != "admin":
+            raise HTTPException(status_code=403, detail="admin_role_required")
+        if registered_auth is None:
+            raise HTTPException(status_code=503, detail="registered_email_auth_unavailable")
+        before = registered_auth.registry.snapshot
+        success, error, after = registered_auth.registry.try_reload()
+        if not success:
+            registered_auth.audit.append(
+                "REGISTRY_RELOAD",
+                outcome="DENIED",
+                user_id=authenticated.user_id,
+                reason=error,
+                trace_id=str(request.state.trace_id),
+            )
+            return {
+                "status": "REJECTED_LAST_VALID_RETAINED",
+                "failure_category": error,
+                "registry_revision": before.revision,
+            }
+        changed_users = {
+            user_id
+            for user_id in set(before.users_by_id) | set(after.users_by_id)
+            if before.users_by_id.get(user_id) != after.users_by_id.get(user_id)
+        }
+        for user_id in changed_users:
+            registered_auth.sessions.revoke_user(user_id)
+            current = after.users_by_id.get(user_id)
+            if current is not None:
+                require_tiered().users.set_user(
+                    user_id,
+                    current.capability_tier,
+                    enabled=current.enabled,
+                )
+        registered_auth.audit.append(
+            "REGISTRY_RELOAD",
+            outcome="SUCCESS",
+            user_id=authenticated.user_id,
+            reason=f"changed_users:{len(changed_users)}",
+            trace_id=str(request.state.trace_id),
+        )
+        return {
+            "status": "RELOADED",
+            "registry_revision": after.revision,
+            "revoked_user_count": len(changed_users),
+        }
+
+    @app.post("/api/v1/admin/users/{user_id}/sessions/revoke")
+    async def revoke_user_sessions(
+        user_id: str,
+        request: Request,
+        authenticated: AuthPrincipal = Depends(mutation_principal),
+    ) -> dict[str, object]:
+        if authenticated.role != "admin":
+            raise HTTPException(status_code=403, detail="admin_role_required")
+        if registered_auth is None:
+            raise HTTPException(status_code=503, detail="registered_email_auth_unavailable")
+        registered_auth.registry.require_user(user_id)
+        count = registered_auth.sessions.revoke_user(user_id)
+        registered_auth.audit.append(
+            "SESSION_REVOCATION",
+            outcome="SUCCESS",
+            user_id=user_id,
+            reason=f"operator:{authenticated.user_id}",
+            trace_id=str(request.state.trace_id),
+        )
+        return {"status": "SESSIONS_REVOKED", "count": count}
 
     @app.post("/api/v1/admin/repositories")
     async def register_repository(
@@ -985,6 +2235,14 @@ def create_operator_app(
             body.repo_id,
             base_revision=body.base_revision,
         )
+        if registered_auth is not None:
+            user = registered_auth.registry.require_user(body.user_id)
+            repositories = tuple(sorted(set(user.authorized_repo_ids) | {body.repo_id}))
+            registered_auth.registry.update_user(
+                body.user_id,
+                authorized_repo_ids=repositories,
+            )
+            registered_auth.sessions.revoke_user(body.user_id)
         operator.record_action(
             actor_role=authenticated.role,
             action="REPOSITORY_GRANTED",
@@ -1013,6 +2271,15 @@ def create_operator_app(
         grant = require_tiered().sandboxes.authorizations.revoke(
             body.user_id, body.repo_id
         )
+        if registered_auth is not None:
+            user = registered_auth.registry.require_user(body.user_id)
+            registered_auth.registry.update_user(
+                body.user_id,
+                authorized_repo_ids=tuple(
+                    item for item in user.authorized_repo_ids if item != body.repo_id
+                ),
+            )
+            registered_auth.sessions.revoke_user(body.user_id)
         operator.record_action(
             actor_role=authenticated.role,
             action="REPOSITORY_REVOKED",
@@ -1112,6 +2379,44 @@ def _research_summaries(root: Path) -> list[dict[str, object]]:
                 }
             )
     return summaries
+
+
+def _sanitize_research_payload(value: object) -> object:
+    """Remove server paths from research records while preserving cited evidence."""
+
+    if isinstance(value, list):
+        return [_sanitize_research_payload(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    sanitized: dict[str, object] = {}
+    for raw_key, item in value.items():
+        key = str(raw_key)
+        if key in {"local_snapshot_path", "report_path", "evidence_ledger_path"}:
+            continue
+        if key == "canonical_url" and isinstance(item, str) and item.startswith("file:"):
+            sanitized[key] = "local-document://authorized-source"
+            continue
+        sanitized[key] = _sanitize_research_payload(item)
+    return sanitized
+
+
+def _git_revision(repository_root: Path) -> str:
+    """Return a sanitized immutable revision without surfacing Git stderr."""
+
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repository_root.resolve()), "rev-parse", "--verify", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unavailable"
+    revision = completed.stdout.strip().lower()
+    if len(revision) == 40 and all(character in "0123456789abcdef" for character in revision):
+        return revision
+    return "unavailable"
 
 
 def _safe_artifact_path(

@@ -240,9 +240,26 @@ class LocalOpenAIChatBackend:
             "chat_template_kwargs": {"enable_thinking": False},
         }
         if tools:
-            body["tools"] = [dict(tool) for tool in tools]
-            body["tool_choice"] = "required"
-            body["parallel_tool_calls"] = False
+            if len(tools) != 1:
+                raise ServiceTierError("unsupported_tool_schema_count")
+            tool = tools[0]
+            function = tool.get("function")
+            if (
+                tool.get("type") != "function"
+                or not isinstance(function, Mapping)
+                or not isinstance(function.get("name"), str)
+                or not isinstance(function.get("parameters"), Mapping)
+            ):
+                raise ServiceTierError("invalid_tool_schema")
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": function["name"],
+                    "description": function.get("description", ""),
+                    "schema": dict(function["parameters"]),
+                    "strict": True,
+                },
+            }
         request = urllib.request.Request(  # nosec B310 - localhost checked above
             route.endpoint.rstrip("/") + "/v1/chat/completions",
             data=json.dumps(body).encode("utf-8"),
@@ -281,18 +298,34 @@ class LocalOpenAIChatBackend:
 
 
 class ValidatedPatchAgentBackend:
-    """One-tool agent backend: validate and apply a unified diff inside its worktree."""
+    """Validate a structured edit and apply its server-rendered Git patch."""
 
     _TOOL: Mapping[str, object] = {
         "type": "function",
         "function": {
             "name": "apply_patch",
-            "description": "Apply one unified source patch inside the bound repository worktree.",
+            "description": (
+                "Replace one exact text occurrence in one file inside the bound "
+                "repository worktree. The server renders and validates the Git patch."
+            ),
             "parameters": {
                 "type": "object",
                 "additionalProperties": False,
-                "properties": {"patch": {"type": "string"}},
-                "required": ["patch"],
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Repository-relative file path.",
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "description": "Exact non-empty text currently present once.",
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "Exact replacement text.",
+                    },
+                },
+                "required": ["path", "old_text", "new_text"],
             },
         },
     }
@@ -301,7 +334,8 @@ class ValidatedPatchAgentBackend:
         self.chat = chat
 
     @staticmethod
-    def _extract_patch(response: JsonObject) -> str:
+    def _extract_edit(response: JsonObject) -> tuple[str, str, str]:
+        parsed: object | None = None
         tool_calls = response.get("tool_calls")
         if isinstance(tool_calls, list) and len(tool_calls) == 1:
             call = tool_calls[0]
@@ -309,19 +343,80 @@ class ValidatedPatchAgentBackend:
             if isinstance(function, dict) and function.get("name") == "apply_patch":
                 arguments = function.get("arguments")
                 if isinstance(arguments, str):
-                    parsed: object = json.loads(arguments)
-                    if isinstance(parsed, dict):
-                        patch = parsed.get("patch")
-                        if isinstance(patch, str):
-                            return patch
-        content = response.get("content")
-        if isinstance(content, str):
-            parsed = json.loads(content)
-            if isinstance(parsed, dict):
-                patch = parsed.get("patch")
-                if isinstance(patch, str):
-                    return patch
-        raise ServiceTierError("agent_patch_missing")
+                    parsed = json.loads(arguments)
+        if parsed is None:
+            content = response.get("content")
+            if isinstance(content, str):
+                parsed = json.loads(content)
+        if isinstance(parsed, dict):
+            path = parsed.get("path")
+            old_text = parsed.get("old_text")
+            new_text = parsed.get("new_text")
+            if all(isinstance(value, str) for value in (path, old_text, new_text)):
+                return str(path), str(old_text), str(new_text)
+        raise ServiceTierError("agent_edit_missing")
+
+    @staticmethod
+    def _render_patch(
+        binding: AgentSessionBinding,
+        path: str,
+        old_text: str,
+        new_text: str,
+    ) -> str:
+        encoded_edit_size = len(
+            (path + old_text + new_text).encode("utf-8")
+        )
+        if (
+            not old_text
+            or old_text == new_text
+            or encoded_edit_size > 2_000_000
+            or "\x00" in path + old_text + new_text
+        ):
+            raise ServiceTierError("agent_edit_invalid")
+        worktree = Path(binding.worktree_root)
+        target = validate_workspace_path(worktree, path)
+        if path == ".git" or path.startswith(".git/"):
+            raise ServiceTierError("agent_patch_git_metadata")
+        if not target.is_file():
+            raise ServiceTierError("agent_edit_target_unavailable", {"path": path})
+        original_bytes = target.read_bytes()
+        if len(original_bytes) > 2_000_000:
+            raise ServiceTierError("agent_edit_target_too_large", {"path": path})
+        try:
+            original = original_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ServiceTierError(
+                "agent_edit_target_not_utf8",
+                {"path": path},
+            ) from exc
+        occurrences = original.count(old_text)
+        if occurrences != 1:
+            raise ServiceTierError(
+                "agent_edit_match_not_unique",
+                {"path": path, "match_count": occurrences},
+            )
+        target.write_text(
+            original.replace(old_text, new_text, 1),
+            encoding="utf-8",
+            newline="",
+        )
+        try:
+            rendered = subprocess.run(  # nosec B603 B607 - fixed Git query
+                ["git", "-C", str(worktree), "diff", "--no-ext-diff", "--", path],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=120,
+                env=AgentSandboxManager.fixed_environment(binding),
+            )
+        finally:
+            target.write_bytes(original_bytes)
+        if rendered.returncode != 0 or not rendered.stdout:
+            raise ServiceTierError(
+                "agent_diff_render_failed",
+                {"returncode": rendered.returncode},
+            )
+        return rendered.stdout
 
     @staticmethod
     def _validate_patch(binding: AgentSessionBinding, patch: str) -> tuple[str, ...]:
@@ -372,9 +467,12 @@ class ValidatedPatchAgentBackend:
                 {
                     "role": "system",
                     "content": (
-                        "You are in a server-bound Git worktree. Return exactly one apply_patch "
-                        "tool call containing a unified diff. Never emit commands, paths outside "
-                        "the repository, symlinks, binary patches, renames, or network actions."
+                        "You are in a server-bound Git worktree. Return exactly one JSON "
+                        'object with the fields "path", "old_text", and "new_text". The '
+                        "path must be repository-relative; old_text must be an exact, "
+                        "non-empty substring that occurs once; new_text is its replacement. "
+                        "Never emit commands, paths outside the repository, symlinks, binary "
+                        "content, renames, or network actions."
                     ),
                 },
                 {"role": "user", "content": instruction},
@@ -384,15 +482,17 @@ class ValidatedPatchAgentBackend:
             request_id=request_id,
         )
         try:
-            patch = self._extract_patch(response)
+            path, old_text, new_text = self._extract_edit(response)
         except (json.JSONDecodeError, TypeError) as exc:
-            raise ServiceTierError("agent_patch_missing") from exc
+            raise ServiceTierError("agent_edit_missing") from exc
+        patch = self._render_patch(binding, path, old_text, new_text)
         paths = self._validate_patch(binding, patch)
         worktree = Path(binding.worktree_root)
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=".laplace-agent-", suffix=".patch", dir=worktree
         )
         temporary = Path(temporary_name)
+        rendered_diff = ""
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(patch)
@@ -420,6 +520,20 @@ class ValidatedPatchAgentBackend:
                             "stderr": result.stderr[-2_000:],
                         },
                     )
+            diff_result = subprocess.run(  # nosec B603 B607 - fixed Git query
+                ["git", "-C", str(worktree), "diff", "--no-ext-diff", "--"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=120,
+                env=AgentSandboxManager.fixed_environment(binding),
+            )
+            if diff_result.returncode != 0:
+                raise ServiceTierError(
+                    "agent_diff_render_failed",
+                    {"returncode": diff_result.returncode},
+                )
+            rendered_diff = diff_result.stdout
         finally:
             temporary.unlink(missing_ok=True)
         return {
@@ -427,6 +541,11 @@ class ValidatedPatchAgentBackend:
             "finish_reason": "stop",
             "verification_status": "PASSED",
             "modified_paths": list(paths),
+            "diff": rendered_diff,
+            "tests": [
+                {"name": "Patch preflight", "status": "PASSED"},
+                {"name": "Git whitespace validation", "status": "PASSED"},
+            ],
         }
 
 
@@ -578,7 +697,14 @@ class TieredServingService:
         effective_session_id = session_id or f"chat-session-{uuid.uuid4().hex}"
         try:
             capability = self.users.require(
-                user_id, frozenset({CapabilityTier.BASIC, CapabilityTier.PLUS})
+                user_id,
+                frozenset(
+                    {
+                        CapabilityTier.BASIC,
+                        CapabilityTier.PLUS,
+                        CapabilityTier.OPERATOR,
+                    }
+                ),
             )
         except UserCapabilityError as exc:
             self._audit_denial(

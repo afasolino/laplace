@@ -1,0 +1,47 @@
+# Replace laplace.example.org with an explicit DNS name. Caddy obtains and
+# renews a public certificate automatically when public DNS reaches this host.
+laplace.example.org {
+	encode zstd gzip
+
+	request_body {
+		max_size 2MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		X-Frame-Options "DENY"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+
+	reverse_proxy 127.0.0.1:8765 {
+		header_up Host {host}
+		header_up X-Forwarded-Host {host}
+		header_up X-Forwarded-Proto https
+		header_up X-Forwarded-For {remote_host}
+		flush_interval -1
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 15m
+		}
+	}
+
+	log {
+		output file /var/log/caddy/laplace-access.json {
+			roll_size 20MiB
+			roll_keep 7
+			roll_keep_for 168h
+		}
+		format json
+	}
+}
+
+# For a private LAN with no public DNS, use an explicit LAN name and Caddy's
+# private CA, then install its root certificate on each authorized client:
+#
+# laplace.home.arpa {
+#     tls internal
+#     reverse_proxy 127.0.0.1:8765
+# }

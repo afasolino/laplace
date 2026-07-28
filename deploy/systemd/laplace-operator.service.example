@@ -1,0 +1,41 @@
+[Unit]
+Description=Laplace registered-user operator service
+After=network-online.target laplace-model-servers.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=laplace
+Group=laplace
+WorkingDirectory=/opt/laplace
+EnvironmentFile=/etc/laplace/laplace.env
+Environment=PYTHONPATH=/opt/laplace/src
+UMask=0077
+ExecStart=/opt/laplace/.venv/bin/python -m research_workspace.operator_server \
+  --repository-root /opt/laplace \
+  --state-root ${LAPLACE_STATE_ROOT} \
+  --host 127.0.0.1 \
+  --port 8765 \
+  --deployment-mode reverse-proxy \
+  --external-url ${LAPLACE_EXTERNAL_URL} \
+  --allowed-origin ${LAPLACE_EXTERNAL_URL} \
+  --allowed-host ${LAPLACE_ALLOWED_HOST} \
+  --trusted-proxy 127.0.0.1 \
+  --user-registry ${LAPLACE_USER_REGISTRY} \
+  --session-store ${LAPLACE_SESSION_STORE} \
+  --session-idle-timeout 1800 \
+  --session-absolute-timeout 43200 \
+  --no-pwa
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=45s
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=${LAPLACE_STATE_ROOT}
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

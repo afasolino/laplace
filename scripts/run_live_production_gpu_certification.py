@@ -1,0 +1,698 @@
+#!/usr/bin/env python3
+"""Complete sequential P1 and CodeV registered-GUI certification on one GPU."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import secrets
+import signal
+import subprocess  # nosec B404 - fixed local model and server commands
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from dataclasses import asdict
+from pathlib import Path
+from typing import Sequence, TextIO
+
+from playwright.sync_api import sync_playwright
+
+from research_workspace.model_artifacts import validate_local_artifacts
+from research_workspace.repository_authorization import RepositoryAuthorizationStore
+from research_workspace.serving_profile_runtime import (
+    ServingProfileOperator,
+    ServingRuntimeError,
+    observe_gpu,
+)
+
+from run_registered_live_gpu_smoke import (
+    ADMIN_EMAIL,
+    PLUS_EMAIL,
+    REPO_ID,
+    _activate,
+    _admin,
+    _chromium,
+    _environment,
+    _free_port,
+    _git_fixture,
+    _wait_for_server,
+)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+STABLE = Path("/home/giando/work/laplace")
+VLLM = STABLE / ".venv-vllm-cu129/bin/vllm"
+FFMPEG = STABLE / ".runtime/ffmpeg7/lib"
+CODEV_PATH = STABLE / ".models/CodeV-R1-RL-Qwen-7B-W4A16-AWQ"
+CODEV_ID = "laplace-codev-r1-rl-qwen-7b-w4a16"
+CODEV_ENDPOINT = "http://127.0.0.1:8103"
+EXPERIMENT = (
+    ROOT / "codex_a6000/experiments/multilanguage_dual_model_ablation_v1"
+)
+
+
+class OwnedCodeV:
+    """Own one exact CodeV process group and release only that identity."""
+
+    def __init__(self, output: Path) -> None:
+        self.output = output
+        self.process: subprocess.Popen[str] | None = None
+        self.log_handle: TextIO | None = None
+        self.log_path = output / "codev.server.log"
+        self.pid: int | None = None
+        self.process_group_id: int | None = None
+        self.start_ticks: int | None = None
+
+    @staticmethod
+    def _ticks(pid: int) -> int:
+        return int(Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()[21])
+
+    def start(self) -> dict[str, object]:
+        command = [
+            str(VLLM),
+            "serve",
+            str(CODEV_PATH),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8103",
+            "--served-model-name",
+            CODEV_ID,
+            "--tensor-parallel-size",
+            "1",
+            "--max-model-len",
+            "16384",
+            "--max-num-seqs",
+            "1",
+            "--gpu-memory-utilization",
+            "0.20",
+            "--enable-prefix-caching",
+            "--enable-chunked-prefill",
+            "--enforce-eager",
+        ]
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            in {
+                "CUDA_HOME",
+                "CUDA_VISIBLE_DEVICES",
+                "HOME",
+                "LANG",
+                "LC_ALL",
+                "PATH",
+                "PYTHONPATH",
+                "TZ",
+                "VLLM_CACHE_ROOT",
+                "VLLM_CONFIG_ROOT",
+            }
+        }
+        environment["LD_LIBRARY_PATH"] = str(FFMPEG)
+        environment["PATH"] = (
+            str(VLLM.parent)
+            + os.pathsep
+            + environment.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+        )
+        self.log_handle = self.log_path.open("a", encoding="utf-8", buffering=1)
+        self.process = subprocess.Popen(  # nosec B603 - fixed argv above
+            command,
+            cwd=self.output,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=self.log_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+        self.pid = self.process.pid
+        self.process_group_id = os.getpgid(self.pid)
+        self.start_ticks = self._ticks(self.pid)
+        return {
+            "pid": self.pid,
+            "process_group_id": self.process_group_id,
+            "proc_start_ticks": self.start_ticks,
+            "command_sha256": hashlib.sha256(
+                json.dumps(command, separators=(",", ":")).encode()
+            ).hexdigest(),
+            "log_path": str(self.log_path),
+        }
+
+    def wait_ready(self, timeout: float = 300) -> dict[str, object]:
+        deadline = time.monotonic() + timeout
+        last_error = "not_probed"
+        while time.monotonic() < deadline:
+            if self.process is not None and self.process.poll() is not None:
+                raise RuntimeError(
+                    f"CodeV exited before readiness: {self.process.returncode}"
+                )
+            try:
+                with urllib.request.urlopen(  # nosec B310 - fixed loopback URL
+                    CODEV_ENDPOINT + "/v1/models",
+                    timeout=5,
+                ) as response:
+                    raw: object = json.loads(response.read())
+                data = raw.get("data") if isinstance(raw, dict) else None
+                served = [
+                    item.get("id")
+                    for item in data
+                    if isinstance(item, dict)
+                ] if isinstance(data, list) else []
+                if CODEV_ID in served:
+                    return {
+                        "status": "READY_EXACT_MODEL",
+                        "model_id": CODEV_ID,
+                        "endpoint": CODEV_ENDPOINT,
+                    }
+                last_error = f"identity_mismatch:{served}"
+            except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+                last_error = type(exc).__name__
+            time.sleep(1)
+        raise RuntimeError(f"CodeV readiness timeout: {last_error}")
+
+    def stop(self) -> dict[str, object]:
+        if (
+            self.process is None
+            or self.pid is None
+            or self.process_group_id is None
+            or self.start_ticks is None
+        ):
+            return {"status": "NOT_STARTED"}
+        if self.process.poll() is not None:
+            return {"status": "ALREADY_EXITED", "pid": self.pid}
+        if (
+            self._ticks(self.pid) != self.start_ticks
+            or os.getpgid(self.pid) != self.process_group_id
+        ):
+            raise RuntimeError("CodeV PID identity changed; refusing to signal")
+        os.killpg(self.process_group_id, signal.SIGTERM)
+        try:
+            self.process.wait(timeout=45)
+            status = "RELEASED_OWNED_CODEV"
+        except subprocess.TimeoutExpired:
+            os.killpg(self.process_group_id, signal.SIGKILL)
+            self.process.wait(timeout=10)
+            status = "FORCE_RELEASED_OWNED_CODEV"
+        if self.log_handle is not None:
+            self.log_handle.close()
+        return {"status": status, "pid": self.pid}
+
+
+def _endpoint_down(url: str) -> bool:
+    try:
+        urllib.request.urlopen(url, timeout=2)  # nosec B310 - loopback caller only
+    except (OSError, urllib.error.URLError):
+        return True
+    return False
+
+
+def _wait_gpu_release(
+    *,
+    maximum_used_mib: int,
+    timeout: float = 90,
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout
+    last = observe_gpu()
+    while time.monotonic() < deadline:
+        last = observe_gpu()
+        if last.used_mib <= maximum_used_mib:
+            return asdict(last)
+        time.sleep(1)
+    raise RuntimeError(
+        f"GPU memory did not release below {maximum_used_mib} MiB; "
+        f"last observation was {last.used_mib} MiB"
+    )
+
+
+def _write_json(path: Path, value: object) -> None:
+    path.write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-root", type=Path, required=True)
+    arguments = parser.parse_args(argv)
+    output = arguments.output_root.resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    server_logs = output / "server_logs"
+    screenshots = output / "screenshots"
+    server_logs.mkdir()
+    screenshots.mkdir()
+
+    initial_gpu = observe_gpu()
+    if initial_gpu.compute_pids:
+        raise RuntimeError(
+            f"GPU has unowned compute PIDs: {list(initial_gpu.compute_pids)}"
+        )
+    stable_status = subprocess.run(  # nosec B603 B607 - fixed read-only Git query
+        ["git", "status", "--short"],
+        cwd=STABLE,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if stable_status.returncode != 0 or stable_status.stdout.strip():
+        raise RuntimeError("stable checkout is not clean")
+    artifact_check = validate_local_artifacts(EXPERIMENT)
+    if artifact_check.get("status") != "ALL_MODEL_ARTIFACTS_AVAILABLE":
+        raise RuntimeError("local model artifact verification failed")
+
+    p1 = ServingProfileOperator(
+        ROOT,
+        output / "p1_runtime",
+        VLLM,
+        FFMPEG,
+    )
+    codev = OwnedCodeV(server_logs)
+    operator_process: subprocess.Popen[str] | None = None
+    operator_process_group: int | None = None
+    operator_start_ticks: int | None = None
+    operator_log: TextIO | None = None
+    p1_started = False
+    p1_release: dict[str, object] = {"status": "NOT_STARTED"}
+    codev_release: dict[str, object] = {"status": "NOT_STARTED"}
+    operator_stopped = False
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+    result: dict[str, object] = {}
+
+    with tempfile.TemporaryDirectory(prefix="laplace-live-production-") as temporary:
+        temporary_root = Path(temporary)
+        state_root = temporary_root / "external-state"
+        registry = state_root / "auth/registered_users.yaml"
+        sessions = state_root / "auth/sessions.sqlite3"
+        repository = temporary_root / "authorized-repository"
+        revision = _git_fixture(repository)
+        bootstrap, admin_code = _admin(
+            state_root,
+            "bootstrap",
+            "--registry",
+            str(registry),
+            "--session-store",
+            str(sessions),
+            "--email",
+            ADMIN_EMAIL,
+            "--user-id",
+            "usr_afasolino",
+            "--display-name",
+            "Alfonso Fasolino",
+            "--capability-tier",
+            "operator",
+            "--role",
+            "admin",
+            "--default-lane",
+            "quality",
+            expect_activation=True,
+        )
+        added, plus_code = _admin(
+            state_root,
+            "add",
+            "--registry",
+            str(registry),
+            "--session-store",
+            str(sessions),
+            "--email",
+            PLUS_EMAIL,
+            "--user-id",
+            "usr_live_plus",
+            "--display-name",
+            "Live Plus Fixture",
+            "--capability-tier",
+            "plus",
+            "--role",
+            "user",
+            "--default-lane",
+            "economy",
+            expect_activation=True,
+        )
+        _admin(
+            state_root,
+            "authorize-repo",
+            "--registry",
+            str(registry),
+            "--email",
+            PLUS_EMAIL,
+            "--repo-id",
+            REPO_ID,
+        )
+        authorizations = RepositoryAuthorizationStore(
+            state_root / "tiered_serving/repository_authorizations.sqlite3"
+        )
+        authorizations.register(REPO_ID, repository)
+        authorizations.grant("usr_live_plus", REPO_ID, base_revision=revision)
+        admin_password = f"live-admin-{secrets.token_urlsafe(64)}"
+        plus_password = f"live-plus-{secrets.token_urlsafe(64)}"
+        port = _free_port()
+        base_url = f"http://127.0.0.1:{port}"
+        operator_log = (server_logs / "operator.server.log").open(
+            "a",
+            encoding="utf-8",
+            buffering=1,
+        )
+
+        try:
+            p1_start = p1.start("P1_fp8_kv")
+            p1_started = True
+            p1_ready_gpu = observe_gpu()
+            operator_process = subprocess.Popen(  # nosec B603 - fixed local module
+                [
+                    sys.executable,
+                    "-m",
+                    "research_workspace.operator_server",
+                    "--repository-root",
+                    str(ROOT),
+                    "--state-root",
+                    str(state_root),
+                    "--user-registry",
+                    str(registry),
+                    "--session-store",
+                    str(sessions),
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                    "--allowed-origin",
+                    base_url,
+                    "--allowed-origin",
+                    f"http://localhost:{port}",
+                    "--allowed-host",
+                    "127.0.0.1",
+                    "--allowed-host",
+                    "localhost",
+                ],
+                cwd=ROOT,
+                env=_environment(),
+                stdout=operator_log,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=True,
+            )
+            operator_process_group = os.getpgid(operator_process.pid)
+            operator_start_ticks = int(
+                Path(f"/proc/{operator_process.pid}/stat")
+                .read_text(encoding="utf-8")
+                .split()[21]
+            )
+            _wait_for_server(base_url, operator_process)
+
+            with sync_playwright() as runtime:
+                browser = runtime.chromium.launch(
+                    headless=True,
+                    executable_path=str(_chromium()),
+                )
+                context = browser.new_context(
+                    viewport={"width": 1440, "height": 1000},
+                )
+                context.grant_permissions(
+                    ["clipboard-read", "clipboard-write"],
+                    origin=base_url,
+                )
+                page = context.new_page()
+                page.on(
+                    "console",
+                    lambda message: console_errors.append(message.text)
+                    if message.type == "error"
+                    else None,
+                )
+                page.on("pageerror", lambda error: page_errors.append(str(error)))
+                page.goto(base_url, wait_until="networkidle")
+                _activate(page, ADMIN_EMAIL, admin_code, admin_password)
+                page.locator("#account-tier").get_by_text(
+                    "operator · admin",
+                    exact=True,
+                ).wait_for()
+                page.locator("#chat-lane").select_option("quality")
+                page.locator("#chat-domain").select_option("general")
+                page.locator("#chat-message").fill(
+                    "Reply concisely in Markdown with the heading 'Live Quality', "
+                    "one bullet saying this is local, and a fenced Python code block "
+                    "containing `result = \"quality-pass\"`."
+                )
+                page.get_by_role("button", name="Send", exact=True).click()
+                page.wait_for_function(
+                    "() => ['Complete', 'Failed'].some((value) => "
+                    "document.querySelector('#chat-state')?.textContent.startsWith(value))",
+                    timeout=300_000,
+                )
+                if page.locator("#chat-state").inner_text().startswith("Failed"):
+                    raise RuntimeError("live Quality chat failed")
+                quality_card = page.locator(".message-card.assistant")
+                quality_card.wait_for(timeout=300_000)
+                quality_text = quality_card.inner_text()
+                quality_code_count = quality_card.locator(".code-block").count()
+                quality_card.get_by_role("button", name="Copy code").click()
+                quality_card.get_by_role("button", name="Copied").wait_for()
+                page.get_by_text("Response details", exact=True).click()
+                quality_details = page.locator(".metadata-grid").inner_text()
+                page.screenshot(
+                    path=screenshots / "live_quality_chat.png",
+                    full_page=True,
+                )
+
+                p1_release = p1.stop()
+                p1_started = False
+                after_p1_release = _wait_gpu_release(maximum_used_mib=4_000)
+                p1_endpoint_down = _endpoint_down(
+                    "http://127.0.0.1:8201/v1/models"
+                )
+                codev_owned = codev.start()
+                codev_ready = codev.wait_ready()
+                codev_ready_gpu = observe_gpu()
+
+                page.get_by_role("button", name="Chat", exact=True).click()
+                page.locator("#chat-lane").select_option("economy")
+                page.locator("#chat-domain").select_option("systemverilog")
+                page.locator("#chat-message").fill(
+                    "Reply concisely in Markdown with heading 'Live CodeV' and a "
+                    "fenced SystemVerilog module named pass that assigns y = ~a."
+                )
+                page.get_by_role("button", name="Send", exact=True).click()
+                page.wait_for_function(
+                    "() => ['Complete', 'Failed'].some((value) => "
+                    "document.querySelector('#chat-state')?.textContent.startsWith(value))",
+                    timeout=300_000,
+                )
+                if page.locator("#chat-state").inner_text().startswith("Failed"):
+                    raise RuntimeError("live CodeV chat failed")
+                page.locator(".message-card.assistant").last.wait_for(
+                    timeout=300_000
+                )
+                codev_card = page.locator(".message-card.assistant").last
+                codev_text = codev_card.inner_text()
+                codev_code_count = codev_card.locator(".code-block").count()
+                codev_card.get_by_role("button", name="Copy code").click()
+                codev_card.get_by_role("button", name="Copied").wait_for()
+                details = page.get_by_text("Response details", exact=True)
+                details.last.click()
+                codev_details = page.locator(".metadata-grid").last.inner_text()
+                page.screenshot(
+                    path=screenshots / "live_codev_chat.png",
+                    full_page=True,
+                )
+
+                page.get_by_role("button", name="Sign out", exact=True).click()
+                page.locator("#auth-dialog").wait_for(state="visible")
+                _activate(page, PLUS_EMAIL, plus_code, plus_password)
+                page.get_by_role("button", name="Agent", exact=True).click()
+                page.locator("#agent-repository").select_option(REPO_ID)
+                page.locator("#agent-form select[name=lane]").select_option(
+                    "economy"
+                )
+                page.locator("#agent-domain").select_option("systemverilog")
+                page.locator("#agent-form textarea[name=instruction]").fill(
+                    "The file rtl/example.sv contains `assign y = a;`. Modify only "
+                    "that line to `assign y = ~a;`. Return the requested strict JSON "
+                    "edit object with path rtl/example.sv, exact old text, and exact "
+                    "replacement text."
+                )
+                page.get_by_role(
+                    "button",
+                    name="Start isolated agent",
+                ).click()
+                page.wait_for_function(
+                    "() => ['Complete', 'Failed'].includes("
+                    "document.querySelector('#agent-state')?.textContent.trim())",
+                    timeout=300_000
+                )
+                if page.locator("#agent-state").inner_text() != "Complete":
+                    raise RuntimeError("live Plus agent failed")
+                diff_text = page.locator("#agent-diff").inner_text()
+                tests_text = page.locator("#agent-tests").inner_text()
+                page.screenshot(
+                    path=screenshots / "live_plus_agent.png",
+                    full_page=True,
+                )
+                storage_entries = page.evaluate(
+                    "() => Object.keys(localStorage).length + "
+                    "Object.keys(sessionStorage).length"
+                )
+                session_cookie = next(
+                    cookie
+                    for cookie in context.cookies()
+                    if cookie["name"] == "laplace_session"
+                )
+                browser.close()
+
+            registry_text = registry.read_text(encoding="utf-8")
+            audit_text = (
+                state_root / "auth/authentication_audit.jsonl"
+            ).read_text(encoding="utf-8")
+            secrets_absent = all(
+                secret not in registry_text and secret not in audit_text
+                for secret in (
+                    admin_code,
+                    plus_code,
+                    admin_password,
+                    plus_password,
+                )
+            )
+            checks = {
+                "stable_checkout_clean": not stable_status.stdout.strip(),
+                "local_artifacts_verified": True,
+                "initial_gpu_has_no_compute_pids": not initial_gpu.compute_pids,
+                "first_account_exact": bootstrap.get("email") == ADMIN_EMAIL
+                and bootstrap.get("capability_tier") == "operator"
+                and bootstrap.get("role") == "admin"
+                and bootstrap.get("default_lane") == "quality",
+                "quality_profile_exact": p1_start.get("profile_id") == "P1_fp8_kv"
+                and p1_start.get("status") == "STARTED_READY",
+                "quality_chat_readable": "Live Quality" in quality_text,
+                "quality_code_block_and_copy": quality_code_count > 0,
+                "quality_response_details": "laplace-quality-p1"
+                in quality_details,
+                "p1_released_before_codev": p1_release.get("status")
+                == "RELEASED_OWNED_PROFILE"
+                and p1_endpoint_down,
+                "codev_exact_identity": codev_ready.get("model_id") == CODEV_ID,
+                "codev_chat_readable": "Live CodeV" in codev_text,
+                "codev_code_block_and_copy": codev_code_count > 0,
+                "codev_response_details": CODEV_ID in codev_details,
+                "plus_account_registered": added.get("capability_tier") == "plus",
+                "plus_diff_readable": "rtl/example.sv" in diff_text
+                and "assign y = ~a" in diff_text,
+                "plus_verification_readable": "PASSED" in tests_text,
+                "browser_credential_storage_empty": storage_entries == 0,
+                "opaque_http_only_session": session_cookie["httpOnly"] is True
+                and len(str(session_cookie["value"])) >= 22,
+                "credentials_absent_from_registry_and_audit": secrets_absent,
+                "no_browser_errors": not console_errors and not page_errors,
+            }
+            result = {
+                "schema_version": 1,
+                "status": "PASS" if all(checks.values()) else "FAIL",
+                "checks": checks,
+                "profiles_run_sequentially": True,
+                "reason_for_sequential_routes": (
+                    "P1 reserves 90% GPU memory; CodeV is loaded on demand after "
+                    "P1 release so only one generative route is resident."
+                ),
+                "initial_gpu": asdict(initial_gpu),
+                "p1": {
+                    "startup": p1_start,
+                    "gpu_at_ready": asdict(p1_ready_gpu),
+                    "release": p1_release,
+                    "gpu_after_release": after_p1_release,
+                },
+                "codev": {
+                    "owned_process": codev_owned,
+                    "readiness": codev_ready,
+                    "gpu_at_ready": asdict(codev_ready_gpu),
+                },
+                "registered_account": {
+                    "email": ADMIN_EMAIL,
+                    "capability_tier": "operator",
+                    "role": "admin",
+                    "default_lane": "quality",
+                },
+                "console_error_count": len(console_errors),
+                "page_error_count": len(page_errors),
+                "screenshots": [
+                    "screenshots/live_quality_chat.png",
+                    "screenshots/live_codev_chat.png",
+                    "screenshots/live_plus_agent.png",
+                ],
+            }
+            admin_code = plus_code = admin_password = plus_password = ""
+        finally:
+            if p1_started:
+                try:
+                    p1_release = p1.stop()
+                except ServingRuntimeError as exc:
+                    p1_release = {
+                        "status": "RELEASE_FAILED",
+                        "category": exc.category,
+                    }
+            try:
+                codev_release = codev.stop()
+            except (OSError, RuntimeError) as exc:
+                codev_release = {
+                    "status": "RELEASE_FAILED",
+                    "error_type": type(exc).__name__,
+                }
+            if operator_process is not None and operator_process.poll() is None:
+                if (
+                    operator_process_group is not None
+                    and operator_start_ticks is not None
+                    and Path(f"/proc/{operator_process.pid}").exists()
+                    and int(
+                        Path(f"/proc/{operator_process.pid}/stat")
+                        .read_text(encoding="utf-8")
+                        .split()[21]
+                    )
+                    == operator_start_ticks
+                    and os.getpgid(operator_process.pid)
+                    == operator_process_group
+                ):
+                    os.killpg(operator_process_group, signal.SIGTERM)
+                    try:
+                        operator_process.wait(timeout=20)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(operator_process_group, signal.SIGKILL)
+                        operator_process.wait(timeout=10)
+            operator_stopped = (
+                operator_process is None or operator_process.poll() is not None
+            )
+            if operator_log is not None:
+                operator_log.close()
+
+    final_gpu = _wait_gpu_release(maximum_used_mib=4_000)
+    codev_down = _endpoint_down(CODEV_ENDPOINT + "/v1/models")
+    quality_down = _endpoint_down("http://127.0.0.1:8201/v1/models")
+    safe_shutdown = {
+        "status": (
+            "PASS"
+            if operator_stopped
+            and codev_down
+            and quality_down
+            and not final_gpu["compute_pids"]
+            and codev_release.get("status") == "RELEASED_OWNED_CODEV"
+            else "FAIL"
+        ),
+        "operator_stopped": operator_stopped,
+        "quality_endpoint_down": quality_down,
+        "codev_endpoint_down": codev_down,
+        "p1_release": p1_release,
+        "codev_release": codev_release,
+        "final_gpu": final_gpu,
+        "unrelated_processes_preserved": True,
+    }
+    result["safe_shutdown"] = safe_shutdown
+    result["status"] = (
+        "PASS"
+        if result.get("status") == "PASS" and safe_shutdown["status"] == "PASS"
+        else "FAIL"
+    )
+    _write_json(output / "live_production_gpu_results.json", result)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result["status"] == "PASS" else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

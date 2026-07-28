@@ -1,0 +1,27 @@
+[Unit]
+Description=Laplace loopback-only local model servers
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=laplace
+Group=laplace
+WorkingDirectory=/opt/laplace
+EnvironmentFile=/etc/laplace/laplace.env
+UMask=0077
+# This repository-owned launcher validates model hashes and records owned PIDs.
+ExecStart=/opt/laplace/scripts/manage_multilanguage_model_servers.sh start-phase3
+ExecStop=/opt/laplace/scripts/manage_multilanguage_model_servers.sh stop-phase3
+TimeoutStartSec=10min
+TimeoutStopSec=90s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/laplace/outputs/a6000_agent_team/model_servers
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

@@ -27,9 +27,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     output = arguments.output_root.resolve()
     output.mkdir(parents=True, exist_ok=False)
     environment = dict(os.environ)
-    environment.setdefault(
-        "PLAYWRIGHT_BROWSERS_PATH", "/tmp/laplace-playwright-browsers"
-    )
+    environment["PYTHONPATH"] = str(root / "src")
     commands = [
         (
             "compileall",
@@ -45,6 +43,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "tests/test_tiered_serving.py",
                 "tests/test_model_servers.py",
                 "tests/test_operator_api.py",
+                "tests/test_auth_provenance_security.py",
+                "tests/test_production_robustness.py",
+                "tests/test_operator_gui_e2e.py",
             ],
         ),
         ("full_pytest", [sys.executable, "-m", "pytest", "-q"]),

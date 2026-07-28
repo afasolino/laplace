@@ -3,241 +3,222 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="theme-color" content="#173c35">
-  <title>Laplace Operator Plane</title>
-  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#12372f">
+  <title>Laplace — Private research workspace</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
   <a class="skip-link" href="#workspace">Skip to workspace</a>
-  <div class="shell">
-    <aside class="rail" aria-label="Primary navigation">
-      <a class="brand" href="#dashboard" aria-label="Laplace home">
+  <div id="security-warning" class="security-warning" role="alert" hidden>
+    Insecure LAN HTTP override is active. Passwords are not protected in transit.
+  </div>
+
+  <div class="app-shell" aria-hidden="true" id="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#chat" aria-label="Laplace home">
         <span class="brand-mark" aria-hidden="true">λ</span>
-        <span><strong>Laplace</strong><small>operator plane</small></span>
+        <span><strong>Laplace</strong><small>private research</small></span>
       </a>
-      <nav id="primary-nav">
-        <a href="#tier-workspace" data-view="tier-workspace">Chat and agent</a>
-        <a href="#dashboard" data-view="dashboard" aria-current="page">Overview</a>
-        <a href="#run-builder" data-view="run-builder">Run builder</a>
-        <a href="#live-run" data-view="live-run">Live run</a>
-        <a href="#evidence" data-view="evidence">Evidence</a>
-        <a href="#research" data-view="research">Research</a>
-        <a href="#corpora" data-view="corpora">Corpora</a>
-        <a href="#hardware" data-view="hardware">Hardware</a>
-        <a href="#compare" data-view="compare">Compare</a>
-        <a href="#approvals" data-view="approvals">Approvals</a>
-        <a href="#diagnostics" data-view="diagnostics">Diagnostics</a>
-      </nav>
-      <div class="rail-foot">
+      <nav id="primary-nav" aria-label="Primary navigation"></nav>
+      <section class="conversation-rail" id="conversation-rail">
+        <div class="rail-heading">
+          <h2>Conversations</h2>
+          <button class="icon-button" id="new-conversation" type="button" aria-label="New conversation">+</button>
+        </div>
+        <div id="conversation-list" class="conversation-list"></div>
+      </section>
+      <div class="connection">
         <span id="connection-dot" class="status-dot" aria-hidden="true"></span>
-        <span id="connection-label">Offline</span>
+        <span id="connection-label">Checking service</span>
       </div>
     </aside>
 
     <main id="workspace" tabindex="-1">
       <header class="topbar">
         <div>
-          <p class="eyebrow">Local research control</p>
-          <h1 id="view-title">Operational overview</h1>
+          <p class="eyebrow" id="view-eyebrow">Private local inference</p>
+          <h1 id="view-title">Chat</h1>
         </div>
         <div class="top-actions">
-          <span id="role-badge" class="badge">signed out</span>
-          <button id="refresh-button" class="button secondary" type="button">Refresh</button>
+          <button id="account-button" class="account-button" type="button" aria-haspopup="dialog">
+            <span id="account-name">Account</span>
+            <small id="account-tier">—</small>
+          </button>
           <button id="sign-out-button" class="button ghost" type="button">Sign out</button>
         </div>
       </header>
 
       <p id="live-status" class="sr-only" role="status" aria-live="polite"></p>
-      <div id="warning-banner" class="banner warning" role="alert" hidden></div>
+      <div id="notice" class="notice" role="alert" hidden></div>
 
-      <section id="tier-workspace" class="view" data-title="Local serving workspace">
-        <div class="tier-hero">
+      <section id="chat" class="view active" data-title="Chat">
+        <div class="chat-toolbar">
           <div>
-            <p class="eyebrow light">Capability and quality are independent</p>
-            <h2>Private local chat, with repository-bound agent work only when granted.</h2>
+            <h2 id="conversation-title">New conversation</h2>
+            <p id="chat-state" class="subtle">Ready · local, tool-free chat</p>
           </div>
-          <div class="hero-metric"><span id="capability-label">—</span><small>capability tier</small></div>
-        </div>
-        <div class="metric-grid tier-metrics" aria-label="Tier status">
-          <article class="metric"><span>User</span><strong id="tier-user">—</strong></article>
-          <article class="metric"><span>Selected lane</span><strong id="lane-label">standard</strong></article>
-          <article class="metric"><span>Chat tools</span><strong>none</strong></article>
-          <article class="metric"><span>Network</span><strong>local only</strong></article>
-          <article class="metric"><span>Effective model</span><strong id="tier-route-model">—</strong></article>
-          <article class="metric"><span>Queue</span><strong id="tier-queue-status">0 waiting</strong></article>
-          <article class="metric"><span>Capacity</span><strong id="tier-limits">—</strong></article>
-          <article class="metric"><span>Current profile / KV</span><strong>operator-selected</strong></article>
-        </div>
-        <form id="tier-chat-form" class="panel form-grid">
-          <label>Model lane
-            <select id="tier-lane" name="lane">
-              <option value="quality">Quality</option>
-              <option value="standard" selected>Standard</option>
-              <option value="economy">Economy · SystemVerilog only</option>
+          <div class="lane-control">
+            <label for="chat-lane">Model lane</label>
+            <select id="chat-lane">
+              <option value="quality">Quality — strongest answer</option>
+              <option value="standard">Standard — balanced</option>
+              <option value="economy">Economy — fastest eligible route</option>
             </select>
-          </label>
-          <label>Domain
-            <select name="domain">
+          </div>
+          <div class="lane-control">
+            <label for="chat-domain">Question domain</label>
+            <select id="chat-domain">
               <option value="general">General</option>
-              <option value="python">Python</option>
               <option value="systemverilog">SystemVerilog</option>
-              <option value="rag">RAG</option>
-              <option value="research">Research synthesis</option>
-              <option value="json">Strict JSON</option>
+            </select>
+          </div>
+        </div>
+        <div id="message-list" class="message-list" aria-live="polite">
+          <div class="empty-state">
+            <span class="empty-mark" aria-hidden="true">λ</span>
+            <h2>Start with a question</h2>
+            <p>Laplace keeps this conversation in your private server-side workspace.</p>
+          </div>
+        </div>
+        <form id="chat-form" class="composer">
+          <label class="sr-only" for="chat-message">Message</label>
+          <textarea id="chat-message" rows="2" maxlength="100000"
+                    placeholder="Ask about your research or engineering work…" required></textarea>
+          <div class="composer-footer">
+            <span id="composer-hint">Enter to send · Shift+Enter for a new line</span>
+            <div class="button-row">
+              <button id="stop-chat" class="button secondary" type="button" hidden>Stop</button>
+              <button id="retry-chat" class="button secondary" type="button" hidden>Retry</button>
+              <button class="button primary" type="submit">Send</button>
+            </div>
+          </div>
+        </form>
+        <details class="help-card">
+          <summary>How chat lanes and queueing work</summary>
+          <p>Quality prioritizes answer strength, Standard balances speed and quality, and Economy uses CodeV only for the SystemVerilog domain. Other Economy requests stay on the main route with economy limits. Your capability and selected quality lane are independent. Chat never receives tool schemas.</p>
+        </details>
+      </section>
+
+      <section id="research" class="view" data-title="Deep Research">
+        <div class="page-intro">
+          <div><p class="eyebrow">Evidence-led workflow</p><h2>Deep Research</h2></div>
+          <p>Two jobs may run globally and one per user. Additional jobs wait in a visible queue.</p>
+        </div>
+        <form id="research-form" class="surface form-grid">
+          <label class="wide">Research question
+            <textarea name="question" rows="4" required></textarea>
+          </label>
+          <label>Scope<input name="scope" value="bounded local research" required></label>
+          <label>Research mode
+            <select name="research_mode">
+              <option>quick</option><option selected>standard</option><option>deep</option>
+              <option>systematic_literature</option><option>repository_audit</option>
+              <option>hardware_state_of_the_art</option>
             </select>
           </label>
-          <label class="wide">Message<textarea name="message" rows="6" required></textarea></label>
-          <div class="form-actions"><button class="button primary" type="submit">Send local chat</button></div>
-        </form>
-        <article class="panel"><h3>Response</h3><pre id="tier-chat-response">No request sent.</pre></article>
-        <div id="plus-agent-panel" hidden>
-          <div class="section-intro">
-            <div><p class="eyebrow">Plus only</p><h2>Repository-bound agent session</h2></div>
-            <p>The repository ID resolves through the server grant registry. Client paths are never accepted.</p>
-          </div>
-          <form id="agent-session-form" class="panel form-grid">
-            <label>Authorized repository ID<input name="repo_id" required></label>
-            <label>Session ID<input name="session_id" pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,127}" required></label>
-            <div class="form-actions"><button class="button primary" type="submit">Bind isolated worktree</button></div>
-          </form>
-          <form id="agent-run-form" class="panel form-grid">
-            <label>Model lane<select name="lane"><option>quality</option><option selected>standard</option><option>economy</option></select></label>
-            <label>Domain<input name="domain" value="python" required></label>
-            <label class="wide">Bounded instruction<textarea name="instruction" rows="6" required></textarea></label>
-            <div class="form-actions">
-              <button class="button primary" type="submit">Run bounded agent</button>
-              <button id="agent-cancel" class="button secondary" type="button">Cancel / release clean session</button>
-            </div>
-          </form>
-          <article class="panel"><h3>Agent evidence</h3><pre id="agent-response">No agent session bound.</pre></article>
-        </div>
-      </section>
-
-      <section id="dashboard" class="view active" data-title="Operational overview">
-        <div class="hero">
-          <div>
-            <p class="eyebrow light">Evidence before assertion</p>
-            <h2>Runs, research, and hardware—without crossing the measurement boundary.</h2>
-          </div>
-          <div class="hero-metric"><span id="hero-active-runs">0</span><small>active runs</small></div>
-        </div>
-        <div id="dashboard-cards" class="metric-grid" aria-label="Workspace metrics"></div>
-        <div class="split-grid">
-          <article class="panel">
-            <div class="panel-head"><h2>Recent runs</h2><span class="badge quiet">immutable</span></div>
-            <div id="recent-runs" class="table-wrap"></div>
-          </article>
-          <article class="panel">
-            <div class="panel-head"><h2>Research queue</h2><span class="badge quiet">exploratory</span></div>
-            <div id="research-summary" class="stack-list"></div>
-          </article>
-        </div>
-      </section>
-
-      <section id="run-builder" class="view" data-title="Measured run builder">
-        <div class="section-intro">
-          <div><p class="eyebrow">Frozen before start</p><h2>Compose an immutable execution request</h2></div>
-          <p>The preview is hashed before activation. GPU work still requires a separate approval.</p>
-        </div>
-        <form id="run-form" class="panel form-grid">
-          <label>Task ID<input name="task_id" value="sv_elastic_buffer2" required></label>
-          <label>Arm<select name="arm_id"><option value="C">C — main + CodeV</option><option value="A">A — baseline</option><option value="B">B — main only</option></select></label>
-          <label>Model route<input name="model_route" value="main+codev" required></label>
-          <label>Smoke profile<input name="smoke_profile" value="codev-live" required></label>
-          <label>Corpus snapshot SHA-256<input name="corpus_snapshot_sha256" pattern="[0-9a-f]{64}" value="1111111111111111111111111111111111111111111111111111111111111111" required></label>
-          <label>Skills lock SHA-256<input name="skills_lock_sha256" pattern="[0-9a-f]{64}" value="2222222222222222222222222222222222222222222222222222222222222222" required></label>
-          <label>Request SHA-256<input name="request_sha256" pattern="[0-9a-f]{64}" value="3333333333333333333333333333333333333333333333333333333333333333" required></label>
-          <label class="check"><input name="gpu_required" type="checkbox" checked> Requires GPU resources</label>
-          <div class="form-actions"><button class="button primary" type="submit">Prepare immutable run</button></div>
-        </form>
-        <article class="panel"><h3>Configuration preview</h3><pre id="run-preview">Submit the form to create a fresh run identity.</pre></article>
-      </section>
-
-      <section id="live-run" class="view" data-title="Live run evidence">
-        <div class="section-intro"><div><p class="eyebrow">Append-only state</p><h2>Execution timeline</h2></div><form id="live-run-form" class="inline-form"><label>Run ID<input id="live-run-id" name="run_id" placeholder="run-…" required></label><button class="button secondary" type="submit">Inspect run</button></form></div>
-        <div class="split-grid">
-          <article class="panel"><h3>State machine</h3><ol id="event-timeline" class="timeline"></ol></article>
-          <article class="panel"><h3>Run record</h3><pre id="run-record">Choose a run to inspect.</pre></article>
-        </div>
-        <article class="panel"><div class="panel-head"><h3>Verification gates</h3><span class="badge quiet">source evidence</span></div><div id="gate-matrix" class="gate-grid"></div></article>
-      </section>
-
-      <section id="evidence" class="view" data-title="Artifact and evidence explorer">
-        <div class="section-intro"><div><p class="eyebrow">Read-only</p><h2>Inspect an artifact</h2></div><p>Paths are confined to approved output roots; held-out and secret paths are denied.</p></div>
-        <form id="artifact-form" class="inline-form"><label>Artifact path<input name="path" placeholder="research/job/report.md" required></label><button class="button primary" type="submit">Inspect</button></form>
-        <article class="panel"><div class="panel-head"><h3 id="artifact-name">Artifact preview</h3><a id="artifact-download" class="button secondary" href="#" hidden>Download</a></div><pre id="artifact-preview">No artifact selected.</pre></article>
-      </section>
-
-      <section id="research" class="view" data-title="Deep research studio">
-        <div class="section-intro"><div><p class="eyebrow">Exploratory store</p><h2>Ask, trace, verify</h2></div><p>Research evidence never enters a measured run or governed corpus automatically.</p></div>
-        <form id="research-form" class="panel form-grid">
-          <label class="wide">Research question<textarea name="question" rows="4" required>What evidence supports deterministic, evidence-led local RTL research?</textarea></label>
-          <label>Mode<select name="research_mode"><option>quick</option><option selected>standard</option><option>deep</option><option>systematic_literature</option><option>repository_audit</option><option>hardware_state_of_the_art</option></select></label>
-          <label>Backend<input name="backend" value="local_governed_corpus" required></label>
-          <label>Scope<input name="scope" value="bounded operator request" required></label>
           <label>Source policy<input name="source_policy" value="primary_preferred" required></label>
-          <div class="form-actions"><button class="button primary" type="submit">Create research job</button><button id="run-research-button" class="button secondary" type="button" disabled>Run stages</button></div>
+          <label>Available backend
+            <select name="backend">
+              <option value="local_governed_corpus">Governed local corpus</option>
+              <option value="local_uploaded_documents">Authorized uploaded documents</option>
+            </select>
+          </label>
+          <div class="wide button-row">
+            <button class="button primary" type="submit">Create research job</button>
+            <button id="run-research" class="button secondary" type="button" disabled>Run admitted job</button>
+            <button id="cancel-research" class="button danger" type="button" disabled>Cancel</button>
+            <button id="export-research" class="button secondary" type="button" disabled>Export report</button>
+          </div>
         </form>
-        <div class="split-grid">
-          <article class="panel"><h3>Stage progress</h3><ol id="research-stages" class="timeline"></ol></article>
-          <article class="panel"><h3>Evidence ledger</h3><div id="evidence-ledger" class="stack-list">No completed report.</div></article>
+        <div class="two-column">
+          <article class="surface">
+            <div class="section-heading"><h3>Progress</h3><span id="research-queue" class="state-pill">Not started</span></div>
+            <ol id="research-stages" class="timeline"></ol>
+          </article>
+          <article class="surface">
+            <h3>Sources and evidence</h3>
+            <div id="research-sources" class="stack-list"><p class="subtle">No sources yet.</p></div>
+          </article>
         </div>
-        <article class="panel"><h3>Research report</h3><pre id="research-report">No report generated.</pre></article>
-      </section>
-
-      <section id="corpora" class="view" data-title="RAG and corpus manager">
-        <div class="section-intro"><div><p class="eyebrow">Governed snapshots</p><h2>Corpus lineage</h2></div><p>Promotions are reviewed snapshots; rollback never rewrites the prior snapshot.</p></div>
-        <div id="corpus-list" class="card-grid"></div>
-      </section>
-
-      <section id="hardware" class="view" data-title="Model and hardware center">
-        <div class="section-intro"><div><p class="eyebrow">Exact identities</p><h2>GPU admission and endpoints</h2></div><button id="hardware-refresh" class="button secondary" type="button">Probe now</button></div>
-        <div id="gpu-status" class="metric-grid"></div>
-        <article class="panel"><h3>Model servers</h3><div id="model-servers" class="stack-list"></div></article>
-        <article class="panel">
-          <div class="panel-head"><h3>Tiered serving profiles</h3><span class="badge quiet">admin lifecycle</span></div>
-          <div id="serving-profile-status" class="stack-list">Profile runtime not probed.</div>
-          <form id="serving-profile-form" class="inline-form">
-            <label>Profile ID<input name="profile_id" value="P0_baseline" required></label>
-            <label>Action<select name="action"><option value="start">Start and verify</option><option value="stop">Stop owned profile</option></select></label>
-            <button class="button secondary" type="submit">Apply profile action</button>
-          </form>
+        <article class="surface">
+          <div class="section-heading"><h3>Cited report</h3><span id="research-confidence" class="state-pill">Awaiting evidence</span></div>
+          <div id="research-report" class="markdown report"><p class="subtle">The completed report will appear here.</p></div>
         </article>
-        <article class="panel"><h3>Profile comparison</h3><div id="profile-comparison">Use the certification artifact for measured quality, latency, context, KV, GPU, and CPU memory comparisons.</div></article>
+        <details class="help-card"><summary>About sources, conflicts, and citations</summary><p>Laplace keeps source identity and retrieval time alongside each claim. Conflicts remain visible; a report is not promoted into governed knowledge automatically.</p></details>
       </section>
 
-      <section id="compare" class="view" data-title="Run comparison">
-        <form id="compare-form" class="inline-form">
-          <label>Left run<input name="left" required></label>
-          <label>Right run<input name="right" required></label>
-          <button class="button primary" type="submit">Compare locks and outcomes</button>
-        </form>
-        <article class="panel"><h3>Comparison</h3><div id="comparison-table" class="table-wrap">Choose two runs.</div></article>
+      <section id="help" class="view" data-title="Help & Capabilities">
+        <div class="page-intro"><div><p class="eyebrow">Available to this account</p><h2>Help &amp; Capabilities</h2></div><p>Functions here are filtered by your authenticated role and capability.</p></div>
+        <div id="help-functions" class="card-grid"></div>
+        <article class="surface prose">
+          <h3>Privacy and guardrails</h3>
+          <p>Inference stays on configured local model endpoints. Conversations, research, repositories, worktrees, and artifacts are owner-isolated. Generated files have invisible server-side provenance; normal downloads keep clean filenames and content.</p>
+          <p>Use <strong>Stop</strong> or <strong>Cancel</strong> to end client work. Operators can stop only processes Laplace started and recorded as owned.</p>
+        </article>
       </section>
 
-      <section id="approvals" class="view" data-title="Approval queue">
-        <div class="section-intro"><div><p class="eyebrow">Two-person boundary</p><h2>Pending decisions</h2></div><button id="approvals-refresh" class="button secondary" type="button">Refresh</button></div>
-        <div id="approval-list" class="stack-list"></div>
+      <section id="about" class="view" data-title="System Information">
+        <div class="page-intro"><div><p class="eyebrow">Sanitized configuration</p><h2>System Information</h2></div><p>Versions, routes, limits, and health—without secrets or raw model paths.</p></div>
+        <div id="about-cards" class="card-grid"></div>
+        <article class="surface"><h3>Model lanes</h3><div id="about-lanes" class="table-wrap"></div></article>
+        <article class="surface"><h3>Documentation</h3><div id="documentation-links" class="link-list"></div></article>
       </section>
 
-      <section id="diagnostics" class="view" data-title="Settings and diagnostics">
-        <div class="section-intro"><div><p class="eyebrow">Local by default</p><h2>Security posture</h2></div><p>No saved secret values are returned by this view.</p></div>
-        <div id="diagnostic-cards" class="card-grid"></div>
-      </section>
+      <div id="role-workspace"></div>
     </main>
   </div>
 
-  <dialog id="login-dialog" aria-labelledby="login-title">
-    <form id="login-form" method="dialog">
-      <p class="eyebrow">Local authentication</p>
-      <h2 id="login-title">Unlock the Operator Plane</h2>
-      <p>Enter a locally configured role token. It remains in this browser tab only.</p>
-      <label>Access token<input id="token-input" type="password" minlength="24" autocomplete="off" required></label>
-      <p id="login-error" class="error" role="alert"></p>
-      <button class="button primary" type="submit">Authenticate</button>
+  <dialog id="auth-dialog" aria-labelledby="auth-title">
+    <div class="auth-card">
+      <div class="auth-brand"><span class="brand-mark" aria-hidden="true">λ</span><strong>Laplace</strong></div>
+      <p class="eyebrow">Private research workspace</p>
+      <h1 id="auth-title">Sign in</h1>
+      <p id="auth-copy">Use an email registered by your local administrator.</p>
+      <div class="auth-tabs" role="tablist" aria-label="Authentication mode">
+        <button id="login-tab" role="tab" aria-selected="true" type="button">Sign in</button>
+        <button id="activation-tab" role="tab" aria-selected="false" type="button">First activation</button>
+      </div>
+      <form id="login-form" class="auth-form">
+        <label>Email address<input name="email" type="email" autocomplete="username" required></label>
+        <label>Password
+          <span class="password-field"><input id="login-password" name="password" type="password" autocomplete="current-password" maxlength="1024" required><button class="show-password" data-target="login-password" type="button">Show</button></span>
+        </label>
+        <button class="button primary wide" type="submit">Sign in</button>
+      </form>
+      <form id="activation-form" class="auth-form" hidden>
+        <label>Email address<input name="email" type="email" autocomplete="username" required></label>
+        <label>One-time activation code
+          <span class="password-field"><input id="activation-code" name="activation_code" type="password" autocomplete="one-time-code" maxlength="1024" required><button class="show-password" data-target="activation-code" type="button">Show</button></span>
+        </label>
+        <label>Create password
+          <span class="password-field"><input id="activation-password" name="new_password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required><button class="show-password" data-target="activation-password" type="button">Show</button></span>
+        </label>
+        <label>Confirm password<input name="confirm_password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required></label>
+        <p class="field-help">At least 12 characters; password-manager strings of 64+ characters are supported without truncation.</p>
+        <button class="button primary wide" type="submit">Activate account</button>
+      </form>
+      <p id="auth-error" class="error" role="alert"></p>
+      <p class="privacy-note">Your password is sent only to this Laplace service. It is never stored in browser storage.</p>
+    </div>
+  </dialog>
+
+  <dialog id="account-dialog" aria-labelledby="account-title">
+    <form id="account-form" class="account-card">
+      <div class="section-heading"><h2 id="account-title">Account</h2><button id="close-account" class="icon-button" type="button" aria-label="Close account panel">×</button></div>
+      <dl id="account-details" class="definition-list"></dl>
+      <details>
+        <summary>Change password</summary>
+        <div class="form-stack">
+          <label>Current password<input name="current_password" type="password" autocomplete="current-password" maxlength="1024"></label>
+          <label>New password<input name="new_password" type="password" autocomplete="new-password" minlength="12" maxlength="1024"></label>
+          <button class="button secondary" type="submit">Change password</button>
+        </div>
+      </details>
+      <button id="logout-all" class="button danger" type="button">Sign out all sessions</button>
     </form>
   </dialog>
+
   <script src="/assets/app.js" defer></script>
 </body>
 </html>

@@ -27,6 +27,7 @@ from research_workspace.operator_api import (
     OperatorAuth,
     create_operator_app,
 )
+from research_workspace.operator_server import _selected_lane_policy
 from research_workspace.operator_service import OperatorService
 from research_workspace.repository_authorization import (
     RepositoryAuthorizationError,
@@ -35,11 +36,13 @@ from research_workspace.repository_authorization import (
 )
 from research_workspace.service_tiers import (
     LanePolicy,
+    LocalOpenAIChatBackend,
     ModelLane,
     ModelRoute,
     PriorityAdmissionScheduler,
     TierAuditLog,
     TieredServingService,
+    ValidatedPatchAgentBackend,
 )
 from research_workspace.serving_profiles import (
     InstalledServingCapabilities,
@@ -68,6 +71,136 @@ from research_workspace.user_capabilities import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_selected_main_routes_match_the_certified_p1_served_identity() -> None:
+    policy = _selected_lane_policy(ROOT)
+    profile: object = json.loads(
+        (ROOT / "configs/serving_profiles/P1_fp8_kv.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert isinstance(profile, dict)
+    for lane in (ModelLane.QUALITY, ModelLane.STANDARD):
+        route = policy.routes[lane]
+        assert route.model_id == profile["served_model_name"]
+        assert route.endpoint == f"http://127.0.0.1:{profile['port']}"
+
+
+def test_local_agent_schema_uses_strict_json_without_vllm_tool_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Response:
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_arguments: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "path": "x",
+                                        "old_text": "before",
+                                        "new_text": "after",
+                                    }
+                                )
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ]
+                }
+            ).encode()
+
+    def urlopen(request: object, timeout: float) -> Response:
+        assert timeout == 10
+        captured.update(json.loads(request.data))  # type: ignore[attr-defined]
+        return Response()
+
+    monkeypatch.setattr(
+        "research_workspace.service_tiers.urllib.request.urlopen",
+        urlopen,
+    )
+    backend = LocalOpenAIChatBackend(timeout_seconds=10)
+    result = backend.complete(
+        messages=({"role": "user", "content": "Return a patch."},),
+        route=ModelRoute(
+            ModelLane.ECONOMY,
+            "fixture-codev",
+            "http://127.0.0.1:8103",
+            20,
+        ),
+        tools=(
+            {
+                "type": "function",
+                "function": {
+                    "name": "apply_patch",
+                    "description": "Return a patch",
+                    "parameters": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Repository-relative file path.",
+                            },
+                            "old_text": {
+                                "type": "string",
+                                "description": (
+                                    "Exact non-empty text currently present once."
+                                ),
+                            },
+                            "new_text": {
+                                "type": "string",
+                                "description": "Exact replacement text.",
+                            },
+                        },
+                        "required": ["path", "old_text", "new_text"],
+                    },
+                },
+            },
+        ),
+        request_id="fixture-request",
+    )
+    assert result["content"] == (
+        '{"path": "x", "old_text": "before", "new_text": "after"}'
+    )
+    assert "tools" not in captured
+    assert "tool_choice" not in captured
+    assert captured["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "apply_patch",
+            "description": "Return a patch",
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Repository-relative file path.",
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "description": "Exact non-empty text currently present once.",
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "Exact replacement text.",
+                    },
+                },
+                "required": ["path", "old_text", "new_text"],
+            },
+            "strict": True,
+        },
+    }
 
 
 def _git_repository(root: Path) -> str:
@@ -172,6 +305,105 @@ class _ConcurrentChatBackend(_ChatBackend):
         finally:
             with self._lock:
                 self.active -= 1
+
+
+def test_validated_agent_renders_and_applies_server_owned_git_patch(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    revision = _git_repository(repository)
+    backend = _ChatBackend(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "path": "source.py",
+                        "old_text": "VALUE = 1",
+                        "new_text": "VALUE = 2",
+                    }
+                ),
+                "finish_reason": "stop",
+            }
+        ]
+    )
+    binding = AgentSessionBinding(
+        session_id="structured-edit",
+        user_id="plus-a",
+        repo_id="repo",
+        canonical_repository_root=str(repository),
+        worktree_root=str(repository),
+        base_revision=revision,
+        grant_revision=1,
+        tool_policy=AgentToolPolicy("bounded", ("apply_patch",)),
+        environment={},
+        created_at_utc="2026-07-28T00:00:00+00:00",
+    )
+
+    result = ValidatedPatchAgentBackend(backend).run(
+        binding=binding,
+        instruction="Change the fixture value.",
+        route=ModelRoute(
+            ModelLane.ECONOMY,
+            "codev-model",
+            "http://127.0.0.1:8202",
+            20,
+        ),
+        request_id="structured-edit-request",
+    )
+
+    assert (repository / "source.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert result["modified_paths"] == ["source.py"]
+    assert "-VALUE = 1" in str(result["diff"])
+    assert "+VALUE = 2" in str(result["diff"])
+    assert result["verification_status"] == "PASSED"
+
+
+def test_validated_agent_rejects_non_unique_structured_edit(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    revision = _git_repository(repository)
+    (repository / "source.py").write_text("VALUE = 1\nVALUE = 1\n", encoding="utf-8")
+    binding = AgentSessionBinding(
+        session_id="ambiguous-edit",
+        user_id="plus-a",
+        repo_id="repo",
+        canonical_repository_root=str(repository),
+        worktree_root=str(repository),
+        base_revision=revision,
+        grant_revision=1,
+        tool_policy=AgentToolPolicy("bounded", ("apply_patch",)),
+        environment={},
+        created_at_utc="2026-07-28T00:00:00+00:00",
+    )
+    backend = _ChatBackend(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "path": "source.py",
+                        "old_text": "VALUE = 1",
+                        "new_text": "VALUE = 2",
+                    }
+                ),
+                "finish_reason": "stop",
+            }
+        ]
+    )
+
+    with pytest.raises(
+        Exception,
+        match="agent_edit_match_not_unique",
+    ):
+        ValidatedPatchAgentBackend(backend).run(
+            binding=binding,
+            instruction="Change one value.",
+            route=ModelRoute(
+                ModelLane.ECONOMY,
+                "codev-model",
+                "http://127.0.0.1:8202",
+                20,
+            ),
+            request_id="ambiguous-edit-request",
+        )
 
 
 def _policy() -> LanePolicy:
@@ -507,7 +739,7 @@ async def test_api_enforces_basic_chat_only_and_plus_repository_binding(
     app = create_operator_app(
         operator,
         OperatorAuth(tokens),
-        settings=OperatorApiSettings(fixture_mode=True),
+        settings=OperatorApiSettings(fixture_mode=True, bearer_api_enabled=True),
         tiered=service,
     )
     async with httpx.AsyncClient(
@@ -604,7 +836,7 @@ def test_real_http_api_dispatches_blocking_model_calls_concurrently(
     app = create_operator_app(
         OperatorService(ROOT, tmp_path / "operator"),
         OperatorAuth(tokens),
-        settings=OperatorApiSettings(fixture_mode=False),
+        settings=OperatorApiSettings(fixture_mode=False, bearer_api_enabled=True),
         tiered=service,
     )
     with socket.socket() as listener:

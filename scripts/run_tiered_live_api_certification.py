@@ -311,6 +311,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"http://127.0.0.1:{port}",
                 f"http://localhost:{port}",
             ),
+            bearer_api_enabled=True,
         ),
         tiered=tiered,
     )

@@ -96,7 +96,7 @@ def app(tmp_path: Path) -> object:
     return create_operator_app(
         operator,
         OperatorAuth(TOKENS),
-        settings=OperatorApiSettings(fixture_mode=True),
+        settings=OperatorApiSettings(fixture_mode=True, bearer_api_enabled=True),
         research=_fixture_research(tmp_path),
     )
 
@@ -274,12 +274,22 @@ async def test_static_gui_is_responsive_pwa_shell(app: object) -> None:
     ) as client:
         page = await client.get("/")
         assert page.status_code == 200
-        assert 'id="dashboard"' in page.text
+        assert 'id="chat"' in page.text
         assert 'id="research"' in page.text
-        assert 'id="approvals"' in page.text
+        assert 'id="auth-dialog"' in page.text
+        assert 'type="email"' in page.text
+        assert "Access token" not in page.text
         assert "viewport" in page.text
         css = await client.get("/assets/app.css")
         assert "@media (max-width: 760px)" in css.text
+        javascript = await client.get("/assets/app.js")
+        assert "localStorage" not in javascript.text
+        assert "sessionStorage" not in javascript.text
+        assert ".innerHTML" not in javascript.text
         manifest = await client.get("/manifest.webmanifest")
         assert manifest.json()["display"] == "standalone"
+        worker = await client.get("/sw.js")
+        assert "cache.add" not in worker.text
+        assert "caches.match" not in worker.text
+        assert "caches.delete" in worker.text
         assert "default-src 'self'" in page.headers["content-security-policy"]

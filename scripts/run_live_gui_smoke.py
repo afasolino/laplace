@@ -59,6 +59,7 @@ def main() -> int:
         settings=OperatorApiSettings(
             port=port,
             allowed_origins=(base_url, f"http://localhost:{port}"),
+            bearer_api_enabled=True,
         ),
         research=research,
     )
