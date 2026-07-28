@@ -1,0 +1,64 @@
+schema_version: 1
+operating_mode: server
+security:
+  local_only: true
+  bind_host: 127.0.0.1
+  allow_model_downloads: false
+  allow_telemetry: false
+  redact_paths: true
+storage:
+  state_root: /srv/laplace/state
+  minimum_free_bytes: 536870912
+logging:
+  level: INFO
+  structured: true
+governance:
+  per_user_bytes: 5368709120
+  global_bytes: 107374182400
+  soft_delete_days: 30
+  audit_retention_days: 365
+providers:
+  - provider_id: local-ollama
+    display_name: Local Ollama
+    provider_type: ollama
+    endpoint: http://127.0.0.1:11434
+    model_id: configured-local-model
+    lifecycle: unowned
+    enabled: false
+    timeout_seconds: 10.0
+    context_limit: 8192
+    output_limit: 4096
+    embedding_support: true
+  - provider_id: selected-vllm
+    display_name: Selected local vLLM route
+    provider_type: vllm
+    endpoint: http://127.0.0.1:8201
+    model_id: configured-local-model
+    lifecycle: owned
+    enabled: false
+    timeout_seconds: 10.0
+    context_limit: 8192
+    output_limit: 4096
+    embedding_support: false
+  - provider_id: fixture
+    display_name: Deterministic fixture provider
+    provider_type: fixture
+    endpoint: fixture://in-memory
+    model_id: fixture-model-v1
+    lifecycle: fixture
+    enabled: true
+    timeout_seconds: 10.0
+    context_limit: 8192
+    output_limit: 4096
+    embedding_support: false
+routes:
+  - route_id: fixture
+    display_name: Deterministic fixture route
+    provider_id: fixture
+    model_id: fixture-model-v1
+    lane: fixture
+    enabled: true
+secrets:
+  session_key_env: LAPLACE_SESSION_KEY
+  owner_hmac_key_env: LAPLACE_OWNER_HMAC_KEY
+  backup_key_env: LAPLACE_BACKUP_KEY

@@ -1,0 +1,78 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "chunk_count": {
+      "minimum": 0,
+      "title": "Chunk Count",
+      "type": "integer"
+    },
+    "corpus_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Corpus Id",
+      "type": "string"
+    },
+    "extracted_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Extracted Sha256",
+      "type": "string"
+    },
+    "indexed_at_utc": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Indexed At Utc"
+    },
+    "logical_name": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Logical Name",
+      "type": "string"
+    },
+    "original_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Original Sha256",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "source_class": {
+      "enum": [
+        "user_work",
+        "external_literature",
+        "technical_documentation",
+        "project_document",
+        "experiment_record"
+      ],
+      "title": "Source Class",
+      "type": "string"
+    },
+    "source_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Source Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "source_id",
+    "corpus_id",
+    "logical_name",
+    "source_class",
+    "original_sha256",
+    "extracted_sha256",
+    "chunk_count"
+  ],
+  "title": "CorpusSourceV1",
+  "type": "object"
+}

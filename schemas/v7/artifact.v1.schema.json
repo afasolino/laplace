@@ -1,0 +1,67 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "artifact_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Content Sha256",
+      "type": "string"
+    },
+    "created_at_utc": {
+      "title": "Created At Utc",
+      "type": "string"
+    },
+    "logical_name": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Logical Name",
+      "type": "string"
+    },
+    "media_type": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Media Type",
+      "type": "string"
+    },
+    "owner_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Owner Id",
+      "type": "string"
+    },
+    "retention_class": {
+      "maxLength": 80,
+      "minLength": 1,
+      "title": "Retention Class",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "size_bytes": {
+      "minimum": 0,
+      "title": "Size Bytes",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "artifact_id",
+    "owner_id",
+    "logical_name",
+    "content_sha256",
+    "media_type",
+    "size_bytes",
+    "retention_class",
+    "created_at_utc"
+  ],
+  "title": "ArtifactV1",
+  "type": "object"
+}

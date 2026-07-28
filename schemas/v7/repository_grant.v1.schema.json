@@ -1,0 +1,64 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "active": {
+      "title": "Active",
+      "type": "boolean"
+    },
+    "created_at_utc": {
+      "title": "Created At Utc",
+      "type": "string"
+    },
+    "expires_at_utc": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expires At Utc"
+    },
+    "grant_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Grant Id",
+      "type": "string"
+    },
+    "repository_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Repository Id",
+      "type": "string"
+    },
+    "revision": {
+      "minimum": 1,
+      "title": "Revision",
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "user_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "User Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "grant_id",
+    "user_id",
+    "repository_id",
+    "revision",
+    "active",
+    "created_at_utc"
+  ],
+  "title": "RepositoryGrantV1",
+  "type": "object"
+}

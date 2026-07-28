@@ -1,0 +1,58 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "display_name": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Display Name",
+      "type": "string"
+    },
+    "enabled": {
+      "title": "Enabled",
+      "type": "boolean"
+    },
+    "lane": {
+      "enum": [
+        "quality",
+        "standard",
+        "economy",
+        "codev",
+        "fixture"
+      ],
+      "title": "Lane",
+      "type": "string"
+    },
+    "model_id": {
+      "maxLength": 320,
+      "minLength": 1,
+      "title": "Model Id",
+      "type": "string"
+    },
+    "provider_id": {
+      "pattern": "^[a-z][a-z0-9_.-]{0,79}$",
+      "title": "Provider Id",
+      "type": "string"
+    },
+    "route_id": {
+      "pattern": "^[a-z][a-z0-9_.-]{0,79}$",
+      "title": "Route Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "route_id",
+    "display_name",
+    "provider_id",
+    "model_id",
+    "lane",
+    "enabled"
+  ],
+  "title": "RouteV1",
+  "type": "object"
+}

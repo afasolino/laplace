@@ -1,0 +1,73 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "corpus_class": {
+      "enum": [
+        "project",
+        "personal",
+        "shared",
+        "formal_science"
+      ],
+      "title": "Corpus Class",
+      "type": "string"
+    },
+    "corpus_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Corpus Id",
+      "type": "string"
+    },
+    "display_name": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Display Name",
+      "type": "string"
+    },
+    "indexing_state": {
+      "enum": [
+        "EMPTY",
+        "STAGING",
+        "INDEXING",
+        "READY",
+        "DEGRADED",
+        "DELETED"
+      ],
+      "title": "Indexing State",
+      "type": "string"
+    },
+    "owner_id": {
+      "anyOf": [
+        {
+          "maxLength": 160,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Owner Id"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "snapshot_revision": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Snapshot Revision",
+      "type": "string"
+    }
+  },
+  "required": [
+    "corpus_id",
+    "corpus_class",
+    "display_name",
+    "snapshot_revision",
+    "indexing_state"
+  ],
+  "title": "CorpusV1",
+  "type": "object"
+}

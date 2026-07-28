@@ -1,0 +1,73 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Action",
+      "type": "string"
+    },
+    "actor_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Actor Id",
+      "type": "string"
+    },
+    "event_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Event Id",
+      "type": "string"
+    },
+    "occurred_at_utc": {
+      "title": "Occurred At Utc",
+      "type": "string"
+    },
+    "outcome": {
+      "enum": [
+        "allowed",
+        "denied",
+        "completed",
+        "failed"
+      ],
+      "title": "Outcome",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "subject_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Subject Id",
+      "type": "string"
+    },
+    "subject_type": {
+      "maxLength": 80,
+      "minLength": 1,
+      "title": "Subject Type",
+      "type": "string"
+    },
+    "trace_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Trace Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "event_id",
+    "occurred_at_utc",
+    "actor_id",
+    "action",
+    "subject_type",
+    "subject_id",
+    "outcome",
+    "trace_id"
+  ],
+  "title": "AuditEventV1",
+  "type": "object"
+}

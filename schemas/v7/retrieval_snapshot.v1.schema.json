@@ -1,0 +1,120 @@
+{
+  "$defs": {
+    "CitationV1": {
+      "additionalProperties": false,
+      "properties": {
+        "chunk_id": {
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "Chunk Id",
+          "type": "string"
+        },
+        "page": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section"
+        },
+        "source_id": {
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "source_title": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Source Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "source_title",
+        "chunk_id"
+      ],
+      "title": "CitationV1",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "citations": {
+      "items": {
+        "$ref": "#/$defs/CitationV1"
+      },
+      "title": "Citations",
+      "type": "array"
+    },
+    "corpus_revisions": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Corpus Revisions",
+      "type": "array"
+    },
+    "created_at_utc": {
+      "title": "Created At Utc",
+      "type": "string"
+    },
+    "owner_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Owner Id",
+      "type": "string"
+    },
+    "query_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Query Sha256",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "snapshot_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Snapshot Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "snapshot_id",
+    "owner_id",
+    "corpus_revisions",
+    "query_sha256",
+    "citations",
+    "created_at_utc"
+  ],
+  "title": "RetrievalSnapshotV1",
+  "type": "object"
+}

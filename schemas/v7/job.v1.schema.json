@@ -1,0 +1,59 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "created_at_utc": {
+      "title": "Created At Utc",
+      "type": "string"
+    },
+    "job_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Job Id",
+      "type": "string"
+    },
+    "job_type": {
+      "maxLength": 80,
+      "minLength": 1,
+      "title": "Job Type",
+      "type": "string"
+    },
+    "owner_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Owner Id",
+      "type": "string"
+    },
+    "request_digest": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Request Digest",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "state": {
+      "maxLength": 80,
+      "minLength": 1,
+      "title": "State",
+      "type": "string"
+    },
+    "updated_at_utc": {
+      "title": "Updated At Utc",
+      "type": "string"
+    }
+  },
+  "required": [
+    "job_id",
+    "owner_id",
+    "job_type",
+    "state",
+    "request_digest",
+    "created_at_utc",
+    "updated_at_utc"
+  ],
+  "title": "JobV1",
+  "type": "object"
+}

@@ -1,0 +1,46 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "capabilities": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Capabilities",
+      "type": "array"
+    },
+    "enabled": {
+      "title": "Enabled",
+      "type": "boolean"
+    },
+    "revision": {
+      "minimum": 1,
+      "title": "Revision",
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "updated_at_utc": {
+      "title": "Updated At Utc",
+      "type": "string"
+    },
+    "user_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "User Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "user_id",
+    "capabilities",
+    "revision",
+    "enabled",
+    "updated_at_utc"
+  ],
+  "title": "CapabilityAssignmentV1",
+  "type": "object"
+}

@@ -1,0 +1,38 @@
+schema_version: 1
+providers:
+  - provider_id: local-ollama
+    display_name: Local Ollama
+    provider_type: ollama
+    endpoint: http://127.0.0.1:11434
+    lifecycle: unowned
+    configured_model_id: configured-local-model
+    capabilities:
+      streaming: true
+      tools: false
+      structured_output: true
+      embeddings: true
+      thinking_control: true
+      requires_gpu: false
+      supports_cpu: true
+      can_start: false
+      can_stop: false
+  - provider_id: selected-vllm
+    display_name: Selected local vLLM route
+    provider_type: vllm
+    endpoint: http://127.0.0.1:8201
+    lifecycle: owned
+    configured_model_id: configured-local-model
+    capabilities:
+      streaming: true
+      tools: true
+      structured_output: true
+      embeddings: false
+      thinking_control: true
+      requires_gpu: true
+      supports_cpu: false
+      can_start: false
+      can_stop: false
+notes:
+  - This inventory is illustrative and is not loaded as deployment configuration.
+  - Provider adapters never download a model or control a process.
+  - Owned lifecycle is enforced by the separate model lifecycle service.

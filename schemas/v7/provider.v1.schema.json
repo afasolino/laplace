@@ -1,0 +1,133 @@
+{
+  "$defs": {
+    "ProviderCapabilitiesV1": {
+      "additionalProperties": false,
+      "properties": {
+        "can_start": {
+          "title": "Can Start",
+          "type": "boolean"
+        },
+        "can_stop": {
+          "title": "Can Stop",
+          "type": "boolean"
+        },
+        "embeddings": {
+          "title": "Embeddings",
+          "type": "boolean"
+        },
+        "requires_gpu": {
+          "title": "Requires Gpu",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "streaming": {
+          "title": "Streaming",
+          "type": "boolean"
+        },
+        "structured_output": {
+          "title": "Structured Output",
+          "type": "boolean"
+        },
+        "supports_cpu": {
+          "title": "Supports Cpu",
+          "type": "boolean"
+        },
+        "thinking_control": {
+          "title": "Thinking Control",
+          "type": "boolean"
+        },
+        "tools": {
+          "title": "Tools",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "streaming",
+        "tools",
+        "structured_output",
+        "embeddings",
+        "thinking_control",
+        "requires_gpu",
+        "supports_cpu",
+        "can_start",
+        "can_stop"
+      ],
+      "title": "ProviderCapabilitiesV1",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "capabilities": {
+      "$ref": "#/$defs/ProviderCapabilitiesV1"
+    },
+    "context_limit": {
+      "maximum": 10000000,
+      "minimum": 256,
+      "title": "Context Limit",
+      "type": "integer"
+    },
+    "display_name": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Display Name",
+      "type": "string"
+    },
+    "endpoint": {
+      "title": "Endpoint",
+      "type": "string"
+    },
+    "lifecycle": {
+      "enum": [
+        "owned",
+        "unowned",
+        "fixture"
+      ],
+      "title": "Lifecycle",
+      "type": "string"
+    },
+    "output_limit": {
+      "maximum": 1000000,
+      "minimum": 1,
+      "title": "Output Limit",
+      "type": "integer"
+    },
+    "provider_id": {
+      "pattern": "^[a-z][a-z0-9_.-]{0,79}$",
+      "title": "Provider Id",
+      "type": "string"
+    },
+    "provider_type": {
+      "enum": [
+        "fixture",
+        "ollama",
+        "vllm"
+      ],
+      "title": "Provider Type",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "provider_id",
+    "display_name",
+    "provider_type",
+    "endpoint",
+    "lifecycle",
+    "context_limit",
+    "output_limit",
+    "capabilities"
+  ],
+  "title": "ProviderV1",
+  "type": "object"
+}
