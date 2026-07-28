@@ -155,30 +155,30 @@ def _migration_evidence(root: Path) -> dict[str, object]:
     state = root / "migration-fixture"
     interrupted = root / "migration-interrupted"
     try:
-        create_synthetic_v0_state(state, state_id="certification-fixture")
+        create_synthetic_v0_state(state, state_id="fixture-certification")
         before = preflight(state)
         dry_run = migrate(
             state,
-            expected_state_id="certification-fixture",
+            expected_state_id="fixture-certification",
             dry_run=True,
         )
         applied = migrate(
             state,
-            expected_state_id="certification-fixture",
+            expected_state_id="fixture-certification",
             dry_run=False,
         )
         after = preflight(state)
         rollback = rollback_to_backup(
             state,
-            expected_state_id="certification-fixture",
+            expected_state_id="fixture-certification",
             backup_id=str(applied["backup_id"]),
         )
-        create_synthetic_v0_state(interrupted, state_id="interrupted-fixture")
+        create_synthetic_v0_state(interrupted, state_id="fixture-interrupted")
         interrupted_rolled_back = False
         try:
             migrate(
                 interrupted,
-                expected_state_id="interrupted-fixture",
+                expected_state_id="fixture-interrupted",
                 dry_run=False,
                 fail_after=2,
             )
@@ -629,4 +629,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
