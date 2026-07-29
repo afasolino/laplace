@@ -832,7 +832,6 @@ def test_pinned_model_profiles_align_and_unavailable_artifacts_fail_closed(
         for record in local["artifacts"]
         if isinstance(record, dict)
     }
-    assert by_id["phase1_main"]["available"] is True
     assert all(isinstance(by_id[artifact_id]["available"], bool) for artifact_id in by_id)
 
     missing_experiment = tmp_path / "experiment"
@@ -1492,6 +1491,7 @@ def _run_fake_managed_all(tmp_path: Path, *, fail_phase: str = "") -> tuple[list
     return controls, servers
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Bash lifecycle integration is POSIX-only")
 def test_managed_all_orders_phases_and_reuses_qwen_main(tmp_path: Path) -> None:
     controls, servers = _run_fake_managed_all(tmp_path)
     positions = {
@@ -1523,6 +1523,7 @@ def test_managed_all_orders_phases_and_reuses_qwen_main(tmp_path: Path) -> None:
     assert "external" not in tokens
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Bash lifecycle integration is POSIX-only")
 def test_managed_all_failure_prevents_next_phase(tmp_path: Path) -> None:
     controls, servers = _run_fake_managed_all(tmp_path, fail_phase="phase2")
     assert any("run-phase2" in line for line in controls)
@@ -1532,6 +1533,7 @@ def test_managed_all_failure_prevents_next_phase(tmp_path: Path) -> None:
     assert any("stop-phase2" in line for line in servers)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Bash lifecycle integration is POSIX-only")
 def test_phase2_phase3_serial_launcher_verifies_orders_stops_and_merges(tmp_path: Path) -> None:
     python, manager, control_log, server_log = _fake_three_phase_controls(tmp_path)
     phase_state = tmp_path / "completed_phases"
@@ -1582,9 +1584,11 @@ def test_phase2_phase3_serial_launcher_verifies_orders_stops_and_merges(tmp_path
     ]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Bash lifecycle integration is POSIX-only")
 def test_server_manager_accepts_absolute_vllm_override() -> None:
     environment = os.environ.copy()
     environment["LAPLACE_VLLM_EXECUTABLE"] = "/opt/laplace/vllm-cu129/bin/vllm"
+    environment["LAPLACE_CONTROL_PLANE_PYTHON"] = sys.executable
     completed = subprocess.run(
         [
             str(REPOSITORY_ROOT / "scripts/manage_multilanguage_model_servers.sh"),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import os
 import sys
 from pathlib import Path
 
@@ -42,7 +43,9 @@ def test_codex_lane_receives_the_same_two_repair_cycle_budget() -> None:
 
 def test_codex_lane_pins_the_control_plane_python_environment() -> None:
     environment = _codex_environment(sys.executable)
-    assert environment["PATH"].split(":")[0].endswith(".venv/bin")
+    expected_bin = str(Path(sys.executable).absolute().parent)
+    assert environment["PATH"].split(os.pathsep)[0] == expected_bin
+    assert environment["VIRTUAL_ENV"] == str(Path(expected_bin).parent)
     assert environment["PYTHONNOUSERSITE"] == "1"
 
 

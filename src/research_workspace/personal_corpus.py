@@ -14,7 +14,6 @@ import mimetypes
 import multiprocessing
 import os
 import re
-import resource
 import secrets
 import shutil
 import sqlite3
@@ -31,6 +30,11 @@ from multiprocessing.connection import Connection
 
 from defusedxml import ElementTree
 from pypdf import PdfReader
+
+try:
+    import resource
+except ImportError:  # pragma: no cover - exercised by the Windows CI matrix
+    resource = None  # type: ignore[assignment]
 
 JsonObject: TypeAlias = dict[str, object]
 
@@ -380,7 +384,11 @@ def _extract_worker(
     memory_limit_bytes: int,
 ) -> None:
     try:
-        resource.setrlimit(resource.RLIMIT_AS, (memory_limit_bytes, memory_limit_bytes))
+        if resource is not None:
+            resource.setrlimit(
+                resource.RLIMIT_AS,
+                (memory_limit_bytes, memory_limit_bytes),
+            )
         extracted = _extract(path, content)
         connection.send(("ok", extracted))
     except CorpusError as exc:

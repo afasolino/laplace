@@ -43,6 +43,10 @@ The release review deliberately distinguishes these boundaries:
   changed paths, size, and SHA-256.
 - GPU observation and SpecDec arbitration now fail closed when either GPU or
   compute-process ownership evidence is incomplete.
+- Clean-clone tests no longer consume ignored models, historical GPU probes, a
+  repository-local virtual environment, or optional EDA tools.
+- Portable execution-record locks use the host-native primitive, and corpus
+  parser isolation imports without POSIX-only modules on Windows.
 - SSH/HTTPS sync transports remain staged policy boundaries; the fixture
   transport is a reference implementation, not a production transport.
 - Current vulnerability-database lookup and Windows-native execution remain
@@ -51,4 +55,3 @@ The release review deliberately distinguishes these boundaries:
 Final certification evidence is produced by
 `scripts/run_release_candidate_v8_certification.py`. The final decision is made
 only against [GO_NO_GO_CRITERIA_V8.md](GO_NO_GO_CRITERIA_V8.md).
-

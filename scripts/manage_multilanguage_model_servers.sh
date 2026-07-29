@@ -6,7 +6,7 @@
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
 STATE_DIR="${ROOT}/outputs/a6000_agent_team/model_servers"
-PYTHON="${ROOT}/.venv/bin/python"
+PYTHON="${LAPLACE_CONTROL_PLANE_PYTHON:-${ROOT}/.venv/bin/python}"
 OWNER_TOKEN="${LAPLACE_SERVER_OWNER_TOKEN:-}"
 VLLM_OVERRIDE="${LAPLACE_VLLM_EXECUTABLE:-}"
 FFMPEG_LIBRARY_PATH="${LAPLACE_FFMPEG_LIBRARY_PATH:-${ROOT}/.runtime/ffmpeg7/lib}"

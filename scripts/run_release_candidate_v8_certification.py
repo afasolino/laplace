@@ -53,6 +53,22 @@ ALLOWED_LIVE_STATUSES = {
 }
 
 
+def _validated_live_result(
+    value: dict[str, object],
+) -> tuple[dict[str, object], bool]:
+    if value.get("status") in ALLOWED_LIVE_STATUSES:
+        return value, True
+    return (
+        {
+            "schema_version": 1,
+            "status": "NOT_RUN_DUE_TO_EARLIER_P0_DEFECT",
+            "reason": "supplied live result had an invalid status",
+            "supplied_result_valid": False,
+        },
+        False,
+    )
+
+
 def _timestamp() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
@@ -246,6 +262,76 @@ def _defects() -> list[dict[str, object]]:
             "certification evidence sanitation",
             "b01b871",
             "registered GUI fixture serialized a personal identifier",
+        ),
+        (
+            "RCV8-008",
+            "P1",
+            "remote package build",
+            "fce6952",
+            "package workflow invoked uv without installing the pinned builder",
+        ),
+        (
+            "RCV8-009",
+            "P1",
+            "clean-clone CI isolation",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "tests/test_model_servers.py",
+            ),
+            "unit tests depended on ignored model, GPU-evidence, and EDA assets",
+        ),
+        (
+            "RCV8-010",
+            "P1",
+            "Windows import portability",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "src/research_workspace/execution_records.py",
+            ),
+            "portable modules imported fcntl and resource unconditionally",
+        ),
+        (
+            "RCV8-011",
+            "P2",
+            "CI action runtime",
+            _git(ROOT, "log", "-1", "--format=%h", "--", ".github/workflows"),
+            "pinned actions used the deprecated Node.js 20 runtime",
+        ),
+        (
+            "RCV8-012",
+            "P1",
+            "live evidence sanitation",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "scripts/run_live_production_gpu_certification.py",
+            ),
+            "live screenshots and JSON used a personal identifier-shaped account",
+        ),
+        (
+            "RCV8-013",
+            "P1",
+            "live-result decision integrity",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "scripts/run_release_candidate_v8_certification.py",
+            ),
+            "an invalid supplied live result was normalized without failing a gate",
         ),
     )
     return [
@@ -638,6 +724,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     _write_json(output / "usability_results.json", _sanitize(usability))
 
+    live_input_valid = True
     if arguments.live_gpu_results is not None:
         live = _load(arguments.live_gpu_results.resolve(), "live_gpu_result_missing")
     else:
@@ -648,12 +735,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "model_servers_started": False,
             "production_state_modified": False,
         }
-    if live.get("status") not in ALLOWED_LIVE_STATUSES:
-        live = {
-            "schema_version": 1,
-            "status": "NOT_RUN_DUE_TO_EARLIER_P0_DEFECT",
-            "reason": "supplied live result had an invalid status",
-        }
+    live, live_input_valid = _validated_live_result(live)
     _write_json(output / "live_gpu_results.json", _sanitize(live))
 
     defects = _defects()
@@ -725,7 +807,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "production_processes_touched_by_cpu_certification": False,
         "gpu_commands_executed_by_cpu_certification": False,
     }
-    _write_json(output / "machine_summary.json", machine)
     process_proof = {
         "schema_version": 1,
         "status": "PASS",
@@ -764,6 +845,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "usability": usability["status"],
         "documentation": documentation.get("status"),
         "security": security["status"],
+        "live_result_valid": "PASS" if live_input_valid else "FAIL",
         "repository": "PASS"
         if branch == V8_BRANCH
         and base_is_ancestor
@@ -776,6 +858,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     cpu_status = (
         "PASS" if all(value == "PASS" for value in required_statuses.values()) else "FAIL"
     )
+    machine["status"] = cpu_status
+    _write_json(output / "machine_summary.json", machine)
     decision = (
         "NO_GO_DEFECTS_REMAIN"
         if cpu_status != "PASS"

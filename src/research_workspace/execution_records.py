@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -13,7 +12,12 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Iterator, Mapping, Sequence, TypeAlias
+from typing import BinaryIO, Callable, Iterator, Mapping, Sequence, TypeAlias
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 JsonObject: TypeAlias = dict[str, object]
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9._-]{1,160}$")
@@ -36,6 +40,37 @@ class RunIdentityConflict(ExecutionRecordError):
 
 class StageWorkflowInterrupted(ExecutionRecordError):
     """A deterministic fixture interruption occurred after a durable stage."""
+
+
+def _lock_file(handle: BinaryIO) -> None:
+    """Acquire an exclusive advisory lock using the host-native primitive."""
+
+    if os.name == "nt":
+        handle.seek(0)
+        if not handle.read(1):
+            handle.seek(0)
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        msvcrt.locking(  # type: ignore[attr-defined]
+            handle.fileno(),
+            msvcrt.LK_LOCK,  # type: ignore[attr-defined]
+            1,
+        )
+        return
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_file(handle: BinaryIO) -> None:
+    if os.name == "nt":
+        handle.seek(0)
+        msvcrt.locking(  # type: ignore[attr-defined]
+            handle.fileno(),
+            msvcrt.LK_UNLCK,  # type: ignore[attr-defined]
+            1,
+        )
+        return
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def utc_now() -> str:
@@ -62,11 +97,12 @@ def _atomic_json(path: Path, value: object) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
-    directory_fd = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
+    if os.name != "nt":
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
 
 @dataclass(frozen=True)
@@ -116,11 +152,11 @@ class RunIdentityStore:
     def _locked(self) -> Iterator[None]:
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         with self.lock_path.open("a+b") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            _lock_file(handle)
             try:
                 yield
             finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                _unlock_file(handle)
 
     def initialize(self, identity: RunIdentity) -> JsonObject:
         with self._locked():
@@ -210,11 +246,11 @@ class AppendOnlyEventLog:
     def _locked(self) -> Iterator[None]:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.lock_path.open("a+b") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            _lock_file(handle)
             try:
                 yield
             finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                _unlock_file(handle)
 
     def _recover_truncated_final_line(self) -> str | None:
         if not self.path.is_file():
@@ -449,14 +485,14 @@ class LocalTraceRecorder:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.lock_path.open("a+b") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            _lock_file(lock)
             try:
                 with self.path.open("ab") as handle:
                     handle.write(canonical_json_bytes(record) + b"\n")
                     handle.flush()
                     os.fsync(handle.fileno())
             finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                _unlock_file(lock)
 
     @contextmanager
     def span(

@@ -1005,6 +1005,7 @@ def test_benchmark_mix_context_quality_and_concurrency_are_deterministic(
     assert all(item.queue_time_ms is not None for item in measured)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="process-group lifecycle is POSIX-only")
 def test_safe_shutdown_releases_only_recorded_process_group(tmp_path: Path) -> None:
     owned_process = subprocess.Popen(["sleep", "120"], start_new_session=True)
     unrelated = subprocess.Popen(["sleep", "120"], start_new_session=True)

@@ -31,8 +31,6 @@ from research_workspace.serving_profile_runtime import (
 )
 
 from run_registered_live_gpu_smoke import (
-    ADMIN_EMAIL,
-    PLUS_EMAIL,
     REPO_ID,
     _activate,
     _admin,
@@ -42,6 +40,9 @@ from run_registered_live_gpu_smoke import (
     _git_fixture,
     _wait_for_server,
 )
+
+ADMIN_EMAIL = "fixture-live-admin@example.test"
+PLUS_EMAIL = "fixture-live-plus@example.test"
 
 
 ROOT = Path(__file__).resolve().parents[1]

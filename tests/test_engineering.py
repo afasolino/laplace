@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -373,6 +374,9 @@ def test_mcp_research_uses_configured_shared_reference_root(
 
 
 def test_eda_flow_runs_lint_self_checking_simulation_and_synthesis() -> None:
+    required = ("verilator", "iverilog", "vvp", "yosys")
+    if any(shutil.which(tool) is None for tool in required):
+        pytest.skip("local EDA integration requires verilator, iverilog, vvp, and yosys")
     result = LocalToolRunner(REPOSITORY_ROOT).run_eda_flow(
         ["benchmarks/a6000_agent_team/rtl/rv_skid_buffer.sv"],
         top_module="rv_skid_buffer",

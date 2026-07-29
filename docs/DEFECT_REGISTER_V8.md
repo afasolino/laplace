@@ -113,3 +113,93 @@
 - Regression test: rerun the registered GUI fixture and scan output.
 - Status: FIXED.
 - Commit: `b01b871`.
+
+## RCV8-008 — P1 — remote package build
+
+- Evidence: the first remote package job invoked `uv build` on a runner where
+  `uv` had not been installed.
+- Reproduction: run the package workflow at `82e1dcc`.
+- Expected: the package job installs the exact audited builder before use.
+- Observed: the job exited before producing package evidence.
+- Security/data-loss impact: false package readiness; no production mutation.
+- Minimal fix: pin and install `uv==0.11.28` in the read-only package job.
+- Regression test: remote package-build workflow at the repaired commit.
+- Status: FIXED.
+- Commit: `fce6952`.
+
+## RCV8-009 — P1 — clean-clone CI isolation
+
+- Evidence: Linux remote tests read ignored local model paths, historical GPU
+  probes, a repository-local virtual environment, and optional EDA binaries.
+- Reproduction: run the non-browser suite from a clean clone.
+- Expected: unit/fixture tests are independent of models and optional host tools.
+- Observed: clean-clone assertions failed although the same tests passed in the
+  prepared implementation worktree.
+- Security/data-loss impact: false-positive local certification and
+  non-reproducible CI.
+- Minimal fix: use synthetic GPU evidence, avoid requiring model availability,
+  inject the control-plane interpreter, and skip only the explicit EDA
+  integration when its native tools are absent.
+- Regression test: clean-clone non-browser suite and the remote Linux matrix.
+- Status: FIXED in the final CI repair commit.
+- Commit: recorded in final `defect_register.json`.
+
+## RCV8-010 — P1 — Windows import portability
+
+- Evidence: Windows CI collection failed on unconditional imports of `fcntl` and
+  `resource`.
+- Reproduction: collect the suite on Windows/Python 3.11 or 3.12 at `fce6952`.
+- Expected: portable control-plane and corpus modules import on supported
+  platforms; process locks use native primitives.
+- Observed: `ModuleNotFoundError` prevented test collection.
+- Security/data-loss impact: Windows package unusable for supported client-side
+  and fixture operations.
+- Minimal fix: host-native advisory locks, POSIX directory `fsync` only on POSIX,
+  and optional parser address-space limits while retaining process timeout and
+  upload quotas everywhere.
+- Regression test: Windows/Python 3.11 and 3.12 remote jobs.
+- Status: FIXED in the final CI repair commit.
+- Commit: recorded in final `defect_register.json`.
+
+## RCV8-011 — P2 — CI action runtime
+
+- Evidence: GitHub annotated every job because the pinned checkout and
+  setup-python revisions used the deprecated Node.js 20 action runtime.
+- Reproduction: inspect remote annotations at `fce6952`.
+- Expected: immutable current action pins without runtime-deprecation warnings.
+- Observed: GitHub forced the actions onto Node.js 24.
+- Security/data-loss impact: future CI breakage risk; no application data impact.
+- Minimal fix: resolve official v5/v6 tags and pin their exact commits.
+- Regression test: static CI validation and the final remote workflow set.
+- Status: FIXED in the final CI repair commit.
+- Commit: recorded in final `defect_register.json`.
+
+## RCV8-012 — P1 — live evidence sanitation
+
+- Evidence: the guarded live runner imported a personal identifier-shaped admin
+  account into JSON and screenshots.
+- Reproduction: inspect `ADMIN_EMAIL` used by the live production certifier.
+- Expected: shareable certification evidence contains synthetic invalid-domain
+  identities only.
+- Observed: a real-looking personal identifier would be retained.
+- Security/data-loss impact: private-identifier disclosure in the final archive.
+- Minimal fix: override both live accounts with explicit `example.test` fixture
+  identities.
+- Regression test: static evidence scan plus any conditional live run.
+- Status: FIXED in the final CI repair commit.
+- Commit: recorded in final `defect_register.json`.
+
+## RCV8-013 — P1 — live-result decision integrity
+
+- Evidence: an input live result with status `FAIL` was normalized to an allowed
+  deferred status but did not make a CPU gate fail.
+- Reproduction: pass a JSON object with `"status": "FAIL"` to the v8 certifier.
+- Expected: an invalid supplied result produces `NO_GO_DEFECTS_REMAIN`.
+- Observed: the report could recommend proceeding to controlled live
+  certification.
+- Security/data-loss impact: false release evidence.
+- Minimal fix: retain an explicit supplied-result-validity gate while serializing
+  only the bounded status vocabulary.
+- Regression test: invalid-result certifier fixture and final integrated run.
+- Status: FIXED in the final CI repair commit.
+- Commit: recorded in final `defect_register.json`.

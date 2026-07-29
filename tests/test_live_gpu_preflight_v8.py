@@ -14,6 +14,9 @@ from run_live_production_gpu_certification import (  # noqa: E402
     _prepare_output,
     _validate_static_preflight,
 )
+from run_release_candidate_v8_certification import (  # noqa: E402
+    _validated_live_result,
+)
 
 
 @pytest.mark.parametrize(
@@ -71,3 +74,16 @@ def test_output_resume_requires_safe_terminal_record(tmp_path: Path) -> None:
     (output / "owned_profile_process.json").write_text("{}\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="ownership_record_present"):
         _prepare_output(output, resume=True)
+
+
+def test_invalid_live_result_is_bounded_and_fails_the_validity_gate() -> None:
+    bounded, valid = _validated_live_result(
+        {"schema_version": 1, "status": "FAIL", "detail": "fixture failure"}
+    )
+    assert valid is False
+    assert bounded == {
+        "schema_version": 1,
+        "status": "NOT_RUN_DUE_TO_EARLIER_P0_DEFECT",
+        "reason": "supplied live result had an invalid status",
+        "supplied_result_valid": False,
+    }

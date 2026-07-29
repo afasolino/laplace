@@ -64,13 +64,44 @@ def _gpu(free_mib: int = 49_000) -> dict[str, object]:
     }
 
 
-def test_repository_specs_and_empirical_threshold_are_exact() -> None:
+def test_repository_specs_and_empirical_threshold_are_exact(tmp_path: Path) -> None:
     specs = load_server_specs(ROOT)
     assert [(item.profile, item.port, item.expected_model_id) for item in specs] == [
         ("phase2_main", 8102, "laplace-qwen3.6-35b-a3b-w4a16"),
         ("phase2_rtl_worker", 8103, "laplace-codev-r1-rl-qwen-7b-w4a16"),
     ]
-    policy = derive_empirical_memory_policy(ROOT)
+    fixture = tmp_path / "repository"
+    (fixture / "codex_a6000").mkdir(parents=True)
+    (fixture / "codex_a6000/PROJECT_CONFIG.json").write_text(
+        json.dumps(
+            {
+                "hardware": {
+                    "minimum_free_vram_gib_after_main_server_start": 4,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    for index, used_mib in enumerate((43_501, 43_601, 43_701, 43_801, 43_750, 43_650)):
+        probe = (
+            fixture
+            / f"outputs/codev_fixture_{index}/project/host_logs/"
+            f"fixture_{index}_cuda_probe.json"
+        )
+        probe.parent.mkdir(parents=True)
+        probe.write_text(
+            json.dumps(
+                {
+                    "status": "PASS",
+                    "stdout": (
+                        f"NVIDIA RTX A6000, {used_mib}, "
+                        f"{49_140 - used_mib}, 49140"
+                    ),
+                }
+            ),
+            encoding="utf-8",
+        )
+    policy = derive_empirical_memory_policy(fixture)
     assert policy.maximum_observed_used_mib == 43_801
     assert policy.required_residual_free_mib == 4_096
     assert policy.required_pre_start_free_mib == 47_897
