@@ -16,7 +16,6 @@ from typing import Sequence
 from playwright.sync_api import sync_playwright
 
 from capture_user_guide_screenshots import (
-    ADMIN_EMAIL,
     _Agent,
     _Chat,
     _Models,
@@ -45,6 +44,8 @@ from research_workspace.user_capabilities import UserCapabilityStore
 
 
 ROOT = Path(__file__).resolve().parents[1]
+ADMIN_EMAIL = "fixture-admin@example.test"
+ADMIN_USER_ID = "usr_fixture_admin"
 
 
 def _bootstrap(registry: Path, sessions: Path) -> tuple[str, dict[str, object]]:
@@ -63,7 +64,7 @@ def _bootstrap(registry: Path, sessions: Path) -> tuple[str, dict[str, object]]:
             "--email",
             ADMIN_EMAIL,
             "--user-id",
-            "usr_afasolino",
+            ADMIN_USER_ID,
             "--display-name",
             "Alfonso Fasolino",
             "--capability-tier",
@@ -97,7 +98,7 @@ def _bootstrap(registry: Path, sessions: Path) -> tuple[str, dict[str, object]]:
 
 def _application(state_root: Path, port: int) -> object:
     registry = RegisteredUserRegistry(state_root / "auth/registered_users.yaml")
-    user = registry.require_user("usr_afasolino")
+    user = registry.require_user(ADMIN_USER_ID)
     capabilities = UserCapabilityStore(state_root / "tier/users.sqlite3")
     capabilities.set_user(user.user_id, user.capability_tier, enabled=user.enabled)
     routes = {
@@ -168,7 +169,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         session_path = state_root / "auth/sessions.sqlite3"
         activation_code, bootstrap = _bootstrap(registry_path, session_path)
         registry = RegisteredUserRegistry(registry_path)
-        user = registry.require_user("usr_afasolino")
+        user = registry.require_user(ADMIN_USER_ID)
         new_password = f"activated-{secrets.token_urlsafe(64)}"
         port = _free_port()
         app = _application(state_root, port)
@@ -218,7 +219,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             encoding="utf-8"
         )
         registry.reload()
-        activated = registry.require_user("usr_afasolino")
+        activated = registry.require_user(ADMIN_USER_ID)
         secret_absent = all(
             secret not in audit and secret not in registry_path.read_text(encoding="utf-8")
             for secret in (activation_code, new_password)
