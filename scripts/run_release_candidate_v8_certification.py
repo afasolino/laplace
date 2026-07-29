@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -91,6 +93,7 @@ def _sanitize(value: object, extra: dict[str, str] | None = None) -> object:
     replacements = {
         str(ROOT): "<implementation-worktree>",
         str(STABLE): "<stable-checkout>",
+        str(Path.home()): "<home>",
         str(Path(sys.executable)): "<python>",
     }
     if extra:
@@ -455,6 +458,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     operational["certification_command"] = operational_command
     _write_json(output / "operational_rehearsal.json", _sanitize(operational))
+    screenshot_evidence: list[str] = []
+    screenshot_records = operational.get("screenshots")
+    if isinstance(screenshot_records, list):
+        screenshot_output = output / "screenshots"
+        screenshot_output.mkdir()
+        for item in screenshot_records:
+            if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                continue
+            source = (operational_dir / "screenshots" / item["path"]).resolve()
+            expected = item.get("sha256")
+            if (
+                not source.is_relative_to(operational_dir / "screenshots")
+                or not source.is_file()
+                or source.is_symlink()
+                or not isinstance(expected, str)
+                or hashlib.sha256(source.read_bytes()).hexdigest() != expected
+            ):
+                raise RuntimeError("operational_screenshot_integrity_failed")
+            target = screenshot_output / source.name
+            shutil.copy2(source, target)
+            screenshot_evidence.append(target.relative_to(output).as_posix())
 
     desktop_command = _command(
         "desktop_sync_review",
@@ -764,7 +788,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     )
     archive = output / "certification.tar.gz"
-    archive_sha256 = create_archive(output, FINAL_EVIDENCE, archive)
+    archive_sha256 = create_archive(
+        output,
+        (*FINAL_EVIDENCE, *screenshot_evidence),
+        archive,
+    )
     archive_verification = verify_archive(archive)
     final_report = f"""# Laplace v8 release-candidate certification
 
