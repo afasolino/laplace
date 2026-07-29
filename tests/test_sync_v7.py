@@ -256,6 +256,61 @@ def test_patch_application_rejects_dirty_target_without_combining_changes(
     assert (target / "other.py").read_text(encoding="utf-8") == "OTHER = 2\n"
 
 
+def test_prepare_revalidates_patch_size_and_path_plan(tmp_path: Path) -> None:
+    source = _repository(tmp_path, "source")
+    (source / "module.py").write_text("VALUE = 6\n", encoding="utf-8")
+    plan, patch = RepositoryInspector().plan_upload(
+        source,
+        logical_repository_id="repo-a",
+    )
+    client = DesktopSyncClient(
+        owner_id="owner-a",
+        operations=SyncOperationStore(tmp_path / "sync/operations.sqlite3"),
+        transport=_service(source),
+    )
+    with pytest.raises(SyncError, match="sync_patch_plan_mismatch"):
+        client.prepare(
+            plan.model_copy(update={"patch_size_bytes": len(patch) + 1}),
+            patch,
+        )
+    with pytest.raises(SyncError, match="sync_patch_plan_mismatch"):
+        client.prepare(
+            plan.model_copy(update={"changed_paths": ("different.py",)}),
+            patch,
+        )
+
+
+def test_patch_application_rejects_same_head_on_different_branch(
+    tmp_path: Path,
+) -> None:
+    source = _repository(tmp_path, "source")
+    target = tmp_path / "target"
+    _git(tmp_path, "clone", "-q", str(source), str(target))
+    _git(target, "switch", "-q", "-c", "other-branch")
+    (source / "module.py").write_text("VALUE = 7\n", encoding="utf-8")
+    plan, patch = RepositoryInspector().plan_upload(
+        source,
+        logical_repository_id="repo-a",
+    )
+    with pytest.raises(SyncError, match="sync_branch_conflict"):
+        apply_confirmed_patch(
+            target,
+            plan=plan,
+            patch=patch,
+            confirmation=confirmation_for(plan.plan_id),
+        )
+
+
+def test_clean_and_detached_repository_snapshots_are_explicit(tmp_path: Path) -> None:
+    root = _repository(tmp_path, "source")
+    clean = RepositoryInspector().snapshot(root, logical_repository_id="repo-a")
+    assert clean.dirty is False
+    assert clean.changes == ()
+    _git(root, "checkout", "-q", "--detach")
+    detached = RepositoryInspector().snapshot(root, logical_repository_id="repo-a")
+    assert detached.branch == "DETACHED"
+
+
 def test_selection_path_links_submodules_and_transport_policy_fail_closed(
     tmp_path: Path,
 ) -> None:

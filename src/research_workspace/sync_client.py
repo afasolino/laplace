@@ -402,6 +402,15 @@ class DesktopSyncClient:
     def prepare(self, plan: SyncPlanV1, patch: bytes) -> SyncOperationV1:
         if hashlib.sha256(patch).hexdigest() != plan.patch_sha256:
             raise SyncError("sync_patch_hash_mismatch")
+        if len(patch) != plan.patch_size_bytes:
+            raise SyncError("sync_patch_plan_mismatch")
+        paths = validate_patch(
+            patch,
+            maximum_bytes=64 * 1024 * 1024,
+            maximum_files=2_000,
+        )
+        if paths != plan.changed_paths:
+            raise SyncError("sync_patch_plan_mismatch")
         timestamp = _now()
         operation = SyncOperationV1(
             operation_id=operation_id(plan, self.owner_id),
@@ -483,6 +492,9 @@ def apply_confirmed_patch(
         raise SyncError("sync_confirmation_required")
     if str(_git(root, "rev-parse", "HEAD")).strip().lower() != plan.base_head:
         raise SyncError("sync_base_conflict")
+    target_branch = str(_git(root, "branch", "--show-current")).strip() or "DETACHED"
+    if target_branch != plan.branch:
+        raise SyncError("sync_branch_conflict")
     target_status = str(
         _git(root, "status", "--porcelain=v1", "--untracked-files=all")
     ).strip()
