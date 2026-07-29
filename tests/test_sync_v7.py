@@ -311,6 +311,68 @@ def test_clean_and_detached_repository_snapshots_are_explicit(tmp_path: Path) ->
     assert detached.branch == "DETACHED"
 
 
+def test_staged_unstaged_and_quota_states_are_explicit(tmp_path: Path) -> None:
+    root = _repository(tmp_path, "source")
+    (root / "module.py").write_text("VALUE = 8\n", encoding="utf-8")
+    (root / "staged.py").write_text("STAGED = True\n", encoding="utf-8")
+    _git(root, "add", "staged.py")
+    (root / "untracked.py").write_text("UNTRACKED = True\n", encoding="utf-8")
+    snapshot = RepositoryInspector().snapshot(root, logical_repository_id="repo-a")
+    changes = {item.logical_path: item for item in snapshot.changes}
+    assert changes["module.py"].staged is False
+    assert changes["staged.py"].staged is True
+    assert changes["untracked.py"].included is False
+    with pytest.raises(SyncError, match="sync_file_count_exceeded"):
+        RepositoryInspector(maximum_files=2).snapshot(
+            root,
+            logical_repository_id="repo-a",
+        )
+
+
+def test_changed_links_nested_repositories_submodules_and_binary_are_rejected(
+    tmp_path: Path,
+) -> None:
+    linked = _repository(tmp_path, "linked")
+    (linked / "link.py").symlink_to("module.py")
+    _git(linked, "add", "link.py")
+    with pytest.raises(SyncError, match="symlink_rejected"):
+        RepositoryInspector().snapshot(linked, logical_repository_id="repo-a")
+
+    nested = _repository(tmp_path, "nested")
+    nested_file = nested / "vendor/code.py"
+    nested_file.parent.mkdir()
+    nested_file.write_text("VALUE = 1\n", encoding="utf-8")
+    _git(nested, "add", "vendor/code.py")
+    _git(nested, "commit", "-q", "-m", "track vendor")
+    (nested / "vendor/.git").mkdir()
+    nested_file.write_text("VALUE = 2\n", encoding="utf-8")
+    with pytest.raises(SyncError, match="nested_repository_rejected"):
+        RepositoryInspector().snapshot(nested, logical_repository_id="repo-a")
+
+    child = _repository(tmp_path, "child")
+    parent = _repository(tmp_path, "parent")
+    _git(
+        parent,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "-q",
+        str(child),
+        "vendor/child",
+    )
+    with pytest.raises(SyncError, match="submodules_not_supported"):
+        RepositoryInspector().snapshot(parent, logical_repository_id="repo-a")
+
+    binary = _repository(tmp_path, "binary")
+    (binary / "module.py").write_bytes(bytes(range(256)) * 16)
+    with pytest.raises(SyncError, match="sync_patch.*rejected"):
+        RepositoryInspector().plan_upload(
+            binary,
+            logical_repository_id="repo-a",
+        )
+
+
 def test_selection_path_links_submodules_and_transport_policy_fail_closed(
     tmp_path: Path,
 ) -> None:
