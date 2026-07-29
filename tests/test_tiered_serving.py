@@ -53,7 +53,9 @@ from research_workspace.serving_profiles import (
 )
 from research_workspace.serving_profile_runtime import (
     OwnedProfileProcess,
+    ServingRuntimeError,
     ServingProfileRuntime,
+    observe_gpu,
 )
 from research_workspace.serving_benchmark import (
     BenchmarkRequest,
@@ -71,6 +73,47 @@ from research_workspace.user_capabilities import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _nvidia_result(
+    returncode: int,
+    stdout: str = "",
+    stderr: str = "",
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        args=["nvidia-smi"],
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def test_gpu_observation_fails_closed_when_compute_ownership_is_uncertain() -> None:
+    responses = iter(
+        (
+            _nvidia_result(0, "Fixture GPU, 8192, 10, 8182, 0, 4.0\n"),
+            _nvidia_result(9, stderr="compute query unavailable"),
+        )
+    )
+    with pytest.raises(
+        ServingRuntimeError,
+        match="gpu_compute_observation_failed",
+    ):
+        observe_gpu(runner=lambda *args, **kwargs: next(responses))
+
+
+def test_gpu_observation_rejects_malformed_compute_rows() -> None:
+    responses = iter(
+        (
+            _nvidia_result(0, "Fixture GPU, 8192, 10, 8182, 0, 4.0\n"),
+            _nvidia_result(0, "not-a-pid\n"),
+        )
+    )
+    with pytest.raises(
+        ServingRuntimeError,
+        match="gpu_compute_observation_malformed",
+    ):
+        observe_gpu(runner=lambda *args, **kwargs: next(responses))
 
 
 def test_selected_main_routes_match_the_certified_p1_served_identity() -> None:

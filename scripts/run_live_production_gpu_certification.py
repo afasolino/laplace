@@ -22,6 +22,7 @@ from typing import Sequence, TextIO
 from playwright.sync_api import sync_playwright
 
 from research_workspace.model_artifacts import validate_local_artifacts
+from research_workspace.gpu_coordination import classify_compute_ownership
 from research_workspace.repository_authorization import RepositoryAuthorizationStore
 from research_workspace.serving_profile_runtime import (
     ServingProfileOperator,
@@ -53,6 +54,109 @@ CODEV_ENDPOINT = "http://127.0.0.1:8103"
 EXPERIMENT = (
     ROOT / "codex_a6000/experiments/multilanguage_dual_model_ablation_v1"
 )
+
+
+class GpuCoordinationBlocked(RuntimeError):
+    """Abort after cleanup while preserving a structured coordination result."""
+
+    def __init__(
+        self,
+        output: Path,
+        status: str,
+        evidence: dict[str, object],
+    ) -> None:
+        super().__init__(status)
+        self.output = output
+        self.status = status
+        self.evidence = evidence
+
+
+def _prepare_output(output: Path, *, resume: bool) -> None:
+    resolved = output.resolve()
+    if resolved == STABLE or STABLE in resolved.parents:
+        raise RuntimeError("output_root_must_not_use_stable_checkout")
+    if not resolved.exists():
+        resolved.mkdir(parents=True, exist_ok=False)
+        return
+    if not resume or not resolved.is_dir():
+        raise RuntimeError("output_root_exists_without_safe_resume")
+    result_path = resolved / "live_production_gpu_results.json"
+    try:
+        raw: object = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("resume_record_missing_or_invalid") from exc
+    safe_statuses = {
+        "BLOCKED_BY_SPECDEC_ACTIVE",
+        "BLOCKED_BY_UNCERTAIN_GPU_OWNERSHIP",
+        "YIELDED_TO_SPECDEC",
+    }
+    if not isinstance(raw, dict) or raw.get("status") not in safe_statuses:
+        raise RuntimeError("resume_record_not_retry_safe")
+    if tuple(resolved.rglob("owned_profile_process.json")):
+        raise RuntimeError("resume_ownership_record_present")
+
+
+def _validate_static_preflight(
+    *,
+    stable_clean: bool,
+    artifacts_available: bool,
+    occupied_endpoints: tuple[str, ...],
+    runtime_paths_available: bool,
+) -> None:
+    if not stable_clean:
+        raise RuntimeError("stable_checkout_not_clean")
+    if not artifacts_available:
+        raise RuntimeError("local_model_artifact_verification_failed")
+    if occupied_endpoints:
+        raise RuntimeError("unrelated_target_endpoint_active")
+    if not runtime_paths_available:
+        raise RuntimeError("required_local_runtime_path_missing")
+
+
+def _manifest(output: Path, *, status: str) -> dict[str, object]:
+    files = []
+    for path in sorted(item for item in output.rglob("*") if item.is_file()):
+        if path.name == "run_manifest.json":
+            continue
+        files.append(
+            {
+                "path": path.relative_to(output).as_posix(),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "size_bytes": path.stat().st_size,
+            }
+        )
+    return {
+        "schema_version": 1,
+        "status": status,
+        "repository_revision": subprocess.run(  # nosec B603 B607
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        ).stdout.strip(),
+        "files": files,
+        "production_state_modified": False,
+    }
+
+
+def _write_terminal_result(
+    output: Path,
+    *,
+    status: str,
+    evidence: dict[str, object],
+) -> None:
+    result = {
+        "schema_version": 1,
+        "status": status,
+        "coordination": evidence,
+        "model_servers_started": False,
+        "production_state_modified": False,
+        "unrelated_processes_preserved": True,
+    }
+    _write_json(output / "live_production_gpu_results.json", result)
+    _write_json(output / "run_manifest.json", _manifest(output, status=status))
 
 
 class OwnedCodeV:
@@ -234,21 +338,41 @@ def _write_json(path: Path, value: object) -> None:
     )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="Validate ownership, ports, state and artifacts without starting a server.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Reuse only a terminal coordination-blocked output directory.",
+    )
     arguments = parser.parse_args(argv)
     output = arguments.output_root.resolve()
-    output.mkdir(parents=True, exist_ok=False)
+    _prepare_output(output, resume=arguments.resume)
     server_logs = output / "server_logs"
     screenshots = output / "screenshots"
-    server_logs.mkdir()
-    screenshots.mkdir()
+    server_logs.mkdir(exist_ok=True)
+    screenshots.mkdir(exist_ok=True)
 
-    initial_gpu = observe_gpu()
-    if initial_gpu.compute_pids:
-        raise RuntimeError(
-            f"GPU has unowned compute PIDs: {list(initial_gpu.compute_pids)}"
+    try:
+        initial_gpu = observe_gpu()
+    except ServingRuntimeError as exc:
+        raise GpuCoordinationBlocked(
+            output,
+            "BLOCKED_BY_UNCERTAIN_GPU_OWNERSHIP",
+            {"category": exc.category, "evidence": exc.evidence},
+        ) from exc
+    initial_coordination = classify_compute_ownership(initial_gpu.compute_pids)
+    if initial_coordination["status"] != "GPU_CLEAR":
+        raise GpuCoordinationBlocked(
+            output,
+            str(initial_coordination["status"]),
+            initial_coordination,
         )
     stable_status = subprocess.run(  # nosec B603 B607 - fixed read-only Git query
         ["git", "status", "--short"],
@@ -258,11 +382,44 @@ def main(argv: Sequence[str] | None = None) -> int:
         check=False,
         timeout=30,
     )
-    if stable_status.returncode != 0 or stable_status.stdout.strip():
-        raise RuntimeError("stable checkout is not clean")
     artifact_check = validate_local_artifacts(EXPERIMENT)
-    if artifact_check.get("status") != "ALL_MODEL_ARTIFACTS_AVAILABLE":
-        raise RuntimeError("local model artifact verification failed")
+    occupied_endpoints = [
+        endpoint
+        for endpoint in (
+            "http://127.0.0.1:8201/v1/models",
+            CODEV_ENDPOINT + "/v1/models",
+        )
+        if not _endpoint_down(endpoint)
+    ]
+    _validate_static_preflight(
+        stable_clean=stable_status.returncode == 0
+        and not stable_status.stdout.strip(),
+        artifacts_available=artifact_check.get("status")
+        == "ALL_MODEL_ARTIFACTS_AVAILABLE",
+        occupied_endpoints=tuple(occupied_endpoints),
+        runtime_paths_available=VLLM.is_file()
+        and CODEV_PATH.is_dir()
+        and FFMPEG.is_dir(),
+    )
+    if arguments.preflight_only:
+        preflight_result = {
+            "schema_version": 1,
+            "status": "PREFLIGHT_PASS",
+            "initial_gpu": asdict(initial_gpu),
+            "coordination": initial_coordination,
+            "stable_checkout_clean": True,
+            "local_artifacts_verified": True,
+            "target_endpoints_free": True,
+            "model_servers_started": False,
+            "production_state_modified": False,
+        }
+        _write_json(output / "live_production_gpu_results.json", preflight_result)
+        _write_json(
+            output / "run_manifest.json",
+            _manifest(output, status="PREFLIGHT_PASS"),
+        )
+        print(json.dumps(preflight_result, indent=2, sort_keys=True))
+        return 0
 
     p1 = ServingProfileOperator(
         ROOT,
@@ -361,6 +518,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             p1_start = p1.start("P1_fp8_kv")
             p1_started = True
             p1_ready_gpu = observe_gpu()
+            owned_process = p1_start.get("owned_process")
+            if not isinstance(owned_process, dict) or not isinstance(
+                owned_process.get("pid"), int
+            ):
+                raise RuntimeError("quality owned process identity missing")
+            p1_root_pid = int(owned_process["pid"])
+            p1_ready_coordination = classify_compute_ownership(
+                p1_ready_gpu.compute_pids,
+                allowed_laplace_roots=(p1_root_pid,),
+            )
+            if p1_ready_coordination["status"] != "GPU_CLEAR_LAPLACE_OWNED_ONLY":
+                status = str(p1_ready_coordination["status"])
+                if status == "BLOCKED_BY_SPECDEC_ACTIVE":
+                    status = "YIELDED_TO_SPECDEC"
+                raise GpuCoordinationBlocked(
+                    output,
+                    status,
+                    p1_ready_coordination,
+                )
             operator_process = subprocess.Popen(  # nosec B603 - fixed local module
                 [
                     sys.executable,
@@ -456,15 +632,61 @@ def main(argv: Sequence[str] | None = None) -> int:
                     full_page=True,
                 )
 
+                p1_after_group_gpu = observe_gpu()
+                p1_after_group_coordination = classify_compute_ownership(
+                    p1_after_group_gpu.compute_pids,
+                    allowed_laplace_roots=(p1_root_pid,),
+                )
+                if (
+                    p1_after_group_coordination["status"]
+                    != "GPU_CLEAR_LAPLACE_OWNED_ONLY"
+                ):
+                    status = str(p1_after_group_coordination["status"])
+                    if status == "BLOCKED_BY_SPECDEC_ACTIVE":
+                        status = "YIELDED_TO_SPECDEC"
+                    raise GpuCoordinationBlocked(
+                        output,
+                        status,
+                        p1_after_group_coordination,
+                    )
                 p1_release = p1.stop()
                 p1_started = False
                 after_p1_release = _wait_gpu_release(maximum_used_mib=4_000)
+                after_p1_snapshot = observe_gpu()
+                before_codev_coordination = classify_compute_ownership(
+                    after_p1_snapshot.compute_pids
+                )
+                if before_codev_coordination["status"] != "GPU_CLEAR":
+                    status = str(before_codev_coordination["status"])
+                    if status == "BLOCKED_BY_SPECDEC_ACTIVE":
+                        status = "YIELDED_TO_SPECDEC"
+                    raise GpuCoordinationBlocked(
+                        output,
+                        status,
+                        before_codev_coordination,
+                    )
                 p1_endpoint_down = _endpoint_down(
                     "http://127.0.0.1:8201/v1/models"
                 )
                 codev_owned = codev.start()
                 codev_ready = codev.wait_ready()
                 codev_ready_gpu = observe_gpu()
+                codev_ready_coordination = classify_compute_ownership(
+                    codev_ready_gpu.compute_pids,
+                    allowed_laplace_roots=(int(codev_owned["pid"]),),
+                )
+                if (
+                    codev_ready_coordination["status"]
+                    != "GPU_CLEAR_LAPLACE_OWNED_ONLY"
+                ):
+                    status = str(codev_ready_coordination["status"])
+                    if status == "BLOCKED_BY_SPECDEC_ACTIVE":
+                        status = "YIELDED_TO_SPECDEC"
+                    raise GpuCoordinationBlocked(
+                        output,
+                        status,
+                        codev_ready_coordination,
+                    )
 
                 page.get_by_role("button", name="Chat", exact=True).click()
                 page.locator("#chat-lane").select_option("economy")
@@ -538,6 +760,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                     for cookie in context.cookies()
                     if cookie["name"] == "laplace_session"
                 )
+                codev_after_group_gpu = observe_gpu()
+                codev_after_group_coordination = classify_compute_ownership(
+                    codev_after_group_gpu.compute_pids,
+                    allowed_laplace_roots=(int(codev_owned["pid"]),),
+                )
+                if (
+                    codev_after_group_coordination["status"]
+                    != "GPU_CLEAR_LAPLACE_OWNED_ONLY"
+                ):
+                    status = str(codev_after_group_coordination["status"])
+                    if status == "BLOCKED_BY_SPECDEC_ACTIVE":
+                        status = "YIELDED_TO_SPECDEC"
+                    raise GpuCoordinationBlocked(
+                        output,
+                        status,
+                        codev_after_group_coordination,
+                    )
                 browser.close()
 
             registry_text = registry.read_text(encoding="utf-8")
@@ -597,6 +836,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "p1": {
                     "startup": p1_start,
                     "gpu_at_ready": asdict(p1_ready_gpu),
+                    "coordination_at_ready": p1_ready_coordination,
+                    "coordination_after_group": p1_after_group_coordination,
                     "release": p1_release,
                     "gpu_after_release": after_p1_release,
                 },
@@ -604,6 +845,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "owned_process": codev_owned,
                     "readiness": codev_ready,
                     "gpu_at_ready": asdict(codev_ready_gpu),
+                    "coordination_at_ready": codev_ready_coordination,
+                    "coordination_after_group": codev_after_group_coordination,
                 },
                 "registered_account": {
                     "email": ADMIN_EMAIL,
@@ -663,6 +906,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 operator_log.close()
 
     final_gpu = _wait_gpu_release(maximum_used_mib=4_000)
+    final_coordination = classify_compute_ownership(
+        tuple(int(pid) for pid in final_gpu["compute_pids"])
+    )
     codev_down = _endpoint_down(CODEV_ENDPOINT + "/v1/models")
     quality_down = _endpoint_down("http://127.0.0.1:8201/v1/models")
     safe_shutdown = {
@@ -671,7 +917,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             if operator_stopped
             and codev_down
             and quality_down
-            and not final_gpu["compute_pids"]
             and codev_release.get("status") == "RELEASED_OWNED_CODEV"
             else "FAIL"
         ),
@@ -681,6 +926,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "p1_release": p1_release,
         "codev_release": codev_release,
         "final_gpu": final_gpu,
+        "final_coordination": final_coordination,
         "unrelated_processes_preserved": True,
     }
     result["safe_shutdown"] = safe_shutdown
@@ -689,9 +935,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         if result.get("status") == "PASS" and safe_shutdown["status"] == "PASS"
         else "FAIL"
     )
+    if final_coordination["status"] == "BLOCKED_BY_SPECDEC_ACTIVE":
+        result["status"] = "YIELDED_TO_SPECDEC"
+    elif final_coordination["status"] == "BLOCKED_BY_UNCERTAIN_GPU_OWNERSHIP":
+        result["status"] = "BLOCKED_BY_UNCERTAIN_GPU_OWNERSHIP"
     _write_json(output / "live_production_gpu_results.json", result)
+    _write_json(output / "run_manifest.json", _manifest(output, status=str(result["status"])))
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["status"] == "PASS" else 2
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except GpuCoordinationBlocked as exc:
+        _write_terminal_result(
+            exc.output,
+            status=exc.status,
+            evidence=exc.evidence,
+        )
+        print(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": exc.status,
+                    "coordination": exc.evidence,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 3
 
 
 if __name__ == "__main__":

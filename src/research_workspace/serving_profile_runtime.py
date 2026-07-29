@@ -93,24 +93,48 @@ def observe_gpu(*, runner: Runner = subprocess.run) -> GpuSnapshot:
             "gpu_observation_failed",
             {"returncode": gpu.returncode, "stderr": gpu.stderr[-2_000:]},
         )
+    if compute.returncode != 0:
+        raise ServingRuntimeError(
+            "gpu_compute_observation_failed",
+            {"returncode": compute.returncode, "stderr": compute.stderr[-2_000:]},
+        )
     fields = [field.strip() for field in rows[0].split(",")]
     if len(fields) != 6:
         raise ServingRuntimeError("gpu_observation_malformed", {"row": rows[0]})
     pids: list[int] = []
-    if compute.returncode == 0:
-        for line in compute.stdout.splitlines():
-            if line.strip().isdigit():
-                pids.append(int(line.strip()))
-    return GpuSnapshot(
-        name=fields[0],
-        total_mib=_integer(fields[1]),
-        used_mib=_integer(fields[2]),
-        free_mib=_integer(fields[3]),
-        utilization_percent=_integer(fields[4]),
-        power_watts=float(fields[5]),
-        compute_pids=tuple(sorted(pids)),
-        captured_at_utc=datetime.now(UTC).isoformat(),
-    )
+    for line in compute.stdout.splitlines():
+        value = line.strip()
+        if not value:
+            continue
+        if not value.isdigit():
+            raise ServingRuntimeError(
+                "gpu_compute_observation_malformed",
+                {"row": value[:200]},
+            )
+        pids.append(int(value))
+    try:
+        snapshot = GpuSnapshot(
+            name=fields[0],
+            total_mib=_integer(fields[1]),
+            used_mib=_integer(fields[2]),
+            free_mib=_integer(fields[3]),
+            utilization_percent=_integer(fields[4]),
+            power_watts=float(fields[5]),
+            compute_pids=tuple(sorted(set(pids))),
+            captured_at_utc=datetime.now(UTC).isoformat(),
+        )
+    except ValueError as exc:
+        raise ServingRuntimeError(
+            "gpu_observation_malformed",
+            {"row": rows[0]},
+        ) from exc
+    if (
+        not snapshot.name
+        or min(snapshot.total_mib, snapshot.used_mib, snapshot.free_mib) < 0
+        or not 0 <= snapshot.utilization_percent <= 100
+    ):
+        raise ServingRuntimeError("gpu_observation_malformed", {"row": rows[0]})
+    return snapshot
 
 
 def _proc_start_ticks(pid: int) -> int:
