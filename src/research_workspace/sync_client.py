@@ -483,6 +483,11 @@ def apply_confirmed_patch(
         raise SyncError("sync_confirmation_required")
     if str(_git(root, "rev-parse", "HEAD")).strip().lower() != plan.base_head:
         raise SyncError("sync_base_conflict")
+    target_status = str(
+        _git(root, "status", "--porcelain=v1", "--untracked-files=all")
+    ).strip()
+    if target_status:
+        raise SyncError("sync_target_not_clean")
     paths = validate_patch(patch, maximum_bytes=64 * 1024 * 1024, maximum_files=2_000)
     if paths != plan.changed_paths or hashlib.sha256(patch).hexdigest() != plan.patch_sha256:
         raise SyncError("sync_patch_plan_mismatch")

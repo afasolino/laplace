@@ -229,6 +229,33 @@ def test_patch_application_requires_confirmation_and_detects_base_conflict(
         )
 
 
+def test_patch_application_rejects_dirty_target_without_combining_changes(
+    tmp_path: Path,
+) -> None:
+    source = _repository(tmp_path, "source")
+    (source / "other.py").write_text("OTHER = 1\n", encoding="utf-8")
+    _git(source, "add", "other.py")
+    _git(source, "commit", "-q", "-m", "add second tracked file")
+    target = tmp_path / "target"
+    _git(tmp_path, "clone", "-q", str(source), str(target))
+    (source / "module.py").write_text("VALUE = 5\n", encoding="utf-8")
+    plan, patch = RepositoryInspector().plan_upload(
+        source,
+        logical_repository_id="repo-a",
+    )
+    (target / "other.py").write_text("OTHER = 2\n", encoding="utf-8")
+
+    with pytest.raises(SyncError, match="sync_target_not_clean"):
+        apply_confirmed_patch(
+            target,
+            plan=plan,
+            patch=patch,
+            confirmation=confirmation_for(plan.plan_id),
+        )
+    assert (target / "module.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert (target / "other.py").read_text(encoding="utf-8") == "OTHER = 2\n"
+
+
 def test_selection_path_links_submodules_and_transport_policy_fail_closed(
     tmp_path: Path,
 ) -> None:
