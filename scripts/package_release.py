@@ -89,6 +89,9 @@ def _inspect_distribution(path: Path) -> dict[str, object]:
         with zipfile.ZipFile(path) as archive:
             for info in archive.infolist():
                 logical = _safe_member(info.filename)
+                member_mode = (info.external_attr >> 16) & 0o170000
+                if member_mode == 0o120000:
+                    raise RuntimeError("unsafe_distribution_member_type")
                 if info.file_size > 50 * 1024 * 1024:
                     raise RuntimeError("distribution_member_oversize")
                 members.append(logical.as_posix())
@@ -205,7 +208,22 @@ def _install_smoke(wheel: Path, environment: dict[str, str], temporary: Path) ->
     )
     if smoke["status"] != "PASS":
         raise RuntimeError("clean_import_smoke_failed")
-    return {"install": install, "import_smoke": smoke}
+    script = temporary / ("Scripts/laplace.exe" if os.name == "nt" else "bin/laplace")
+    if not script.is_file():
+        raise RuntimeError("console_entrypoint_missing")
+    version = _command(
+        [str(script), "--version"],
+        environment=environment,
+    )
+    if version["status"] != "PASS" or "laplace 0.7.0 (" not in str(
+        version["output_tail"]
+    ):
+        raise RuntimeError("console_entrypoint_smoke_failed")
+    return {
+        "install": install,
+        "import_smoke": smoke,
+        "console_entrypoint_smoke": version,
+    }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -219,14 +237,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         {
             "SOURCE_DATE_EPOCH": _source_date_epoch(),
             "PYTHONHASHSEED": "0",
-            "UV_CACHE_DIR": "/tmp/laplace-v7-package-uv-cache",
             "UV_OFFLINE": "1",
             "UV_PYTHON_DOWNLOADS": "never",
         }
     )
     try:
-        with tempfile.TemporaryDirectory(prefix="laplace-v7-package-") as temporary_name:
+        with tempfile.TemporaryDirectory(prefix="laplace-v8-package-") as temporary_name:
             temporary = Path(temporary_name)
+            environment["UV_CACHE_DIR"] = str(temporary / "uv-cache")
+            revision = subprocess.run(  # nosec B603 B607 - fixed read-only Git query
+                ["git", "rev-parse", "--verify", "HEAD"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            if revision.returncode != 0 or len(revision.stdout.strip()) != 40:
+                raise RuntimeError("package_revision_unavailable")
+            environment["LAPLACE_BUILD_REVISION"] = revision.stdout.strip().lower()
             first = _build(temporary / "first", environment)
             second = _build(temporary / "second", environment)
             first_artifacts = {

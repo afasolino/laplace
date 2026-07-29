@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "local-research-workspace"
 version = "0.7.0"
 description = "Private localhost-only research retrieval and analysis workspace"
+readme = "README.md"
+license = "LicenseRef-Proprietary"
 requires-python = ">=3.11"
 dependencies = ["PyYAML>=6.0", "defusedxml>=0.7.1", "pydantic>=2.7", "pypdf>=5.0", "fastapi>=0.115", "uvicorn>=0.30", "python-multipart>=0.0.9", "argon2-cffi>=23.1"]
 
@@ -17,7 +19,7 @@ browser = ["playwright>=1.40"]
 
 [project.scripts]
 research-workspace = "research_workspace.cli:main"
-laplace = "research_workspace.laplace_cli:main"
+laplace = "research_workspace.entrypoints:laplace_main"
 laplace-operator = "research_workspace.operator_cli:main"
 laplace-operator-server = "research_workspace.operator_server:main"
 research = "research_workspace.research_cli:main"

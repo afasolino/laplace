@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from research_workspace import __version__
+from research_workspace.entrypoints import laplace_main as packaged_laplace_main
 from research_workspace.laplace_cli import main as laplace_main
 from research_workspace.versioning import git_revision, version_line, version_record
 
@@ -59,6 +60,15 @@ def test_laplace_version_and_configuration_validation_commands(
     assert diagnostic.is_file()
     assert diagnostic.stat().st_mode & 0o077 == 0
     assert "/srv/laplace/state" not in diagnostic.read_text(encoding="utf-8")
+
+
+def test_dependency_light_packaged_version_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("LAPLACE_BUILD_REVISION", "c" * 40)
+    assert packaged_laplace_main(["--version"]) == 0
+    assert capsys.readouterr().out.strip() == f"laplace 0.7.0 ({'c' * 40})"
 
 
 def test_exported_schema_manifest_hashes_and_strictness() -> None:
