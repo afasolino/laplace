@@ -237,6 +237,13 @@ def _defects() -> list[dict[str, object]]:
             _git(ROOT, "log", "-1", "--format=%h", "--", ".github/workflows/release-candidate.yml"),
             "manual workflow invoked the v7 certifier",
         ),
+        (
+            "RCV8-007",
+            "P1",
+            "certification evidence sanitation",
+            "b01b871",
+            "registered GUI fixture serialized a personal identifier",
+        ),
     )
     return [
         {

@@ -99,3 +99,17 @@
 - Status: FIXED in the certification/CI commit.
 - Commit: recorded in final `defect_register.json`.
 
+## RCV8-007 — P1 — certification evidence sanitation
+
+- Evidence: the registered-GUI fixture serialized a real-looking personal email
+  address into operational JSON.
+- Reproduction: run `scripts/run_registered_gui_fixture_smoke.py` at the v7 base
+  and inspect `account.email`.
+- Expected: certification uses only clearly synthetic identities.
+- Observed: personal identifier-shaped fixture data was retained.
+- Security/data-loss impact: private-identifier disclosure in a shareable archive.
+- Minimal fix: replace the account and user ID with invalid-domain synthetic
+  fixture identifiers.
+- Regression test: rerun the registered GUI fixture and scan output.
+- Status: FIXED.
+- Commit: `b01b871`.
