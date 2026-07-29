@@ -293,7 +293,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "schema_version": 1,
             "status": "FAIL",
             "category": str(exc).split(":", 1)[0],
+            "detail": str(exc)[-4_000:],
         }
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            annotation = str(exc)[-4_000:].replace("%", "%25")
+            annotation = annotation.replace("\r", "%0D").replace("\n", "%0A")
+            print(f"::error title=Laplace package audit failed::{annotation}")
     (output / "package_results.json").write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
