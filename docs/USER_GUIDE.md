@@ -194,3 +194,11 @@ PYTHONPATH=src .venv/bin/python \
 ```
 
 The v6 fixture set includes [domain selection](user_guide/assets/domain_selector.png), [no-repository state](user_guide/assets/agent_no_repository.png), [new worktree](user_guide/assets/agent_new_worktree.png), [worktree history](user_guide/assets/agent_worktree_history.png), [Agent progress](user_guide/assets/agent_progress.png), [empty personal corpus](user_guide/assets/personal_corpus_empty.png), [upload manifest](user_guide/assets/folder_upload_manifest.png), [indexed corpus](user_guide/assets/personal_corpus_indexed.png), [retrieval selector](user_guide/assets/retrieval_source_selector.png), [Chat processing](user_guide/assets/chat_processing_state.png), [mobile Markdown table](user_guide/assets/markdown_table.png), and [independent capability controls](user_guide/assets/admin_capabilities.png).
+
+## Repository synchronization boundary
+
+Select only a Git top-level for repository synchronization. Laplace shows the
+branch, HEAD, tracked changes, excluded untracked files, and exact approval before
+export or apply. Incoming apply requires the expected branch and a clean target.
+A normal folder is never treated as a repository; upload it through Personal
+corpus so file validation, quarantine, ownership, indexing, and citations apply.

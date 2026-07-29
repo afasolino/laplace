@@ -1,5 +1,13 @@
 # Threat model v7
 
+## v8 addendum
+
+GPU ownership ambiguity is an admission threat: a failed compute query, unreadable
+`/proc` identity, unexpected compute process, or protected SpecDec association
+blocks Laplace. Desktop synchronization treats inconsistent plan metadata,
+wrong-branch targets, and dirty targets as conflicts before write. Package
+inspection rejects wheel symlink members and proves the installed version entry
+point without relying on source-tree imports.
 Laplace processes authorized but potentially hostile documents, archives, Markdown,
 repositories, patches and model text. It also separates mutually untrusted users in
 server mode. The trusted computing base is the local Python application, configured
@@ -34,4 +42,3 @@ The deterministic seed is `7003`; Hypothesis uses a derandomized 50-example prof
 and reports minimal failing examples. CI runs the adversarial suite, Bandit high
 severity scan, high-confidence secret scan and offline dependency consistency check.
 It does not query a network vulnerability database.
-

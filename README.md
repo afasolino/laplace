@@ -174,3 +174,12 @@ Technical contracts are indexed from
 [GUI security](docs/gui_security.md). The exact reference revisions and
 licence decisions are recorded in
 [the external reference audit](docs/external_reference_audit.md).
+
+## v8 release-candidate review
+
+The v8 review starts from certified v7 commit
+`a2b0bdf17445012114bbdee8fb3a30a9b4c73680`. Use
+[RELEASE_CANDIDATE_RUNBOOK_V8.md](docs/RELEASE_CANDIDATE_RUNBOOK_V8.md) for the
+CPU/fixture gates and [LIVE_GPU_CERTIFICATION_RUNBOOK_V8.md](docs/LIVE_GPU_CERTIFICATION_RUNBOOK_V8.md)
+for the conditional live gate. SpecDec always has priority; see
+[SPECDEC_GPU_COORDINATION.md](docs/SPECDEC_GPU_COORDINATION.md).

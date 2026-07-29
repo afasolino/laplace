@@ -75,3 +75,9 @@ repositories never become interchangeable merely because they contain similar fi
 Lifecycle ownership is separate from invocation. An Ollama or vLLM provider invokes a
 configured endpoint but cannot download, start or stop a model. Only the existing
 model lifecycle service may control a process after matching its ownership record.
+
+The v8 release boundary adds fail-closed GPU coordination above the lifecycle
+service. GPU summary and compute-process observations are both mandatory.
+Sanitized command hashes, executable names, parent chains, and working-directory
+classifications distinguish protected SpecDec work, Laplace-owned descendants,
+and uncertain ownership. This coordination layer never signals a process.

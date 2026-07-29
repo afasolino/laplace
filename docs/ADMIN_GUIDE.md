@@ -162,3 +162,12 @@ sudo systemctl stop laplace-model-servers
 ```
 
 Confirm ports 8765, 8102, and 8103 no longer listen, then inspect GPU processes. Do not signal a PID unless the Laplace owner record and live command identity both match. Do not close the user's shell or tmux session.
+
+## v8 GPU coordination
+
+Before any live candidate run, follow
+[SPECDEC_GPU_COORDINATION.md](SPECDEC_GPU_COORDINATION.md). A failed or malformed
+compute-PID query is not an empty GPU: it is
+`BLOCKED_BY_UNCERTAIN_GPU_OWNERSHIP`. Never stop SpecDec. If it appears after a
+Laplace-owned group starts, release only the exact Laplace ownership record and
+record `YIELDED_TO_SPECDEC`.

@@ -27,3 +27,12 @@ more. This v7 task does not push, tag or merge.
 Live-model certification is a separate release annotation. CPU/fixture success must
 not be represented as model quality. For v7 its exact status is
 `BLOCKED_BY_USER_CONSTRAINT_GPU_UNAVAILABLE`.
+
+## v8 decision boundary
+
+The non-GPU candidate must close all P0/P1 findings and produce a verified
+sanitized archive before live eligibility. The only pre-live approval is
+`GO_FOR_CONTROLLED_LIVE_GPU_CERTIFICATION`. Final
+`GO_FOR_RELEASE_REVIEW_AFTER_LIVE_CERTIFICATION` requires a live PASS; blocked or
+yielded GPU coordination is never promoted to a live PASS. The review does not
+merge, tag, publish, or release.

@@ -33,3 +33,17 @@ GPU/model-server commands or secret references.
 The CI does not perform live-model testing. The release record reports
 `BLOCKED_BY_USER_CONSTRAINT_GPU_UNAVAILABLE` until a separately authorized live
 certification is run.
+
+## v8 candidate branch
+
+The dedicated `feature/release-candidate-review-v8` branch may be pushed solely
+to run read-only fixture CI. The v8 validator checks the Ubuntu/Windows Python
+3.11/3.12 matrix, action commit pins, permissions, triggers, caches, artifacts,
+timeouts, absence of secrets, and absence of GPU/model commands. Remote execution
+details and environment-limitation status are in
+[CI_REMOTE_VALIDATION_V8.md](CI_REMOTE_VALIDATION_V8.md).
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_release_candidate_v8_certification.py \
+  --output-root outputs
+```

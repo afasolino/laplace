@@ -121,3 +121,16 @@ PYTHONPATH=src .venv/bin/python \
 That command uses only fixtures and temporary state. It never contacts or manages a
 model provider; GPU/live-model certification remains
 `BLOCKED_BY_USER_CONSTRAINT_GPU_UNAVAILABLE`.
+
+## v8 candidate verification
+
+Run the non-GPU release candidate from a clean dedicated v8 branch:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_release_candidate_v8_certification.py \
+  --output-root outputs
+```
+
+This command uses fixtures and isolated state. It does not start a model server.
+Run the live-GPU command only after the CPU report says
+`GO_FOR_CONTROLLED_LIVE_GPU_CERTIFICATION`.

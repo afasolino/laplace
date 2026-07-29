@@ -61,3 +61,12 @@ restores atomically and runs preflight. No migration tool deletes historical bac
 
 The v7 implementation and certification run these commands only on synthetic
 fixtures created under temporary/output roots. Production state is untouched.
+
+## v8 copied-state rehearsal
+
+The release-candidate rehearsal runs disposable sanitized copies labelled v5,
+v6, and v7 across all 11 store classes. It requires dry-run, backup, apply,
+fresh-process reopen, record preservation, rollback hash equality, reapply,
+idempotency, and interruption recovery. See
+[MIGRATION_REHEARSAL_V8.md](MIGRATION_REHEARSAL_V8.md). The harness accepts only
+`fixture-*` identities and therefore cannot target production state accidentally.

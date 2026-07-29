@@ -100,3 +100,14 @@ If a trace is needed for support, share the trace ID and sanitized failure categ
 For the v0.7 CPU/fixture release command, do not run provider or GPU diagnostics as a
 troubleshooting step. Its exact expected live status is
 `BLOCKED_BY_USER_CONSTRAINT_GPU_UNAVAILABLE`.
+
+## v8 coordination statuses
+
+- `BLOCKED_BY_SPECDEC_ACTIVE`: leave SpecDec untouched and defer the live gate.
+- `BLOCKED_BY_UNCERTAIN_GPU_OWNERSHIP`: resolve the observation or process
+  identity failure; do not start a model.
+- `YIELDED_TO_SPECDEC`: Laplace-owned groups were released and this run must not
+  reacquire the GPU.
+- `sync_target_not_clean`, `sync_branch_conflict`, or
+  `sync_patch_plan_mismatch`: inspect local changes and create a new plan; never
+  force apply.

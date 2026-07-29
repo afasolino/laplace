@@ -1,5 +1,14 @@
 # Security residual risks
 
+## v8 review notes
+
+- Native Windows behavior depends on the remote CI matrix.
+- SSH/HTTPS repository transport is policy-only and is not production-certified.
+- The fixture sync server keeps transfer buffers in memory; server-restart resume
+  remains staged.
+- Offline dependency and license inventory does not query a current vulnerability
+  database.
+- Live model quality and measured GPU behavior require a clear, guarded GPU gate.
 The v7 CPU/fixture certification does not prove the security of a live model runtime,
 GPU driver, provider implementation, reverse proxy, SSH/HTTPS sync backend or
 production backup encryption provider. Those require deployment-specific review and
@@ -24,4 +33,3 @@ Operators should run current dependency/vulnerability tooling in an approved net
 release environment, keep state permissions private, terminate remote access at a
 reviewed proxy, test encrypted restore regularly and repeat live-provider security
 tests before enabling a new route.
-

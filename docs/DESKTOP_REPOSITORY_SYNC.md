@@ -64,3 +64,12 @@ operation or automatic merge occurs.
 The reference `FixtureSyncService` is used for deterministic CPU, replay, resume,
 authorization and cross-user tests. Deploying a real transport requires an approved
 server endpoint, authentication integration and a separate live certification.
+
+## v8 review classification
+
+Local inspection, durable client operation records, confirmed patch export, and
+confirmed clean-target apply are complete usable features. The fixture service is
+a reference implementation. SSH/HTTPS transfer and restart-durable server
+buffering remain partial staged integrations. Apply is bound to exact patch hash,
+byte count, changed paths, base HEAD, branch, and clean target. See
+[DESKTOP_SYNC_REVIEW_V8.md](DESKTOP_SYNC_REVIEW_V8.md).

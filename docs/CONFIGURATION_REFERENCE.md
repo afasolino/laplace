@@ -40,6 +40,14 @@ LAPLACE_CONFIG_STATE_ROOT
 LAPLACE_CONFIG_LOG_LEVEL
 ```
 
+## v8 release diagnostics
+
+Release evidence records effective configuration hashes and redacted provenance,
+not endpoint credentials or canonical private paths. The live runner accepts no
+model download option and uses the checked-in selected profile plus verified
+existing local artifacts. Missing runtime paths, occupied target ports, dirty
+stable state, and missing artifacts fail preflight.
+
 Any other `LAPLACE_CONFIG_*` name fails validation. Provider endpoints and secrets
 are not accepted through generic JSON environment blobs.
 
