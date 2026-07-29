@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate v7 documentation links, commands, claims, and screenshot manifests."""
+"""Validate v8 documentation links, commands, claims, and screenshot manifests."""
 
 from __future__ import annotations
 
@@ -31,6 +31,17 @@ REQUIRED_DOCS = (
     "docs/THREAT_MODEL_V7.md",
     "docs/SECURITY_RESIDUAL_RISKS.md",
     "docs/TROUBLESHOOTING.md",
+    "docs/RELEASE_CANDIDATE_REVIEW_V8.md",
+    "docs/DEFECT_REGISTER_V8.md",
+    "docs/GO_NO_GO_CRITERIA_V8.md",
+    "docs/MIGRATION_REHEARSAL_V8.md",
+    "docs/CI_REMOTE_VALIDATION_V8.md",
+    "docs/PACKAGE_AUDIT_V8.md",
+    "docs/OPERATIONAL_REHEARSAL_V8.md",
+    "docs/DESKTOP_SYNC_REVIEW_V8.md",
+    "docs/RELEASE_CANDIDATE_RUNBOOK_V8.md",
+    "docs/LIVE_GPU_CERTIFICATION_RUNBOOK_V8.md",
+    "docs/SPECDEC_GPU_COORDINATION.md",
 )
 SCREENSHOT_MANIFESTS = (
     "docs/user_guide/assets/screenshot_manifest.json",
@@ -163,8 +174,16 @@ def check_documentation() -> dict[str, object]:
         ),
         "docs/MIGRATIONS.md": ("--dry-run", "--rollback-backup-id"),
         "docs/CONFIGURATION_REFERENCE.md": ("--validate-config",),
-        "docs/CI.md": ("run_architecture_release_v7_certification.py",),
+        "docs/CI.md": ("run_release_candidate_v8_certification.py",),
         "docs/OPERATING_MODES.md": ("desktop", "server"),
+        "docs/SPECDEC_GPU_COORDINATION.md": (
+            "BLOCKED_BY_SPECDEC_ACTIVE",
+            "YIELDED_TO_SPECDEC",
+        ),
+        "docs/GO_NO_GO_CRITERIA_V8.md": (
+            "GO_FOR_CONTROLLED_LIVE_GPU_CERTIFICATION",
+            "GO_FOR_RELEASE_REVIEW_AFTER_LIVE_CERTIFICATION",
+        ),
     }
     for relative, phrases in required_phrases.items():
         text = (ROOT / relative).read_text(encoding="utf-8")
@@ -198,7 +217,7 @@ def check_documentation() -> dict[str, object]:
         "findings": findings,
         "commands_checked_against_repository": True,
         "external_links_fetched": False,
-        "gpu_claim_policy": "v7 live-model status must remain blocked",
+        "gpu_claim_policy": "v8 live PASS requires the guarded conditional gate",
     }
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate least-privilege, pinned, non-GPU v7 workflow contracts."""
+"""Validate least-privilege, pinned, non-GPU v8 workflow contracts."""
 
 from __future__ import annotations
 
@@ -71,6 +71,11 @@ def validate() -> dict[str, object]:
             findings.append({"file": name, "category": "fixture_mode_not_explicit"})
         if "upload-artifact" in text and "path: outputs/ci/" not in text:
             findings.append({"file": name, "category": "artifact_path_not_sanitized"})
+        if (
+            name != "release-candidate.yml"
+            and "feature/release-candidate-review-v8" not in text
+        ):
+            findings.append({"file": name, "category": "v8_branch_trigger_missing"})
     matrix = files.get("unit-and-integration-tests.yml")
     if matrix is not None:
         text = matrix.read_text(encoding="utf-8")
@@ -78,10 +83,16 @@ def validate() -> dict[str, object]:
             if required not in text:
                 findings.append({"file": matrix.name, "category": "matrix_incomplete"})
     release = files.get("release-candidate.yml")
-    if release is not None and "BLOCKED_BY_USER_CONSTRAINT_GPU_UNAVAILABLE" not in (
-        release.read_text(encoding="utf-8")
-    ):
-        findings.append({"file": release.name, "category": "gpu_block_status_missing"})
+    if release is not None:
+        release_text = release.read_text(encoding="utf-8")
+        if "run_release_candidate_v8_certification.py" not in release_text:
+            findings.append(
+                {"file": release.name, "category": "v8_certification_command_missing"}
+            )
+        if "run_architecture_release_v7_certification.py" in release_text:
+            findings.append(
+                {"file": release.name, "category": "stale_v7_certification_command"}
+            )
     return {
         "schema_version": 1,
         "status": "PASS" if not findings else "FAIL",

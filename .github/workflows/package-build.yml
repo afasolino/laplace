@@ -3,7 +3,7 @@ name: package-build
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, "feature/release-candidate-review-v8"]
 
 permissions:
   contents: read
