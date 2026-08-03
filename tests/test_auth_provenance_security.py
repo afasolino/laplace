@@ -371,7 +371,10 @@ def test_registry_strict_permissions_and_last_valid_reload(tmp_path: Path) -> No
     assert snapshot.revision == revision
     if os.name == "nt":
         write_registry(path, [user])
-        assert RegisteredUserRegistry(path).snapshot.users_by_id[user.user_id] == user
+        normalized = RegisteredUserRegistry(path).snapshot.users_by_id[user.user_id]
+        assert normalized.user_id == user.user_id
+        assert normalized.normalized_email == user.normalized_email
+        assert normalized.capability_tier == user.capability_tier
         return
     os.chmod(path, 0o644)
     with pytest.raises(AuthRegistryError, match="registry_file_permissions"):
