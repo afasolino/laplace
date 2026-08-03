@@ -566,6 +566,34 @@ def _defects() -> list[dict[str, object]]:
             ),
             "live chat waits expected title-case states while the UI emits uppercase",
         ),
+        (
+            "RCV8-028",
+            "P1",
+            "Verilator timing-option compatibility",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "scripts/run_live_production_gpu_certification.py",
+            ),
+            "Verilator 4 rejected the version-5-only timing option",
+        ),
+        (
+            "RCV8-029",
+            "P2",
+            "expected provider-failure console classification",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "scripts/run_live_production_gpu_certification.py",
+            ),
+            "the required HTTP failure path was counted as an unexpected browser error",
+        ),
     )
     return [
         {

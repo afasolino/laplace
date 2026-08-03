@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -60,6 +61,10 @@ ADMIN_CAPABILITIES = (
     "model_admin",
 )
 CHAT_TERMINAL_STATES = ("COMPLETE", "FAILED")
+EXPECTED_PROVIDER_FAILURE_CONSOLE_MARKERS = (
+    "status of 403",
+    "403 (Forbidden)",
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -497,6 +502,13 @@ def _verify_python_worktree(state_root: Path) -> dict[str, object]:
     }
 
 
+def _verilator_timing_arguments(version_output: str) -> tuple[str, ...]:
+    match = re.search(r"\bVerilator\s+(\d+)(?:\.\d+)?", version_output)
+    if match is None:
+        raise RuntimeError("verilator_version_unparseable")
+    return ("--timing",) if int(match.group(1)) >= 5 else ()
+
+
 def _verify_systemverilog_worktree(state_root: Path) -> dict[str, object]:
     worktree = _changed_worktree(state_root, "rtl/example.sv", "assign y = ~a")
     tools = {
@@ -511,13 +523,35 @@ def _verify_systemverilog_worktree(state_root: Path) -> dict[str, object]:
                 name: path is not None for name, path in tools.items()
             },
         }
+    verilator_version = _run_verifier(
+        [str(tools["verilator"]), "--version"],
+        worktree=worktree,
+    )
+    if verilator_version["status"] != "PASS":
+        return {
+            "status": "FAIL",
+            "category": "verilator_version_probe_failed",
+            "verilator_version": verilator_version,
+            "worktree_is_isolated": worktree.is_relative_to(state_root),
+        }
+    try:
+        timing_arguments = _verilator_timing_arguments(
+            str(verilator_version["output_tail"])
+        )
+    except RuntimeError as exc:
+        return {
+            "status": "FAIL",
+            "category": str(exc),
+            "verilator_version": verilator_version,
+            "worktree_is_isolated": worktree.is_relative_to(state_root),
+        }
     with tempfile.TemporaryDirectory(prefix="laplace-v8-live-sv-") as temporary:
         simulation = Path(temporary) / "tb.out"
         commands = {
             "verilator_lint": [
                 str(tools["verilator"]),
                 "--lint-only",
-                "--timing",
+                *timing_arguments,
                 "rtl/example.sv",
                 "rtl/tb_example.sv",
             ],
@@ -558,8 +592,29 @@ def _verify_systemverilog_worktree(state_root: Path) -> dict[str, object]:
             else "FAIL"
         ),
         "results": results,
+        "verilator_version": verilator_version,
+        "verilator_timing_mode": "explicit" if timing_arguments else "legacy",
         "worktree_is_isolated": worktree.is_relative_to(state_root),
     }
+
+
+def _unexpected_console_errors(
+    messages: Sequence[str],
+    *,
+    provider_failure_start: int,
+) -> list[str]:
+    if not 0 <= provider_failure_start <= len(messages):
+        raise ValueError("provider_failure_console_boundary_invalid")
+    unexpected = list(messages[:provider_failure_start])
+    unexpected.extend(
+        message
+        for message in messages[provider_failure_start:]
+        if not any(
+            marker in message
+            for marker in EXPECTED_PROVIDER_FAILURE_CONSOLE_MARKERS
+        )
+    )
+    return unexpected
 
 
 def _probe_liveness_and_readiness(endpoint: str, model_id: str) -> dict[str, object]:
@@ -1230,6 +1285,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 codev_release = codev.stop()
                 if not _endpoint_down(CODEV_ENDPOINT + "/v1/models"):
                     raise RuntimeError("CodeV endpoint remained open after owned stop")
+                provider_failure_console_start = len(console_errors)
                 page.locator("#chat-message").fill(
                     "Reply with PROVIDER_FAILURE_SHOULD_NOT_SUCCEED."
                 )
@@ -1240,6 +1296,17 @@ def _main(argv: Sequence[str] | None = None) -> int:
                     timeout=30_000,
                 )
                 provider_failure_status = page.locator("#chat-state").inner_text()
+                unexpected_console_errors = _unexpected_console_errors(
+                    console_errors,
+                    provider_failure_start=provider_failure_console_start,
+                )
+                expected_provider_failure_console_error_count = sum(
+                    any(
+                        marker in message
+                        for marker in EXPECTED_PROVIDER_FAILURE_CONSOLE_MARKERS
+                    )
+                    for message in console_errors[provider_failure_console_start:]
+                )
 
                 page.get_by_role("button", name="Sign out", exact=True).click()
                 page.locator("#auth-dialog").wait_for(state="visible")
@@ -1339,7 +1406,8 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 "opaque_http_only_session": session_cookie["httpOnly"] is True
                 and len(str(session_cookie["value"])) >= 22,
                 "credentials_absent_from_registry_and_audit": secrets_absent,
-                "no_browser_errors": not console_errors and not page_errors,
+                "no_browser_errors": not unexpected_console_errors
+                and not page_errors,
             }
             result = {
                 "schema_version": 1,
@@ -1397,6 +1465,10 @@ def _main(argv: Sequence[str] | None = None) -> int:
                     "default_lane": "quality",
                 },
                 "console_error_count": len(console_errors),
+                "expected_provider_failure_console_error_count": (
+                    expected_provider_failure_console_error_count
+                ),
+                "unexpected_console_error_count": len(unexpected_console_errors),
                 "page_error_count": len(page_errors),
                 "screenshots": [
                     "screenshots/live_personal_corpus.png",

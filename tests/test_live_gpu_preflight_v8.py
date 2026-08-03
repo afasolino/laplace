@@ -18,7 +18,9 @@ from run_live_production_gpu_certification import (  # noqa: E402
     _changed_worktree,
     _prepare_output,
     _record_unexpected_failure,
+    _unexpected_console_errors,
     _validate_static_preflight,
+    _verilator_timing_arguments,
     _verify_python_worktree,
     _verify_systemverilog_worktree,
 )
@@ -101,6 +103,32 @@ def test_live_admin_has_every_independent_capability() -> None:
 
 def test_live_chat_wait_uses_production_ui_terminal_state_contract() -> None:
     assert CHAT_TERMINAL_STATES == ("COMPLETE", "FAILED")
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    (
+        ("Verilator 4.028 2020-02-06", ()),
+        ("Verilator 5.038 2025-07-08", ("--timing",)),
+    ),
+)
+def test_verilator_timing_flag_tracks_major_version(
+    version: str,
+    expected: tuple[str, ...],
+) -> None:
+    assert _verilator_timing_arguments(version) == expected
+
+
+def test_expected_provider_failure_console_error_is_not_a_browser_defect() -> None:
+    messages = [
+        "unexpected before failure",
+        "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+        "unexpected after failure",
+    ]
+    assert _unexpected_console_errors(
+        messages,
+        provider_failure_start=1,
+    ) == ["unexpected before failure", "unexpected after failure"]
 
 
 def test_unexpected_live_failure_writes_terminal_shutdown_evidence(
@@ -285,6 +313,8 @@ def test_systemverilog_verification_requires_every_gate(
             "output_tail": (
                 "SYSTEMVERILOG_VERIFY_PASS"
                 if command[0].endswith("/vvp")
+                else "Verilator 5.038 fixture"
+                if "--version" in command
                 else "fixture pass"
             ),
         }

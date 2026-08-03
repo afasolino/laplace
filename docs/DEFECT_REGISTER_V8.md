@@ -452,3 +452,39 @@
 - Regression test: exact terminal-state contract fixture plus guarded live rerun.
 - Status: FIXED in the final live-runner synchronization repair.
 - Commit: recorded in final `defect_register.json`.
+
+## RCV8-028 — P1 — Verilator timing-option compatibility
+
+- Evidence: guarded live run `live_gpu_v8_d94b4e6_20260803T0924Z` passed
+  Icarus compilation/simulation and Yosys synthesis, but installed Verilator
+  4.028 rejected the version-5-only `--timing` option.
+- Reproduction: run the isolated SystemVerilog verifier with Verilator 4.028.
+- Expected: the verifier selects timing arguments supported by the installed
+  deterministic tool while retaining all four verification gates.
+- Observed: unconditional `--timing` produced `Invalid Option: --timing`.
+- Security/data-loss impact: false live-certification failure only; the isolated
+  worktree and source checkout were preserved.
+- Minimal fix: parse the reported Verilator major version, use legacy lint mode
+  before version 5, and retain explicit timing mode for version 5 and newer.
+- Regression test: exact version-4/version-5 argument fixtures plus live rerun.
+- Status: FIXED in the final live-verifier compatibility repair.
+- Commit: recorded in final `defect_register.json`.
+
+## RCV8-029 — P2 — expected provider-failure console classification
+
+- Evidence: the same guarded run recorded one browser console error while its
+  intentional provider-failure request correctly returned HTTP 403 and the UI
+  reached `FAILED`.
+- Reproduction: stop the owned CodeV endpoint and submit the bounded negative
+  request through Chromium.
+- Expected: the induced HTTP failure is retained as expected negative-path
+  evidence while any earlier or unrelated console error still fails the gate.
+- Observed: all console errors were treated identically, making the required
+  negative-path check incompatible with the no-unexpected-error gate.
+- Security/data-loss impact: false certification failure; fail-closed provider
+  handling worked and no response or credential was exposed.
+- Minimal fix: establish the provider-failure boundary and exclude only known
+  403 resource-load console messages after it from the unexpected-error count.
+- Regression test: before/expected/after console partition fixture plus live rerun.
+- Status: FIXED in the final live-browser evidence repair.
+- Commit: recorded in final `defect_register.json`.
