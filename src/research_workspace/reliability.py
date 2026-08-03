@@ -196,11 +196,11 @@ def _resource_scenarios(root: Path) -> list[ScenarioResult]:
         )
     ]
 
-    free = shutil.disk_usage(root).free
+    disk = shutil.disk_usage(root)
     pressure_policy = GovernancePolicy(
         per_user_bytes=1024,
         global_bytes=2048,
-        minimum_free_bytes=free + 1,
+        minimum_free_bytes=disk.total + 1,
     )
     governed = GovernanceStore(
         (root / "pressure").resolve(),
