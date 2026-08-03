@@ -488,3 +488,20 @@
 - Regression test: before/expected/after console partition fixture plus live rerun.
 - Status: FIXED in the final live-browser evidence repair.
 - Commit: recorded in final `defect_register.json`.
+
+## RCV8-030 — P1 — governance disk-pressure fixture race
+
+- Evidence: exact-commit remote run `30801998477` failed only Windows 2025 /
+  Python 3.11 because the governance pressure scenario did not raise; the other
+  three unit-matrix jobs passed.
+- Reproduction: compute the synthetic threshold from current free bytes while
+  another process releases temporary filesystem space before admission.
+- Expected: the pressure fixture remains impossible to admit on every runner.
+- Observed: the threshold was only one byte above a transient free-space sample.
+- Security/data-loss impact: false negative CI certification; production quota
+  enforcement was not changed.
+- Minimal fix: set the fixture threshold one byte above total filesystem
+  capacity, which cannot be satisfied by concurrent cleanup.
+- Regression test: the corrected governance scenario and full four-job matrix.
+- Status: FIXED in the final governance-fixture repair.
+- Commit: recorded in final `defect_register.json`.

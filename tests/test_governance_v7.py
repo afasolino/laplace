@@ -83,7 +83,7 @@ def test_quota_pressure_owner_namespace_and_cross_user_hash_isolation(
         )
     pressured = make_store(
         tmp_path / "pressure",
-        configured=policy(minimum_free_bytes=shutil.disk_usage(tmp_path).free + 1),
+        configured=policy(minimum_free_bytes=shutil.disk_usage(tmp_path).total + 1),
     )
     pressured.register_account("user-c")
     with pytest.raises(GovernanceError, match="disk-pressure"):
@@ -194,4 +194,3 @@ def test_backup_manifest_validation_and_path_rejection(tmp_path: Path) -> None:
                 "unexpected": True,
             }
         )
-

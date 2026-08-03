@@ -594,6 +594,20 @@ def _defects() -> list[dict[str, object]]:
             ),
             "the required HTTP failure path was counted as an unexpected browser error",
         ),
+        (
+            "RCV8-030",
+            "P1",
+            "governance disk-pressure fixture race",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "tests/test_governance_v7.py",
+            ),
+            "a transient free-space threshold allowed admission after concurrent cleanup",
+        ),
     )
     return [
         {
