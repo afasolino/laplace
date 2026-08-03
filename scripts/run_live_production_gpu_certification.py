@@ -371,14 +371,33 @@ def _run_verifier(
     worktree: Path,
     timeout: int = 120,
 ) -> dict[str, object]:
+    allowed_environment = {
+        "COMSPEC",
+        "LANG",
+        "LC_ALL",
+        "PATH",
+        "PATHEXT",
+        "SYSTEMDRIVE",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "WINDIR",
+    }
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() in allowed_environment
+    }
+    environment.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    environment.setdefault("LANG", "C.UTF-8")
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["PYTHONNOUSERSITE"] = "1"
+    environment["PYTHONUTF8"] = "1"
     completed = subprocess.run(  # nosec B603 - fixed verifier argv
         list(command),
         cwd=worktree,
-        env={
-            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-            "LANG": "C.UTF-8",
-            "PYTHONNOUSERSITE": "1",
-        },
+        env=environment,
         capture_output=True,
         text=True,
         check=False,

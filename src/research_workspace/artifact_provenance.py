@@ -43,7 +43,7 @@ def private_hmac_key(path: Path) -> bytes:
             os.replace(temporary, resolved)
         finally:
             temporary.unlink(missing_ok=True)
-    if resolved.stat().st_mode & 0o077:
+    if os.name != "nt" and resolved.stat().st_mode & 0o077:
         raise PermissionError("artifact pseudonym key must have mode 0600")
     value = resolved.read_bytes()
     if len(value) != 32:

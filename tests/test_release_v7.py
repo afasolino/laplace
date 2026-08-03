@@ -58,7 +58,8 @@ def test_laplace_version_and_configuration_validation_commands(
     assert '"status": "PASS"' in output
     assert "/srv/laplace/state" not in output
     assert diagnostic.is_file()
-    assert diagnostic.stat().st_mode & 0o077 == 0
+    if os.name != "nt":
+        assert diagnostic.stat().st_mode & 0o077 == 0
     assert "/srv/laplace/state" not in diagnostic.read_text(encoding="utf-8")
 
 

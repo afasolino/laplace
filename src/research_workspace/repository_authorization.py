@@ -50,6 +50,19 @@ def _identifier(value: str, *, label: str) -> str:
     return value
 
 
+def _sqlite_filesystem_id(value: int) -> int:
+    """Map an unsigned 64-bit host file ID into SQLite's signed range."""
+
+    if 0 <= value < 2**63:
+        return value
+    if 2**63 <= value < 2**64:
+        return value - 2**64
+    raise RepositoryAuthorizationError(
+        "filesystem_identity_out_of_range",
+        {"bit_length": value.bit_length()},
+    )
+
+
 def _git(
     root: Path,
     arguments: Sequence[str],
@@ -121,6 +134,8 @@ class RepositoryAuthorizationStore:
                 {"requested": str(canonical), "git_root": str(git_root)},
             )
         details = canonical.stat()
+        device = _sqlite_filesystem_id(details.st_dev)
+        inode = _sqlite_filesystem_id(details.st_ino)
         now = datetime.now(UTC).isoformat()
         with self._lock, self._connect() as connection:
             connection.execute(
@@ -134,10 +149,10 @@ class RepositoryAuthorizationStore:
                     inode=excluded.inode,
                     registered_at_utc=excluded.registered_at_utc
                 """,
-                (normalized, str(canonical), details.st_dev, details.st_ino, now),
+                (normalized, str(canonical), device, inode, now),
             )
         return RegisteredRepository(
-            normalized, canonical, details.st_dev, details.st_ino, now
+            normalized, canonical, device, inode, now
         )
 
     def grant(self, user_id: str, repo_id: str, *, base_revision: str = "HEAD") -> RepositoryGrant:
@@ -218,7 +233,9 @@ class RepositoryAuthorizationStore:
                 "registered_repository_unavailable",
                 {"repo_id": normalized, "error": type(exc).__name__},
             ) from exc
-        if details.st_dev != int(row["device"]) or details.st_ino != int(row["inode"]):
+        device = _sqlite_filesystem_id(details.st_dev)
+        inode = _sqlite_filesystem_id(details.st_ino)
+        if device != int(row["device"]) or inode != int(row["inode"]):
             raise RepositoryAuthorizationError(
                 "registered_repository_identity_changed",
                 {"repo_id": normalized},

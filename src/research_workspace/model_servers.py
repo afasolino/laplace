@@ -342,11 +342,12 @@ def observe_port_owners(port: int) -> list[JsonObject]:
     """Resolve listening socket inodes to processes using read-only /proc data."""
 
     inodes = _listening_socket_inodes(port)
-    if not inodes:
+    proc_root = Path("/proc")
+    if not inodes or not proc_root.is_dir():
         return []
     owners: list[JsonObject] = []
     for process_dir in sorted(
-        (path for path in Path("/proc").iterdir() if path.name.isdigit()),
+        (path for path in proc_root.iterdir() if path.name.isdigit()),
         key=lambda item: int(item.name),
     ):
         try:
@@ -384,8 +385,11 @@ def _descendant_pids(root_pids: set[int]) -> set[int]:
     """Resolve the current process tree below owned launcher PIDs."""
 
     descendants = set(root_pids)
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return descendants
     parents: dict[int, int] = {}
-    for process_dir in Path("/proc").iterdir():
+    for process_dir in proc_root.iterdir():
         if not process_dir.name.isdigit():
             continue
         try:

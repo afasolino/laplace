@@ -289,3 +289,59 @@
 - Regression test: full suite and 64-iteration final CPU soak.
 - Status: FIXED in the final reliability repair.
 - Commit: recorded in final `defect_register.json`.
+
+## RCV8-019 — P1 — Windows private-state and filesystem identity portability
+
+- Evidence: Windows 3.11/3.12 run `30794147886` rejected registry and artifact
+  fixtures because Windows does not expose POSIX mode bits, while unsigned
+  64-bit file IDs overflowed SQLite's signed INTEGER adapter.
+- Reproduction: run the unit/integration matrix on Windows at `2f1753c`.
+- Expected: POSIX permission checks remain strict on POSIX hosts; Windows uses
+  its native access controls without interpreting synthetic `st_mode` bits, and
+  file identity remains exact in SQLite.
+- Observed: 0600/0700 checks saw synthetic 0666 bits and repository registration
+  raised `OverflowError`.
+- Security/data-loss impact: all registered-account and Agent/worktree flows were
+  unavailable on Windows.
+- Minimal fix: gate POSIX-bit validation by host and bijectively map unsigned
+  64-bit device/inode values into SQLite's signed 64-bit range.
+- Regression test: signed-boundary fixture, POSIX permission tests, full local
+  suite, and Windows 3.11/3.12 matrix.
+- Status: FIXED in the final Windows CI repair.
+- Commit: recorded in final `defect_register.json`.
+
+## RCV8-020 — P1 — Windows byte-exact and Linux-process assumptions
+
+- Evidence: Windows run `30794147886` changed hash-bound schema/licence line
+  endings, treated regular fixture executables as non-executable, and attempted
+  to enumerate `/proc` and probe Unix sanitizers.
+- Reproduction: run the unit/integration matrix on Windows at `2f1753c`.
+- Expected: byte-pinned repository inputs checkout identically; executable and
+  optional-tool checks use host semantics; Linux process inspection is bounded
+  to hosts with `/proc`.
+- Observed: corpus/schema hashes drifted, serving validation failed, and model
+  release tests raised WinError 3/32.
+- Security/data-loss impact: false CI failures and unavailable safe lifecycle
+  validation on Windows clients.
+- Minimal fix: mark pinned inputs `-text`, use Windows file semantics, preserve a
+  minimal Windows verifier environment, and guard `/proc`/sanitizer probes.
+- Regression test: full local suite and Windows 3.11/3.12 matrix.
+- Status: FIXED in the final Windows CI repair.
+- Commit: recorded in final `defect_register.json`.
+
+## RCV8-021 — P1 — Windows governance database cleanup
+
+- Evidence: the CPU soak passed its assertions but `TemporaryDirectory.cleanup`
+  failed with WinError 32 on `governance.sqlite3` in run `30794147886`.
+- Reproduction: run `tests/test_reliability_v7.py` on Windows at `2f1753c`.
+- Expected: every governance SQLite connection commits or rolls back and closes
+  before fixture cleanup.
+- Observed: transaction context managers finalized transactions without
+  explicitly closing their Windows file handles.
+- Security/data-loss impact: false reliability certification and leaked fixture
+  resources.
+- Minimal fix: combine transaction contexts with `contextlib.closing` for every
+  governance connection.
+- Regression test: reliability suite, 64-iteration CPU soak, and Windows matrix.
+- Status: FIXED in the final Windows CI repair.
+- Commit: recorded in final `defect_register.json`.

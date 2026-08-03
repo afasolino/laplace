@@ -1617,6 +1617,15 @@ def test_serving_preflight_validates_phase2_vllm_override(
     python.write_text("#!/usr/bin/env bash\necho 0.25.0+cu129\n", encoding="utf-8")
     executable.chmod(0o755)
     python.chmod(0o755)
+    monkeypatch.setattr(
+        "research_workspace.model_artifacts.subprocess.run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="0.25.0+cu129\n",
+            stderr="",
+        ),
+    )
     monkeypatch.setenv("LAPLACE_VLLM_EXECUTABLE", str(executable))
     result = validate_serving_environments(CONFIG_PATH.parent, {"phase2_main"}, probe_cli=False)
     record = result["environments"][0]

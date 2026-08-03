@@ -24,10 +24,22 @@ def _failure_annotations(output: str) -> list[str]:
         or " ERROR collecting " in line
     ]
     summary = "\n".join(lines) or output[-3_000:]
-    return [
-        summary[index : index + 3_000]
-        for index in range(0, len(summary), 3_000)
-    ]
+    chunks: list[str] = []
+    current = ""
+    for line in summary.splitlines() or [summary]:
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) <= 3_000:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+        while len(line) > 3_000:
+            chunks.append(line[:3_000])
+            line = line[3_000:]
+        current = line
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def main(argv: Sequence[str] | None = None) -> int:

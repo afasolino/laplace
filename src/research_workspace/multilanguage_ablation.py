@@ -1131,6 +1131,8 @@ def _tool_remediation(name: str) -> str:
 
 
 def _sanitizer_compiler(name: str) -> str | None:
+    if os.name == "nt":
+        return None
     flag = "-fsanitize=address" if name == "asan" else "-fsanitize=undefined"
     for compiler in ("gcc", "clang"):
         executable = shutil.which(compiler)

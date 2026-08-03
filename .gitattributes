@@ -1,3 +1,5 @@
 # Governed external snapshots must remain byte-identical to their pinned source.
 # Upstream documentation may intentionally contain whitespace or marker examples.
 codex_a6000/governed_corpus/external/** -text -whitespace conflict-marker-size=64
+codex_a6000/governed_corpus/LICENSE -text
+schemas/v7/** -text

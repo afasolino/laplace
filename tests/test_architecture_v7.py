@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -308,7 +309,8 @@ def test_configuration_precedence_unknown_keys_and_redaction(tmp_path: Path) -> 
     assert "state/server" not in serialized
     assert "LAPLACE_SESSION_KEY" not in serialized
     target = write_diagnostic_export(tmp_path / "diagnostic.json", configuration)
-    assert target.stat().st_mode & 0o077 == 0
+    if os.name != "nt":
+        assert target.stat().st_mode & 0o077 == 0
 
     with pytest.raises(ConfigurationV7Error, match="unknown_environment_override"):
         load_configuration(environment={"LAPLACE_CONFIG_UNSAFE": "yes"})

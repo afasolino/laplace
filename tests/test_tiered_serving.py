@@ -32,6 +32,7 @@ from research_workspace.operator_service import OperatorService
 from research_workspace.repository_authorization import (
     RepositoryAuthorizationError,
     RepositoryAuthorizationStore,
+    _sqlite_filesystem_id,
     validate_workspace_path,
 )
 from research_workspace.service_tiers import (
@@ -73,6 +74,14 @@ from research_workspace.user_capabilities import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_unsigned_windows_file_ids_fit_sqlite_without_losing_identity() -> None:
+    assert _sqlite_filesystem_id(2**63 - 1) == 2**63 - 1
+    assert _sqlite_filesystem_id(2**63) == -(2**63)
+    assert _sqlite_filesystem_id(2**64 - 1) == -1
+    with pytest.raises(RepositoryAuthorizationError, match="out_of_range"):
+        _sqlite_filesystem_id(2**64)
 
 
 def _nvidia_result(

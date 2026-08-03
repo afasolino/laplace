@@ -321,6 +321,8 @@ def require_private_registry_permissions(path: Path) -> None:
         file_mode = path.stat().st_mode & 0o777
     except OSError as exc:
         raise AuthRegistryError("registry_unavailable", {"error_type": type(exc).__name__}) from exc
+    if os.name == "nt":
+        return
     if parent_mode & 0o077:
         raise AuthRegistryError("registry_parent_permissions", {"required": "0700"})
     if file_mode & 0o077 or file_mode & 0o600 != 0o600:

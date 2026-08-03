@@ -369,6 +369,10 @@ def test_registry_strict_permissions_and_last_valid_reload(tmp_path: Path) -> No
     assert accepted is False
     assert category == "invalid_user_schema"
     assert snapshot.revision == revision
+    if os.name == "nt":
+        write_registry(path, [user])
+        assert RegisteredUserRegistry(path).snapshot.users_by_id[user.user_id] == user
+        return
     os.chmod(path, 0o644)
     with pytest.raises(AuthRegistryError, match="registry_file_permissions"):
         RegisteredUserRegistry(path)

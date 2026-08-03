@@ -413,7 +413,9 @@ def validate_serving_environments(
             errors.append("environment_missing")
         if not python.is_file():
             errors.append("python_missing")
-        if not executable.is_file() or not (executable.stat().st_mode & 0o111):
+        if not executable.is_file() or (
+            os.name != "nt" and not (executable.stat().st_mode & 0o111)
+        ):
             errors.append("vllm_executable_missing")
         if not errors:
             try:

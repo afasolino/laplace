@@ -51,6 +51,9 @@ The release review deliberately distinguishes these boundaries:
   retrieval/citations, model-backed Python and SystemVerilog patches with
   deterministic verification, isolation/capability checks, cancellation,
   provider-failure behavior, and hash-bound screenshot evidence.
+- The final Windows review preserves byte-pinned inputs, avoids interpreting
+  synthetic POSIX mode bits, stores unsigned host file identities without SQLite
+  overflow, and explicitly closes governance database handles.
 - SSH/HTTPS sync transports remain staged policy boundaries; the fixture
   transport is a reference implementation, not a production transport.
 - Current vulnerability-database lookup and Windows-native execution remain

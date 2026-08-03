@@ -10,7 +10,7 @@ import shutil
 import sqlite3
 import tempfile
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
@@ -238,7 +238,7 @@ class GovernanceStore:
         return connection
 
     def _initialize(self) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS accounts (
@@ -305,13 +305,13 @@ class GovernanceStore:
     def register_account(self, owner_id: str) -> None:
         if "@" in owner_id:
             raise GovernanceError("raw email addresses are not valid storage owner IDs")
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute(
                 "INSERT OR IGNORE INTO accounts(owner_id) VALUES (?)", (owner_id,)
             )
 
     def disable_account(self, owner_id: str) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             changed = connection.execute(
                 "UPDATE accounts SET disabled = 1 WHERE owner_id = ?", (owner_id,)
             ).rowcount
@@ -320,7 +320,7 @@ class GovernanceStore:
 
     def request_account_deletion(self, owner_id: str, *, now: datetime | None = None) -> None:
         timestamp = (now or _utc_now()).isoformat()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             changed = connection.execute(
                 """
                 UPDATE accounts
@@ -343,7 +343,7 @@ class GovernanceStore:
     def admit(self, owner_id: str, byte_count: int) -> None:
         if byte_count < 0:
             raise GovernanceError("byte count cannot be negative")
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             account = connection.execute(
                 "SELECT disabled FROM accounts WHERE owner_id = ?", (owner_id,)
             ).fetchone()
@@ -440,7 +440,7 @@ class GovernanceStore:
         )
 
     def asset(self, owner_id: str, asset_id: str) -> AssetRecord:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT * FROM assets WHERE owner_id = ? AND asset_id = ?",
                 (owner_id, asset_id),
@@ -450,7 +450,7 @@ class GovernanceStore:
         return self._row_to_asset(row)
 
     def summary(self) -> StorageSummary:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             active_bytes = self._active_bytes(connection, None)
             active_assets = int(
                 connection.execute(
@@ -488,7 +488,7 @@ class GovernanceStore:
 
     def plan_purge(self, *, now: datetime | None = None) -> PurgePlan:
         generated_at = now or _utc_now()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """
                 SELECT * FROM assets
@@ -659,7 +659,7 @@ class GovernanceStore:
             raise GovernanceError("exact backup confirmation is required")
         if not key_reference or any(secret in key_reference.lower() for secret in ("key=", "token=")):
             raise GovernanceError("use an external key reference, not embedded key material")
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 "SELECT * FROM assets WHERE status = ? ORDER BY owner_id, asset_id",
                 (AssetStatus.ACTIVE.value,),
@@ -732,4 +732,3 @@ class GovernanceStore:
                 _json(details),
             ),
         )
-

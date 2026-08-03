@@ -196,7 +196,8 @@ def test_python_worktree_verification_uses_only_isolated_changed_tree(
         encoding="utf-8",
     )
     assert _changed_worktree(state, "python/value.py", "return 2") == worktree
-    assert _verify_python_worktree(state)["status"] == "PASS"
+    verification = _verify_python_worktree(state)
+    assert verification["status"] == "PASS", verification
 
 
 def test_systemverilog_verification_requires_every_gate(

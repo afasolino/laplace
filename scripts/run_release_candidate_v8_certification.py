@@ -447,6 +447,41 @@ def _defects() -> list[dict[str, object]]:
             ),
             "disk-pressure fixture depended on a one-byte free-space race",
         ),
+        (
+            "RCV8-019",
+            "P1",
+            "Windows private-state and filesystem identity portability",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "src/research_workspace/auth_registry.py",
+            ),
+            "POSIX mode checks and unsigned file IDs failed on Windows",
+        ),
+        (
+            "RCV8-020",
+            "P1",
+            "Windows byte-exact and Linux-process assumptions",
+            _git(ROOT, "log", "-1", "--format=%h", "--", ".gitattributes"),
+            "byte-pinned inputs and Linux-only process probes were not portable",
+        ),
+        (
+            "RCV8-021",
+            "P1",
+            "Windows governance database cleanup",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "src/research_workspace/governance.py",
+            ),
+            "governance transaction contexts did not close Windows file handles",
+        ),
     )
     return [
         {
