@@ -345,3 +345,19 @@
 - Regression test: reliability suite, 64-iteration CPU soak, and Windows matrix.
 - Status: FIXED in the final Windows CI repair.
 - Commit: recorded in final `defect_register.json`.
+
+## RCV8-022 — P2 — deprecated CI action runtime
+
+- Evidence: successful exact-commit CI run `30795868597` emitted a GitHub warning
+  that pinned `actions/upload-artifact` v4.6.2 targets deprecated Node 20 and was
+  being forced onto Node 24.
+- Reproduction: inspect annotations for package job `91629196539` at `748da1f`.
+- Expected: official actions are immutable-pinned to a supported declared runtime.
+- Observed: CI succeeded only through runner compatibility forcing.
+- Security/data-loss impact: future artifact loss if the compatibility shim is
+  removed; no current package contents were exposed.
+- Minimal fix: pin the official v7.0.1 commit, whose `action.yml` declares
+  `node24`, in both artifact-producing workflows.
+- Regression test: static CI validator plus final remote workflow annotations.
+- Status: FIXED in the final CI-governance repair.
+- Commit: recorded in final `defect_register.json`.

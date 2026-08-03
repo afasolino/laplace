@@ -482,6 +482,20 @@ def _defects() -> list[dict[str, object]]:
             ),
             "governance transaction contexts did not close Windows file handles",
         ),
+        (
+            "RCV8-022",
+            "P2",
+            "deprecated CI action runtime",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                ".github/workflows/package-build.yml",
+            ),
+            "upload-artifact targeted deprecated Node 20 through runner forcing",
+        ),
     )
     return [
         {
