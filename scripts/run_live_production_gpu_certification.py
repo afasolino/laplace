@@ -7,7 +7,6 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import secrets
 import shutil
 import signal
@@ -502,13 +501,6 @@ def _verify_python_worktree(state_root: Path) -> dict[str, object]:
     }
 
 
-def _verilator_timing_arguments(version_output: str) -> tuple[str, ...]:
-    match = re.search(r"\bVerilator\s+(\d+)(?:\.\d+)?", version_output)
-    if match is None:
-        raise RuntimeError("verilator_version_unparseable")
-    return ("--timing",) if int(match.group(1)) >= 5 else ()
-
-
 def _verify_systemverilog_worktree(state_root: Path) -> dict[str, object]:
     worktree = _changed_worktree(state_root, "rtl/example.sv", "assign y = ~a")
     tools = {
@@ -534,26 +526,13 @@ def _verify_systemverilog_worktree(state_root: Path) -> dict[str, object]:
             "verilator_version": verilator_version,
             "worktree_is_isolated": worktree.is_relative_to(state_root),
         }
-    try:
-        timing_arguments = _verilator_timing_arguments(
-            str(verilator_version["output_tail"])
-        )
-    except RuntimeError as exc:
-        return {
-            "status": "FAIL",
-            "category": str(exc),
-            "verilator_version": verilator_version,
-            "worktree_is_isolated": worktree.is_relative_to(state_root),
-        }
     with tempfile.TemporaryDirectory(prefix="laplace-v8-live-sv-") as temporary:
         simulation = Path(temporary) / "tb.out"
         commands = {
             "verilator_lint": [
                 str(tools["verilator"]),
                 "--lint-only",
-                *timing_arguments,
                 "rtl/example.sv",
-                "rtl/tb_example.sv",
             ],
             "iverilog_compile": [
                 str(tools["iverilog"]),
@@ -593,7 +572,7 @@ def _verify_systemverilog_worktree(state_root: Path) -> dict[str, object]:
         ),
         "results": results,
         "verilator_version": verilator_version,
-        "verilator_timing_mode": "explicit" if timing_arguments else "legacy",
+        "verilator_lint_scope": "synthesizable_design",
         "worktree_is_isolated": worktree.is_relative_to(state_root),
     }
 

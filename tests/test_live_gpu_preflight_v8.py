@@ -20,7 +20,6 @@ from run_live_production_gpu_certification import (  # noqa: E402
     _record_unexpected_failure,
     _unexpected_console_errors,
     _validate_static_preflight,
-    _verilator_timing_arguments,
     _verify_python_worktree,
     _verify_systemverilog_worktree,
 )
@@ -103,20 +102,6 @@ def test_live_admin_has_every_independent_capability() -> None:
 
 def test_live_chat_wait_uses_production_ui_terminal_state_contract() -> None:
     assert CHAT_TERMINAL_STATES == ("COMPLETE", "FAILED")
-
-
-@pytest.mark.parametrize(
-    ("version", "expected"),
-    (
-        ("Verilator 4.028 2020-02-06", ()),
-        ("Verilator 5.038 2025-07-08", ("--timing",)),
-    ),
-)
-def test_verilator_timing_flag_tracks_major_version(
-    version: str,
-    expected: tuple[str, ...],
-) -> None:
-    assert _verilator_timing_arguments(version) == expected
 
 
 def test_expected_provider_failure_console_error_is_not_a_browser_defect() -> None:
@@ -299,6 +284,7 @@ def test_systemverilog_verification_requires_every_gate(
         encoding="utf-8",
     )
     monkeypatch.setattr(live_gpu.shutil, "which", lambda name: f"/fixture/{name}")
+    seen_commands: list[tuple[str, ...]] = []
 
     def verifier(
         command: list[str] | tuple[str, ...],
@@ -307,6 +293,7 @@ def test_systemverilog_verification_requires_every_gate(
         timeout: int = 120,
     ) -> dict[str, object]:
         del worktree, timeout
+        seen_commands.append(tuple(command))
         return {
             "status": "PASS",
             "returncode": 0,
@@ -321,3 +308,8 @@ def test_systemverilog_verification_requires_every_gate(
 
     monkeypatch.setattr(live_gpu, "_run_verifier", verifier)
     assert _verify_systemverilog_worktree(state)["status"] == "PASS"
+    assert (
+        "/fixture/verilator",
+        "--lint-only",
+        "rtl/example.sv",
+    ) in seen_commands

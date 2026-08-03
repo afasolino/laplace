@@ -608,6 +608,20 @@ def _defects() -> list[dict[str, object]]:
             ),
             "a transient free-space threshold allowed admission after concurrent cleanup",
         ),
+        (
+            "RCV8-031",
+            "P1",
+            "legacy Verilator timed-testbench warning",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "scripts/run_live_production_gpu_certification.py",
+            ),
+            "legacy Verilator treated ignored timed-testbench delays as fatal warnings",
+        ),
     )
     return [
         {

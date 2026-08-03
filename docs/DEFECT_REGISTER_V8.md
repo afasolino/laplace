@@ -464,9 +464,10 @@
 - Observed: unconditional `--timing` produced `Invalid Option: --timing`.
 - Security/data-loss impact: false live-certification failure only; the isolated
   worktree and source checkout were preserved.
-- Minimal fix: parse the reported Verilator major version, use legacy lint mode
-  before version 5, and retain explicit timing mode for version 5 and newer.
-- Regression test: exact version-4/version-5 argument fixtures plus live rerun.
+- Minimal fix: retain a fail-closed version probe and lint the synthesizable DUT
+  without a version-specific timing option; Icarus/vvp independently validates
+  timed testbench behavior.
+- Regression test: exact design-only Verilator command fixture plus live rerun.
 - Status: FIXED in the final live-verifier compatibility repair.
 - Commit: recorded in final `defect_register.json`.
 
@@ -504,4 +505,23 @@
   capacity, which cannot be satisfied by concurrent cleanup.
 - Regression test: the corrected governance scenario and full four-job matrix.
 - Status: FIXED in the final governance-fixture repair.
+- Commit: recorded in final `defect_register.json`.
+
+## RCV8-031 — P1 — legacy Verilator timed-testbench warning
+
+- Evidence: guarded live run `live_gpu_v8_520e92e_20260803T0952Z` proved the
+  option-selection repair but Verilator 4.028 then failed on two `STMTDLY`
+  warnings from the timed testbench; Icarus simulation and Yosys still passed.
+- Reproduction: lint `rtl/tb_example.sv` with Verilator 4.028 after removing the
+  unsupported version-5 timing option.
+- Expected: Verilator independently lints synthesizable Agent output while the
+  timed behavioral testbench is executed by Icarus/vvp.
+- Observed: legacy Verilator ignores testbench delays and exits nonzero because
+  those warnings are fatal by default.
+- Security/data-loss impact: false live-certification failure only; all isolated
+  state and ownership-aware cleanup checks passed.
+- Minimal fix: restrict Verilator lint to `rtl/example.sv`; retain Icarus compile
+  and simulation of both files plus Yosys synthesis of the DUT.
+- Regression test: exact design-only Verilator argv fixture plus live rerun.
+- Status: FIXED in the final legacy-toolchain compatibility repair.
 - Commit: recorded in final `defect_register.json`.
