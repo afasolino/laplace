@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import run_live_production_gpu_certification as live_gpu  # noqa: E402
 from run_live_production_gpu_certification import (  # noqa: E402
     ADMIN_CAPABILITIES,
+    CHAT_TERMINAL_STATES,
     STABLE,
     _changed_worktree,
     _prepare_output,
@@ -96,6 +97,10 @@ def test_live_admin_has_every_independent_capability() -> None:
         "repository_admin",
         "model_admin",
     }
+
+
+def test_live_chat_wait_uses_production_ui_terminal_state_contract() -> None:
+    assert CHAT_TERMINAL_STATES == ("COMPLETE", "FAILED")
 
 
 def test_unexpected_live_failure_writes_terminal_shutdown_evidence(

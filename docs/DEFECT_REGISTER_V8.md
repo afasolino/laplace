@@ -433,3 +433,22 @@
 - Regression test: CPU exception fixture plus guarded live rerun.
 - Status: FIXED in the final live-runner repair.
 - Commit: recorded in final `defect_register.json`.
+
+## RCV8-027 — P1 — live chat terminal-state case mismatch
+
+- Evidence: guarded live run `live_gpu_v8_20260803T085749Z` completed both P1
+  inference requests and returned `POST /api/v1/chat` with HTTP 200, but the
+  browser waited for the full 300-second bound before safe shutdown.
+- Reproduction: submit either live chat through the production GUI and compare
+  the UI's uppercase `COMPLETE`/`FAILED` state with the runner's title-case
+  predicate.
+- Expected: the runner observes the production UI terminal-state contract and
+  continues immediately after the successful response.
+- Observed: the runner waited for unreachable `Complete`/`Failed` prefixes.
+- Security/data-loss impact: false live-certification failure and avoidable GPU
+  residency; ownership-aware cleanup still closed both endpoints.
+- Minimal fix: share the exact uppercase chat terminal-state tuple across both
+  live chat waits and their failure checks.
+- Regression test: exact terminal-state contract fixture plus guarded live rerun.
+- Status: FIXED in the final live-runner synchronization repair.
+- Commit: recorded in final `defect_register.json`.

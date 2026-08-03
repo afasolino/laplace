@@ -59,6 +59,7 @@ ADMIN_CAPABILITIES = (
     "repository_admin",
     "model_admin",
 )
+CHAT_TERMINAL_STATES = ("COMPLETE", "FAILED")
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -990,11 +991,12 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 )
                 page.get_by_role("button", name="Send", exact=True).click()
                 page.wait_for_function(
-                    "() => ['Complete', 'Failed'].some((value) => "
+                    "states => states.some((value) => "
                     "document.querySelector('#chat-state')?.textContent.startsWith(value))",
+                    arg=CHAT_TERMINAL_STATES,
                     timeout=300_000,
                 )
-                if page.locator("#chat-state").inner_text().startswith("Failed"):
+                if page.locator("#chat-state").inner_text().startswith("FAILED"):
                     raise RuntimeError("live Quality chat failed")
                 quality_card = page.locator(".message-card.assistant")
                 quality_card.wait_for(timeout=300_000)
@@ -1110,11 +1112,12 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 )
                 page.get_by_role("button", name="Send", exact=True).click()
                 page.wait_for_function(
-                    "() => ['Complete', 'Failed'].some((value) => "
+                    "states => states.some((value) => "
                     "document.querySelector('#chat-state')?.textContent.startsWith(value))",
+                    arg=CHAT_TERMINAL_STATES,
                     timeout=300_000,
                 )
-                if page.locator("#chat-state").inner_text().startswith("Failed"):
+                if page.locator("#chat-state").inner_text().startswith("FAILED"):
                     raise RuntimeError("live CodeV chat failed")
                 page.locator(".message-card.assistant").last.wait_for(
                     timeout=300_000

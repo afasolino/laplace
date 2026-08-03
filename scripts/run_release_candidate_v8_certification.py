@@ -552,6 +552,20 @@ def _defects() -> list[dict[str, object]]:
             ),
             "unexpected live exceptions left no terminal result or manifest",
         ),
+        (
+            "RCV8-027",
+            "P1",
+            "live chat terminal-state case mismatch",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "scripts/run_live_production_gpu_certification.py",
+            ),
+            "live chat waits expected title-case states while the UI emits uppercase",
+        ),
     )
     return [
         {
