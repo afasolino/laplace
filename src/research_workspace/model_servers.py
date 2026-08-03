@@ -14,7 +14,7 @@ import urllib.request
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Sequence, TypeAlias
 from urllib.parse import urlsplit
 
@@ -98,7 +98,10 @@ class ModelServerSpec:
             raise ValueError("Unsupported model-server profile")
         if not self.expected_model_id or "\n" in self.expected_model_id:
             raise ValueError("Invalid expected model identity")
-        if not Path(self.model_path).is_absolute():
+        if not (
+            Path(self.model_path).is_absolute()
+            or PurePosixPath(self.model_path).is_absolute()
+        ):
             raise ValueError("Model path must be absolute")
 
     def to_json(self) -> JsonObject:

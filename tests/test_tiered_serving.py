@@ -725,16 +725,17 @@ def test_profiles_resolve_deterministically_and_fail_closed(tmp_path: Path) -> N
         version="0.25.0", help_text=help_text
     )
     profiles = load_profiles(ROOT / "configs/serving_profiles")
+    fixture_executable = Path.cwd().resolve() / "fixture-vllm/bin/vllm"
     first = resolve_all(
         profiles,
         capabilities,
-        executable=Path("/opt/vllm/bin/vllm"),
+        executable=fixture_executable,
         require_model=False,
     )
     second = resolve_all(
         profiles,
         capabilities,
-        executable=Path("/opt/vllm/bin/vllm"),
+        executable=fixture_executable,
         require_model=False,
     )
     assert [item.resolution_sha256 for item in first] == [
@@ -752,7 +753,7 @@ def test_profiles_resolve_deterministically_and_fail_closed(tmp_path: Path) -> N
         resolve_all(
             profiles,
             unsupported,
-            executable=Path("/opt/vllm/bin/vllm"),
+            executable=fixture_executable,
             require_model=False,
         )
 

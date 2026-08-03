@@ -665,8 +665,8 @@ class ReferenceLibrary:
                 selected_target.chmod(0o444)
             records.append(
                 ReferenceFile(
-                    source_path=str(source_snapshot.relative_to(self.root)),
-                    selected_path=str(selected_target.relative_to(self.root)),
+                    source_path=source_snapshot.relative_to(self.root).as_posix(),
+                    selected_path=selected_target.relative_to(self.root).as_posix(),
                     sha256=_sha256(selected_source),
                     topics=topics,
                 )
@@ -1123,7 +1123,7 @@ class LocalToolRunner:
             resolved = _inside(self.repository_root, self.repository_root / relative)
             if not resolved.exists():
                 raise ToolExecutionError(f"Tool target does not exist: {value}")
-            output.append(str(relative))
+            output.append(relative.as_posix())
         return output
 
     def run(self, tool: str, command: list[str], *, timeout_seconds: int = 300) -> ToolResult:
@@ -1626,7 +1626,10 @@ class LocalToolRunner:
                 missing_tools.append(tool)
         results: list[JsonObject] = []
         strengthening_results: list[JsonObject] = []
-        relative_sources = [str(path.relative_to(self.repository_root)) for path in sources]
+        relative_sources = [
+            path.relative_to(self.repository_root).as_posix()
+            for path in sources
+        ]
         if compiler is not None:
             direct_executable = self.log_root / f"c_direct_{uuid.uuid4().hex}"
             results.append(
@@ -2082,7 +2085,7 @@ def _project_knowledge_cards(repository_root: Path, domain: Domain, query: str) 
         records.append(
             {
                 "kind": "project_knowledge_card",
-                "path": str(path.relative_to(repository_root)),
+                "path": path.relative_to(repository_root).as_posix(),
                 "sha256": _sha256(path),
                 "matched_query_terms": matched[:24],
                 "content": content[:8000],
@@ -2123,7 +2126,7 @@ def retrieve_engineering_evidence(
                 target_project.append(
                     {
                         "kind": "target_project",
-                        "path": str(source.relative_to(root)),
+                        "path": source.relative_to(root).as_posix(),
                         "sha256": _sha256(source),
                         "excerpt": content[:1200],
                     }

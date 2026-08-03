@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import cast
 
 from .engineering import (
@@ -237,7 +237,7 @@ def _copy_registered_domain(base_root: Path, overlay_root: Path, domain: Domain)
         selected = [
             (
                 source_library.root / record.selected_path,
-                str(Path(record.selected_path).parent),
+                PurePosixPath(record.selected_path).parent.as_posix(),
                 record.topics,
             )
             for record in manifest.files

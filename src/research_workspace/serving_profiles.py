@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal, Mapping, Sequence, TypeAlias
 from urllib.parse import urlsplit
 
@@ -80,7 +80,10 @@ class ServingProfile:
     def __post_init__(self) -> None:
         if not re.fullmatch(r"P[0-9]+(?:_[a-z0-9_]+)?", self.profile_id):
             raise ValueError("invalid profile_id")
-        if not Path(self.model_path).is_absolute():
+        if not (
+            Path(self.model_path).is_absolute()
+            or PurePosixPath(self.model_path).is_absolute()
+        ):
             raise ValueError("model_path must be absolute")
         if not self.served_model_name or any(char.isspace() for char in self.served_model_name):
             raise ValueError("served_model_name must be a non-empty token")

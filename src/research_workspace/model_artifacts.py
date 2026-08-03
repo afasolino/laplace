@@ -8,7 +8,7 @@ import os
 import re
 import subprocess  # nosec B404
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import cast
 from urllib.parse import urlsplit
 
@@ -294,8 +294,22 @@ def load_model_artifacts(path: Path) -> dict[str, JsonObject]:
         if not required_serving.issubset(serving) or not set(serving).issubset(allowed_serving):
             raise EngineeringError(f"Model artifact {artifact_id} serving keys are invalid")
         parsed_endpoint = urlsplit(str(serving.get("endpoint", "")))
-        environment_path = Path(str(serving.get("environment_path", "")))
-        executable_path = Path(str(serving.get("executable", "")))
+        environment_value = str(serving.get("environment_path", ""))
+        executable_value = str(serving.get("executable", ""))
+        environment_path = Path(environment_value)
+        executable_path = Path(executable_value)
+        posix_environment = PurePosixPath(environment_value)
+        posix_executable = PurePosixPath(executable_value)
+        native_paths_valid = (
+            environment_path.is_absolute()
+            and executable_path.is_absolute()
+            and executable_path.parent.parent == environment_path
+        )
+        posix_paths_valid = (
+            posix_environment.is_absolute()
+            and posix_executable.is_absolute()
+            and posix_executable.parent.parent == posix_environment
+        )
         if (
             parsed_endpoint.scheme != "http"
             or parsed_endpoint.hostname != "127.0.0.1"
@@ -304,9 +318,8 @@ def load_model_artifacts(path: Path) -> dict[str, JsonObject]:
         ):
             raise EngineeringError(f"Model artifact {artifact_id} endpoint must be loopback-only")
         if (
-            not environment_path.is_absolute()
-            or not executable_path.is_absolute()
-            or executable_path.parent.parent != environment_path
+            not native_paths_valid
+            and not posix_paths_valid
         ):
             raise EngineeringError(
                 f"Model artifact {artifact_id} serving environment paths are invalid"

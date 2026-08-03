@@ -9,7 +9,7 @@ import re
 import shutil
 import sqlite3
 import stat
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -172,7 +172,13 @@ def _integrity(path: Path, format_name: str) -> None:
         raise MigrationError("store_missing_or_oversize")
     try:
         if format_name == "sqlite":
-            with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5) as connection:
+            with closing(
+                sqlite3.connect(
+                    f"file:{path}?mode=ro",
+                    uri=True,
+                    timeout=5,
+                )
+            ) as connection:
                 result = connection.execute("PRAGMA quick_check").fetchone()
             if result is None or result[0] != "ok":
                 raise MigrationError("sqlite_integrity_failed")
@@ -328,7 +334,7 @@ def _migrate_store(path: Path, entry: StoreEntry) -> None:
         raise MigrationError("no_ordered_migration")
     if entry.format == "sqlite":
         try:
-            with sqlite3.connect(path, timeout=15) as connection:
+            with closing(sqlite3.connect(path, timeout=15)) as connection:
                 connection.execute("PRAGMA busy_timeout=15000")
                 connection.execute("BEGIN IMMEDIATE")
                 connection.execute(
@@ -588,7 +594,7 @@ def create_synthetic_v0_state(root: Path, *, state_id: str = "fixture-v7-old") -
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if format_name == "sqlite":
-            with sqlite3.connect(path) as connection:
+            with closing(sqlite3.connect(path)) as connection:
                 connection.execute(
                     "CREATE TABLE legacy_records(record_id TEXT PRIMARY KEY, value TEXT NOT NULL)"
                 )

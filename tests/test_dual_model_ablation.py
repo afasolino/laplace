@@ -1679,7 +1679,7 @@ def test_held_out_pack_is_hash_checked_and_must_be_external(tmp_path: Path) -> N
         hashes: dict[str, str] = {}
         for name in names:
             content = f"// evaluator fixture for {task.task_id}\n"
-            (directory / name).write_text(content, encoding="utf-8")
+            (directory / name).write_text(content, encoding="utf-8", newline="")
             hashes[name] = hashlib.sha256(content.encode()).hexdigest()
         manifest_tasks[task.task_id] = {
             "directory": task.task_id,
