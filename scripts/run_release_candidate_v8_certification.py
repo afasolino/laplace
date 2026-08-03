@@ -496,6 +496,20 @@ def _defects() -> list[dict[str, object]]:
             ),
             "upload-artifact targeted deprecated Node 20 through runner forcing",
         ),
+        (
+            "RCV8-023",
+            "P1",
+            "HTTP concurrency fixture timing race",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "tests/test_tiered_serving.py",
+            ),
+            "a 50 ms scheduler window caused false concurrency failures",
+        ),
     )
     return [
         {

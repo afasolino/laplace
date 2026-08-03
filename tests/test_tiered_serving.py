@@ -334,6 +334,7 @@ class _ConcurrentChatBackend(_ChatBackend):
         super().__init__()
         self.active = 0
         self.maximum_active = 0
+        self.overlap_observed = threading.Event()
 
     def complete(
         self,
@@ -346,8 +347,11 @@ class _ConcurrentChatBackend(_ChatBackend):
         with self._lock:
             self.active += 1
             self.maximum_active = max(self.maximum_active, self.active)
+            if self.active >= 2:
+                self.overlap_observed.set()
         try:
-            time.sleep(0.05)
+            if not self.overlap_observed.wait(timeout=2):
+                self.overlap_observed.set()
             return super().complete(
                 messages=messages,
                 route=route,

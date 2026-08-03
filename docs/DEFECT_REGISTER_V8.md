@@ -361,3 +361,22 @@
 - Regression test: static CI validator plus final remote workflow annotations.
 - Status: FIXED in the final CI-governance repair.
 - Commit: recorded in final `defect_register.json`.
+
+## RCV8-023 — P1 — HTTP concurrency fixture timing race
+
+- Evidence: at exact commit `988fd1f`, Windows 3.12 and both Ubuntu jobs passed,
+  while Windows 3.11 job `91631416883` alone observed maximum concurrency one;
+  the unchanged fixture used a 50 ms sleep as its only overlap window.
+- Reproduction: inspect run `30796582269` and compare it with the all-green
+  `748da1f` matrix for the same application/test implementation.
+- Expected: the fixture deterministically proves that at least two blocking model
+  calls enter the thread pool together.
+- Observed: scheduler timing could let every 50 ms window close before another
+  request entered, producing a false failure.
+- Security/data-loss impact: false release rejection; no production request was
+  executed or serialized by the failure.
+- Minimal fix: use a bounded two-call event rendezvous; a truly serialized server
+  still times out and fails with maximum concurrency one.
+- Regression test: repeated local concurrency fixture and final four-job matrix.
+- Status: FIXED in the final fixture-determinism repair.
+- Commit: recorded in final `defect_register.json`.
