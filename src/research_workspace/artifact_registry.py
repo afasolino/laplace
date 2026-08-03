@@ -137,8 +137,12 @@ class ArtifactRegistry:
         repository = repo_id or "personal"
         if not repository.replace("-", "").replace("_", "").isalnum():
             raise ArtifactRegistryError("invalid_repo_id")
-        root = (self.content_root / owner / repository).resolve()
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        candidate = self.content_root / owner / repository
+        if self.content_root != candidate and self.content_root not in candidate.parents:
+            raise ArtifactRegistryError("artifact_path_escape")
+        with self._lock:
+            candidate.mkdir(parents=True, exist_ok=True, mode=0o700)
+            root = candidate.resolve(strict=True)
         if self.content_root != root and self.content_root not in root.parents:
             raise ArtifactRegistryError("artifact_path_escape")
         return root

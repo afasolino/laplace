@@ -380,3 +380,23 @@
 - Regression test: repeated local concurrency fixture and final four-job matrix.
 - Status: FIXED in the final fixture-determinism repair.
 - Commit: recorded in final `defect_register.json`.
+
+## RCV8-024 — P1 — concurrent Windows artifact-root resolution
+
+- Evidence: Windows 3.12 job `91633116806` alone raised
+  `artifact_path_escape` during 32 concurrent artifact creations at `dd7ff45`;
+  the same test passed on the other three matrix jobs and prior Windows runs.
+- Reproduction: run the concurrent artifact consistency fixture on Windows while
+  the owner/repository directory does not yet exist.
+- Expected: all creators resolve the same owner-private root and retain the
+  containment check.
+- Observed: resolution occurred before directory creation and raced with
+  concurrent `mkdir`, allowing inconsistent Windows canonical forms.
+- Security/data-loss impact: safe false rejection with no path escape or partial
+  registry row; concurrent artifact publication was unavailable.
+- Minimal fix: validate the lexical components, then create and strict-resolve
+  the root under the registry's existing re-entrant lock before the canonical
+  containment check.
+- Regression test: 32-way local fixture and final four-job matrix.
+- Status: FIXED in the final artifact-concurrency repair.
+- Commit: recorded in final `defect_register.json`.

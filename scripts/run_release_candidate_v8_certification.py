@@ -510,6 +510,20 @@ def _defects() -> list[dict[str, object]]:
             ),
             "a 50 ms scheduler window caused false concurrency failures",
         ),
+        (
+            "RCV8-024",
+            "P1",
+            "concurrent Windows artifact-root resolution",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "src/research_workspace/artifact_registry.py",
+            ),
+            "pre-creation path resolution raced with concurrent Windows mkdir",
+        ),
     )
     return [
         {
