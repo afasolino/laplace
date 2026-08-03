@@ -47,6 +47,10 @@ The release review deliberately distinguishes these boundaries:
   repository-local virtual environment, or optional EDA tools.
 - Portable execution-record locks use the host-native primitive, and corpus
   parser isolation imports without POSIX-only modules on Windows.
+- The guarded live gate now requires real SSE evidence, personal-corpus
+  retrieval/citations, model-backed Python and SystemVerilog patches with
+  deterministic verification, isolation/capability checks, cancellation,
+  provider-failure behavior, and hash-bound screenshot evidence.
 - SSH/HTTPS sync transports remain staged policy boundaries; the fixture
   transport is a reference implementation, not a production transport.
 - Current vulnerability-database lookup and Windows-native execution remain

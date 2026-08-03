@@ -203,3 +203,89 @@
 - Regression test: invalid-result certifier fixture and final integrated run.
 - Status: FIXED in the final CI repair commit.
 - Commit: recorded in final `defect_register.json`.
+
+## RCV8-014 — P1 — live GPU capability coverage
+
+- Evidence: the initial v8 live runner could return PASS after three GUI views,
+  while omitting required personal retrieval, citations, Python verification,
+  real SystemVerilog verification, cancellation, provider failure, cross-user
+  isolation, and Basic capability enforcement.
+- Reproduction: inspect the PASS check set before the final live-gate repair.
+- Expected: every Phase 9 capability has direct bounded evidence or an explicit
+  supported/not-supported classification.
+- Observed: patch preflight text was treated as language-tool verification.
+- Security/data-loss impact: false live-release evidence.
+- Minimal fix: add real vLLM SSE evidence, owner-private retrieval and citations,
+  two model-backed Agent patches, deterministic pytest/Ruff and
+  Verilator/Icarus/Yosys verification, isolation/capability checks, cancellation,
+  provider-failure handling, and between-group SpecDec checks.
+- Regression test: CPU helper tests plus the conditional guarded live gate.
+- Status: FIXED in the live-gate completeness commit.
+- Commit: recorded in final `defect_register.json`.
+
+## RCV8-015 — P1 — live evidence bundle integrity
+
+- Evidence: live result JSON listed screenshots relative to its external run
+  directory, but the final archive copied only operational fixture screenshots.
+- Reproduction: inspect the pre-fix archive manifest after supplying a live PASS.
+- Expected: every referenced live screenshot is hash-verified against the live
+  manifest and included in the final certification archive.
+- Observed: referenced evidence was absent from the archive.
+- Security/data-loss impact: unverifiable live certification.
+- Minimal fix: verify source containment, type, and SHA-256, then copy live
+  screenshots into the final bundle; fail the live-result-validity gate on any
+  mismatch.
+- Regression test: CPU duplicate/path-escape/hash-tamper fixtures plus final
+  integrated archive verification.
+- Status: FIXED in the live-gate completeness commit.
+- Commit: recorded in final `defect_register.json`.
+
+## RCV8-016 — P1 — Windows logical and declared paths
+
+- Evidence: the first collecting Windows matrix interpreted POSIX-declared local
+  model paths as relative and serialized governed logical paths with backslashes.
+- Reproduction: run the full fixture suite on Windows at `de58c46`.
+- Expected: protocol/logical paths remain POSIX canonical, while configuration
+  accepts explicit native or POSIX absolute declarations without accessing the
+  declared model.
+- Observed: model-profile construction failed and governed reference paths
+  drifted by host separator.
+- Security/data-loss impact: Windows client/fixture incompatibility and
+  non-portable provenance identifiers.
+- Minimal fix: use `PurePosixPath` for declarations and `.as_posix()` for
+  protocol metadata; keep actual file resolution host-native.
+- Regression test: Windows 3.11/3.12 matrix plus Linux fixture suite.
+- Status: FIXED in the final Windows CI repair.
+- Commit: recorded in final `defect_register.json`.
+
+## RCV8-017 — P1 — Windows migration rollback
+
+- Evidence: interrupted migration, recovery, and rollback failed with WinError 5
+  while atomically replacing SQLite stores.
+- Reproduction: run `tests/test_migrations_v7.py` on Windows at `de58c46`.
+- Expected: every read/write SQLite handle closes before restore replacement.
+- Observed: `sqlite3.Connection` transaction context managers did not close the
+  underlying Windows handles.
+- Security/data-loss impact: rollback/recovery unavailable after interruption.
+- Minimal fix: wrap every migration SQLite connection in `contextlib.closing`
+  while retaining explicit commit/rollback behavior.
+- Regression test: migration suite on both Windows matrix versions and local
+  v5/v6/v7 rehearsal.
+- Status: FIXED in the final Windows CI repair.
+- Commit: recorded in final `defect_register.json`.
+
+## RCV8-018 — P1 — CPU-soak determinism
+
+- Evidence: the full suite intermittently failed only the disk-pressure
+  scenario, while its isolated rerun passed.
+- Reproduction: run the full CPU suite while temporary files are being removed
+  on the same filesystem.
+- Expected: the synthetic pressure threshold is impossible to satisfy regardless
+  of concurrent free-space changes.
+- Observed: setting the threshold to the observed free bytes plus one allowed a
+  concurrent cleanup to make the admission succeed.
+- Security/data-loss impact: false negative reliability certification.
+- Minimal fix: set the fixture threshold above total filesystem capacity.
+- Regression test: full suite and 64-iteration final CPU soak.
+- Status: FIXED in the final reliability repair.
+- Commit: recorded in final `defect_register.json`.

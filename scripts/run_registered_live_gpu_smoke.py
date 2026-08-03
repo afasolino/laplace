@@ -91,10 +91,36 @@ def _admin(
 
 def _git_fixture(path: Path) -> str:
     (path / "rtl").mkdir(parents=True)
+    (path / "python").mkdir(parents=True)
     (path / "rtl/example.sv").write_text(
         "module example(input logic a, output logic y);\n"
         "  assign y = a;\n"
         "endmodule\n",
+        encoding="utf-8",
+    )
+    (path / "rtl/tb_example.sv").write_text(
+        "module tb_example;\n"
+        "  logic a;\n"
+        "  logic y;\n"
+        "  example dut(.a(a), .y(y));\n"
+        "  initial begin\n"
+        "    a = 1'b0; #1; if (y !== 1'b1) $fatal(1, \"invert zero\");\n"
+        "    a = 1'b1; #1; if (y !== 1'b0) $fatal(1, \"invert one\");\n"
+        "    $display(\"SYSTEMVERILOG_VERIFY_PASS\");\n"
+        "    $finish;\n"
+        "  end\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    (path / "python/value.py").write_text(
+        "def value() -> int:\n"
+        "    return 1\n",
+        encoding="utf-8",
+    )
+    (path / "python/test_value.py").write_text(
+        "from python.value import value\n\n\n"
+        "def test_value() -> None:\n"
+        "    assert value() == 2\n",
         encoding="utf-8",
     )
     environment = {
@@ -107,7 +133,7 @@ def _git_fixture(path: Path) -> str:
     }
     for command in (
         ["git", "init", "-q", str(path)],
-        ["git", "-C", str(path), "add", "rtl/example.sv"],
+        ["git", "-C", str(path), "add", "."],
         ["git", "-C", str(path), "commit", "-q", "-m", "fixture"],
     ):
         completed = subprocess.run(  # nosec B603 B607 - fixed Git verbs

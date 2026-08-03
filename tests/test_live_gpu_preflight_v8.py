@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -9,12 +10,17 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import run_live_production_gpu_certification as live_gpu  # noqa: E402
 from run_live_production_gpu_certification import (  # noqa: E402
     STABLE,
+    _changed_worktree,
     _prepare_output,
     _validate_static_preflight,
+    _verify_python_worktree,
+    _verify_systemverilog_worktree,
 )
 from run_release_candidate_v8_certification import (  # noqa: E402
+    _copy_verified_live_screenshots,
     _validated_live_result,
 )
 
@@ -87,3 +93,146 @@ def test_invalid_live_result_is_bounded_and_fails_the_validity_gate() -> None:
         "reason": "supplied live result had an invalid status",
         "supplied_result_valid": False,
     }
+
+
+def test_live_screenshots_are_hash_bound_and_copied(tmp_path: Path) -> None:
+    live_root = tmp_path / "live"
+    screenshot = live_root / "screenshots/live_quality.png"
+    screenshot.parent.mkdir(parents=True)
+    screenshot.write_bytes(b"synthetic live screenshot")
+    digest = hashlib.sha256(screenshot.read_bytes()).hexdigest()
+    result_path = live_root / "live_production_gpu_results.json"
+    result_path.write_text("{}\n", encoding="utf-8")
+    (live_root / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "files": [
+                    {
+                        "path": "screenshots/live_quality.png",
+                        "sha256": digest,
+                    }
+                ]
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "final"
+    output.mkdir()
+    evidence, valid = _copy_verified_live_screenshots(
+        {"screenshots": ["screenshots/live_quality.png"]},
+        result_path,
+        output,
+    )
+    assert valid is True
+    assert evidence == ["live_screenshots/live_quality.png"]
+    assert (output / evidence[0]).read_bytes() == screenshot.read_bytes()
+    screenshot.write_bytes(b"tampered")
+    tampered_output = tmp_path / "tampered-final"
+    tampered_output.mkdir()
+    _, tampered_valid = _copy_verified_live_screenshots(
+        {"screenshots": ["screenshots/live_quality.png"]},
+        result_path,
+        tampered_output,
+    )
+    assert tampered_valid is False
+
+
+@pytest.mark.parametrize(
+    "screenshots",
+    (
+        ["screenshots/live_quality.png", "screenshots/live_quality.png"],
+        ["outside.png"],
+    ),
+)
+def test_live_screenshots_reject_duplicates_and_path_escape(
+    tmp_path: Path,
+    screenshots: list[str],
+) -> None:
+    live_root = tmp_path / "live"
+    (live_root / "screenshots").mkdir(parents=True)
+    (live_root / "screenshots/live_quality.png").write_bytes(b"fixture")
+    (live_root / "outside.png").write_bytes(b"fixture")
+    result_path = live_root / "live_production_gpu_results.json"
+    result_path.write_text("{}\n", encoding="utf-8")
+    (live_root / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "files": [
+                    {
+                        "path": item,
+                        "sha256": hashlib.sha256(b"fixture").hexdigest(),
+                    }
+                    for item in screenshots
+                ]
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "final"
+    output.mkdir()
+    _, valid = _copy_verified_live_screenshots(
+        {"screenshots": screenshots},
+        result_path,
+        output,
+    )
+    assert valid is False
+
+
+def test_python_worktree_verification_uses_only_isolated_changed_tree(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "external-state"
+    worktree = state / "tiered_serving/worktrees/session-python"
+    (worktree / "python").mkdir(parents=True)
+    (worktree / "python/value.py").write_text(
+        "def value() -> int:\n    return 2\n",
+        encoding="utf-8",
+    )
+    (worktree / "python/test_value.py").write_text(
+        "from python.value import value\n\n"
+        "def test_value() -> None:\n    assert value() == 2\n",
+        encoding="utf-8",
+    )
+    assert _changed_worktree(state, "python/value.py", "return 2") == worktree
+    assert _verify_python_worktree(state)["status"] == "PASS"
+
+
+def test_systemverilog_verification_requires_every_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "external-state"
+    worktree = state / "tiered_serving/worktrees/session-sv"
+    (worktree / "rtl").mkdir(parents=True)
+    (worktree / "rtl/example.sv").write_text(
+        "module example(input logic a, output logic y);\n"
+        "assign y = ~a;\nendmodule\n",
+        encoding="utf-8",
+    )
+    (worktree / "rtl/tb_example.sv").write_text(
+        "module tb_example; endmodule\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(live_gpu.shutil, "which", lambda name: f"/fixture/{name}")
+
+    def verifier(
+        command: list[str] | tuple[str, ...],
+        *,
+        worktree: Path,
+        timeout: int = 120,
+    ) -> dict[str, object]:
+        del worktree, timeout
+        return {
+            "status": "PASS",
+            "returncode": 0,
+            "output_tail": (
+                "SYSTEMVERILOG_VERIFY_PASS"
+                if command[0].endswith("/vvp")
+                else "fixture pass"
+            ),
+        }
+
+    monkeypatch.setattr(live_gpu, "_run_verifier", verifier)
+    assert _verify_systemverilog_worktree(state)["status"] == "PASS"

@@ -69,6 +69,50 @@ def _validated_live_result(
     )
 
 
+def _copy_verified_live_screenshots(
+    live_result: dict[str, object],
+    live_results_path: Path,
+    output: Path,
+) -> tuple[list[str], bool]:
+    live_root = live_results_path.resolve().parent
+    manifest = _load(live_root / "run_manifest.json", "live_manifest_missing")
+    manifest_files = manifest.get("files")
+    by_path = {
+        str(item["path"]): item
+        for item in manifest_files
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    } if isinstance(manifest_files, list) else {}
+    screenshot_names = live_result.get("screenshots")
+    if (
+        not isinstance(screenshot_names, list)
+        or not screenshot_names
+        or len(set(item for item in screenshot_names if isinstance(item, str)))
+        != len(screenshot_names)
+    ):
+        return [], False
+    live_screenshot_output = output / "live_screenshots"
+    live_screenshot_output.mkdir()
+    evidence: list[str] = []
+    for item in screenshot_names:
+        if not isinstance(item, str):
+            return evidence, False
+        source = (live_root / item).resolve()
+        record = by_path.get(item)
+        expected_hash = record.get("sha256") if isinstance(record, dict) else None
+        if (
+            not source.is_relative_to(live_root / "screenshots")
+            or not source.is_file()
+            or source.is_symlink()
+            or not isinstance(expected_hash, str)
+            or hashlib.sha256(source.read_bytes()).hexdigest() != expected_hash
+        ):
+            return evidence, False
+        target = live_screenshot_output / source.name
+        shutil.copy2(source, target)
+        evidence.append(target.relative_to(output).as_posix())
+    return evidence, len(evidence) == len(screenshot_names)
+
+
 def _timestamp() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
@@ -332,6 +376,76 @@ def _defects() -> list[dict[str, object]]:
                 "scripts/run_release_candidate_v8_certification.py",
             ),
             "an invalid supplied live result was normalized without failing a gate",
+        ),
+        (
+            "RCV8-014",
+            "P1",
+            "live GPU capability coverage",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "scripts/run_live_production_gpu_certification.py",
+            ),
+            "live PASS omitted required retrieval, verification, cancellation, and failure gates",
+        ),
+        (
+            "RCV8-015",
+            "P1",
+            "live evidence bundle integrity",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "scripts/run_release_candidate_v8_certification.py",
+            ),
+            "live screenshot paths were serialized without copying verified images into the archive",
+        ),
+        (
+            "RCV8-016",
+            "P1",
+            "Windows logical and declared paths",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "src/research_workspace/engineering.py",
+            ),
+            "logical paths used host separators and POSIX model paths were rejected on Windows",
+        ),
+        (
+            "RCV8-017",
+            "P1",
+            "Windows migration rollback",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "src/research_workspace/migrations.py",
+            ),
+            "SQLite context managers retained Windows file handles during atomic restore",
+        ),
+        (
+            "RCV8-018",
+            "P1",
+            "CPU soak determinism",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "src/research_workspace/reliability.py",
+            ),
+            "disk-pressure fixture depended on a one-byte free-space race",
         ),
     )
     return [
@@ -736,6 +850,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             "production_state_modified": False,
         }
     live, live_input_valid = _validated_live_result(live)
+    live_screenshot_evidence: list[str] = []
+    if arguments.live_gpu_results is not None and live.get("status") == "PASS":
+        live_screenshot_evidence, screenshots_valid = (
+            _copy_verified_live_screenshots(
+                live,
+                arguments.live_gpu_results,
+                output,
+            )
+        )
+        live_input_valid = live_input_valid and screenshots_valid
     _write_json(output / "live_gpu_results.json", _sanitize(live))
 
     defects = _defects()
@@ -874,7 +998,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     archive = output / "certification.tar.gz"
     archive_sha256 = create_archive(
         output,
-        (*FINAL_EVIDENCE, *screenshot_evidence),
+        (
+            *FINAL_EVIDENCE,
+            *screenshot_evidence,
+            *live_screenshot_evidence,
+        ),
         archive,
     )
     archive_verification = verify_archive(archive)
@@ -882,12 +1010,20 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 Decision: {decision}
 CPU/fixture certification: {cpu_status}
+Remote CI: {remote_ci.get("status")}
+Migration rehearsal: {migration.get("status")}
+Package/SBOM audit: {package_audit.get("status")}
+Documentation: {documentation.get("status")}
 Live GPU certification: {live.get("status")}
+SpecDec coordination: {live.get("specdec_coordination_status", live.get("status"))}
 Implementation: {branch} {ending_commit}
 Certified v7 base: {CERTIFIED_V7}
 Stable checkout unchanged and clean: {str(stable_unchanged).lower()}
 Production state touched: false
 Merge, tag, publish, or release performed: false
+Defects fixed: {len(defects)}
+Open P0/P1 defects: {defect_register["open_p0"]}/{defect_register["open_p1"]}
+Known limitations: {sum(1 for item in deferred["tests"] if item.get("status") != "PASS")} deferred or environment-limited gate(s)
 Test counts: {json.dumps(_pytest_counts(test_commands), sort_keys=True)}
 Gate statuses: {json.dumps(required_statuses, sort_keys=True)}
 Archive verification: {json.dumps(archive_verification, sort_keys=True)}

@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import signal
 import subprocess  # nosec B404 - fixed local model and server commands
 import sys
@@ -23,6 +24,8 @@ from playwright.sync_api import sync_playwright
 
 from research_workspace.model_artifacts import validate_local_artifacts
 from research_workspace.gpu_coordination import classify_compute_ownership
+from research_workspace.llm import VllmProvider
+from research_workspace.personal_corpus import PersonalCorpusStore
 from research_workspace.repository_authorization import RepositoryAuthorizationStore
 from research_workspace.serving_profile_runtime import (
     ServingProfileOperator,
@@ -43,6 +46,8 @@ from run_registered_live_gpu_smoke import (
 
 ADMIN_EMAIL = "fixture-live-admin@example.test"
 PLUS_EMAIL = "fixture-live-plus@example.test"
+BASIC_EMAIL = "fixture-live-basic@example.test"
+ADMIN_USER_ID = "usr_fixture_live_admin"
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,7 +79,8 @@ class GpuCoordinationBlocked(RuntimeError):
 
 def _prepare_output(output: Path, *, resume: bool) -> None:
     resolved = output.resolve()
-    if resolved == STABLE or STABLE in resolved.parents:
+    stable = STABLE.resolve()
+    if resolved == stable or stable in resolved.parents:
         raise RuntimeError("output_root_must_not_use_stable_checkout")
     if not resolved.exists():
         resolved.mkdir(parents=True, exist_ok=False)
@@ -339,6 +345,174 @@ def _write_json(path: Path, value: object) -> None:
     )
 
 
+def _changed_worktree(
+    state_root: Path,
+    relative_path: str,
+    expected_fragment: str,
+) -> Path:
+    candidates = []
+    for path in state_root.rglob(relative_path):
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if "worktrees" in path.parts and expected_fragment in content:
+            candidates.append(path.parents[len(Path(relative_path).parts) - 1])
+    if len(candidates) != 1:
+        raise RuntimeError(
+            f"expected one changed worktree for {relative_path}, found {len(candidates)}"
+        )
+    return candidates[0]
+
+
+def _run_verifier(
+    command: Sequence[str],
+    *,
+    worktree: Path,
+    timeout: int = 120,
+) -> dict[str, object]:
+    completed = subprocess.run(  # nosec B603 - fixed verifier argv
+        list(command),
+        cwd=worktree,
+        env={
+            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+            "LANG": "C.UTF-8",
+            "PYTHONNOUSERSITE": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=timeout,
+    )
+    return {
+        "status": "PASS" if completed.returncode == 0 else "FAIL",
+        "returncode": completed.returncode,
+        "output_tail": (completed.stdout + completed.stderr)[-2_000:],
+    }
+
+
+def _verify_python_worktree(state_root: Path) -> dict[str, object]:
+    worktree = _changed_worktree(state_root, "python/value.py", "return 2")
+    pytest_result = _run_verifier(
+        [sys.executable, "-m", "pytest", "-q", "python/test_value.py"],
+        worktree=worktree,
+    )
+    ruff_result = _run_verifier(
+        [sys.executable, "-m", "ruff", "check", "python"],
+        worktree=worktree,
+    )
+    return {
+        "status": (
+            "PASS"
+            if pytest_result["status"] == "PASS"
+            and ruff_result["status"] == "PASS"
+            else "FAIL"
+        ),
+        "pytest": pytest_result,
+        "ruff": ruff_result,
+        "worktree_is_isolated": worktree.is_relative_to(state_root),
+    }
+
+
+def _verify_systemverilog_worktree(state_root: Path) -> dict[str, object]:
+    worktree = _changed_worktree(state_root, "rtl/example.sv", "assign y = ~a")
+    tools = {
+        name: shutil.which(name)
+        for name in ("verilator", "iverilog", "vvp", "yosys")
+    }
+    if any(path is None for path in tools.values()):
+        return {
+            "status": "FAIL",
+            "category": "required_systemverilog_verifier_missing",
+            "tools_available": {
+                name: path is not None for name, path in tools.items()
+            },
+        }
+    with tempfile.TemporaryDirectory(prefix="laplace-v8-live-sv-") as temporary:
+        simulation = Path(temporary) / "tb.out"
+        commands = {
+            "verilator_lint": [
+                str(tools["verilator"]),
+                "--lint-only",
+                "--timing",
+                "rtl/example.sv",
+                "rtl/tb_example.sv",
+            ],
+            "iverilog_compile": [
+                str(tools["iverilog"]),
+                "-g2012",
+                "-s",
+                "tb_example",
+                "-o",
+                str(simulation),
+                "rtl/example.sv",
+                "rtl/tb_example.sv",
+            ],
+            "simulation": [str(tools["vvp"]), str(simulation)],
+            "yosys_synthesis": [
+                str(tools["yosys"]),
+                "-q",
+                "-p",
+                "read_verilog -sv rtl/example.sv; synth -top example; stat",
+            ],
+        }
+        results: dict[str, dict[str, object]] = {}
+        for name, command in commands.items():
+            if name == "simulation" and results["iverilog_compile"]["status"] != "PASS":
+                results[name] = {
+                    "status": "FAIL",
+                    "returncode": None,
+                    "output_tail": "compile failed; simulation not started",
+                }
+                continue
+            results[name] = _run_verifier(command, worktree=worktree)
+    return {
+        "status": (
+            "PASS"
+            if all(item["status"] == "PASS" for item in results.values())
+            and "SYSTEMVERILOG_VERIFY_PASS"
+            in str(results["simulation"]["output_tail"])
+            else "FAIL"
+        ),
+        "results": results,
+        "worktree_is_isolated": worktree.is_relative_to(state_root),
+    }
+
+
+def _probe_liveness_and_readiness(endpoint: str, model_id: str) -> dict[str, object]:
+    health_status: int | None = None
+    models_status: int | None = None
+    served: list[str] = []
+    try:
+        with urllib.request.urlopen(endpoint + "/health", timeout=10) as response:  # nosec B310
+            health_status = response.status
+        with urllib.request.urlopen(endpoint + "/v1/models", timeout=10) as response:  # nosec B310
+            models_status = response.status
+            raw: object = json.loads(response.read())
+        data = raw.get("data") if isinstance(raw, dict) else None
+        if isinstance(data, list):
+            served = [
+                str(item["id"])
+                for item in data
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            ]
+    except (OSError, urllib.error.URLError, json.JSONDecodeError):
+        pass
+    return {
+        "status": (
+            "PASS"
+            if health_status == 200
+            and models_status == 200
+            and model_id in served
+            else "FAIL"
+        ),
+        "liveness_http_status": health_status,
+        "readiness_http_status": models_status,
+        "expected_model_id": model_id,
+        "served_model_ids": served,
+    }
+
+
 def _main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", type=Path, required=True)
@@ -458,9 +632,9 @@ def _main(argv: Sequence[str] | None = None) -> int:
             "--email",
             ADMIN_EMAIL,
             "--user-id",
-            "usr_afasolino",
+            ADMIN_USER_ID,
             "--display-name",
-            "Alfonso Fasolino",
+            "Live Admin Fixture",
             "--capability-tier",
             "operator",
             "--role",
@@ -490,6 +664,37 @@ def _main(argv: Sequence[str] | None = None) -> int:
             "economy",
             expect_activation=True,
         )
+        basic, basic_code = _admin(
+            state_root,
+            "add",
+            "--registry",
+            str(registry),
+            "--session-store",
+            str(sessions),
+            "--email",
+            BASIC_EMAIL,
+            "--user-id",
+            "usr_live_basic",
+            "--display-name",
+            "Live Basic Fixture",
+            "--capability-tier",
+            "basic",
+            "--role",
+            "user",
+            "--default-lane",
+            "standard",
+            expect_activation=True,
+        )
+        _admin(
+            state_root,
+            "authorize-repo",
+            "--registry",
+            str(registry),
+            "--email",
+            ADMIN_EMAIL,
+            "--repo-id",
+            REPO_ID,
+        )
         _admin(
             state_root,
             "authorize-repo",
@@ -504,9 +709,54 @@ def _main(argv: Sequence[str] | None = None) -> int:
             state_root / "tiered_serving/repository_authorizations.sqlite3"
         )
         authorizations.register(REPO_ID, repository)
+        authorizations.grant(ADMIN_USER_ID, REPO_ID, base_revision=revision)
         authorizations.grant("usr_live_plus", REPO_ID, base_revision=revision)
+        corpus_store = PersonalCorpusStore(state_root)
+        corpus_id = str(
+            corpus_store.create_corpus(
+                ADMIN_USER_ID,
+                "Live private references",
+            )["corpus_id"]
+        )
+        upload_id = str(
+            corpus_store.create_upload(
+                ADMIN_USER_ID,
+                corpus_id,
+                idempotency_key="upload:live-private-reference",
+            )["upload_id"]
+        )
+        staged = corpus_store.stage_file(
+            ADMIN_USER_ID,
+            upload_id,
+            logical_path="notes/live-evidence.md",
+            content=(
+                b"# Live evidence\n"
+                b"The private calibration marker is LAP-V8-PRIVATE-2718.\n"
+            ),
+            client_mime="text/markdown",
+        )
+        indexed = corpus_store.index_upload(
+            ADMIN_USER_ID,
+            upload_id,
+            idempotency_key="index:live-private-reference",
+        )
+        personal_search = corpus_store.search(
+            ADMIN_USER_ID,
+            "private calibration marker",
+            corpus_id=corpus_id,
+        )
+        personal_results = personal_search.get("results")
+        if (
+            not isinstance(personal_results, list)
+            or not personal_results
+            or not isinstance(personal_results[0], dict)
+            or not isinstance(personal_results[0].get("chunk_id"), str)
+        ):
+            raise RuntimeError("live personal corpus retrieval fixture was not indexed")
+        personal_chunk_id = str(personal_results[0]["chunk_id"])
         admin_password = f"live-admin-{secrets.token_urlsafe(64)}"
         plus_password = f"live-plus-{secrets.token_urlsafe(64)}"
+        basic_password = f"live-basic-{secrets.token_urlsafe(64)}"
         port = _free_port()
         base_url = f"http://127.0.0.1:{port}"
         operator_log = (server_logs / "operator.server.log").open(
@@ -538,6 +788,35 @@ def _main(argv: Sequence[str] | None = None) -> int:
                     status,
                     p1_ready_coordination,
                 )
+            p1_readiness = _probe_liveness_and_readiness(
+                "http://127.0.0.1:8201",
+                "laplace-quality-p1",
+            )
+            streamed = VllmProvider(
+                "http://127.0.0.1:8201",
+                "laplace-quality-p1",
+                max_tokens=64,
+                temperature=0,
+                timeout_seconds=180,
+            ).generate(
+                "Reply with exactly the text LIVE_STREAM_PASS.",
+                enable_thinking=False,
+            )
+            p1_streaming = {
+                "status": (
+                    "PASS"
+                    if streamed.text.strip()
+                    and streamed.ttft_seconds is not None
+                    and streamed.completion_tokens is not None
+                    else "FAIL"
+                ),
+                "transport": "vllm_sse",
+                "time_to_first_token_observed": streamed.ttft_seconds is not None,
+                "server_completion_tokens_reported": (
+                    streamed.completion_tokens is not None
+                ),
+                "finish_reason": streamed.finish_reason,
+            }
             operator_process = subprocess.Popen(  # nosec B603 - fixed local module
                 [
                     sys.executable,
@@ -605,12 +884,22 @@ def _main(argv: Sequence[str] | None = None) -> int:
                     "operator · admin",
                     exact=True,
                 ).wait_for()
+                page.get_by_role("button", name="Knowledge", exact=True).click()
+                page.get_by_text("Live private references", exact=True).wait_for()
+                page.get_by_text("notes/live-evidence.md", exact=True).wait_for()
+                page.screenshot(
+                    path=screenshots / "live_personal_corpus.png",
+                    full_page=True,
+                )
+                page.get_by_role("button", name="Chat", exact=True).click()
                 page.locator("#chat-lane").select_option("quality")
                 page.locator("#chat-domain").select_option("general")
+                page.locator("#chat-retrieval").select_option("selected_personal")
                 page.locator("#chat-message").fill(
                     "Reply concisely in Markdown with the heading 'Live Quality', "
-                    "one bullet saying this is local, and a fenced Python code block "
-                    "containing `result = \"quality-pass\"`."
+                    "state the private calibration marker from the selected personal "
+                    "corpus, cite the exact file and chunk identifier, and include a "
+                    "fenced Python code block containing `result = \"quality-pass\"`."
                 )
                 page.get_by_role("button", name="Send", exact=True).click()
                 page.wait_for_function(
@@ -630,6 +919,38 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 quality_details = page.locator(".metadata-grid").inner_text()
                 page.screenshot(
                     path=screenshots / "live_quality_chat.png",
+                    full_page=True,
+                )
+
+                page.get_by_role("button", name="Agent", exact=True).click()
+                page.locator("#agent-repository").select_option(REPO_ID)
+                page.locator("#agent-form select[name=lane]").select_option(
+                    "quality"
+                )
+                page.locator("#agent-domain").select_option("python")
+                page.locator("#agent-form textarea[name=instruction]").fill(
+                    "The file python/value.py contains a function with `return 1`. "
+                    "Modify only that exact text to `return 2`. Return the requested "
+                    "strict JSON edit object with path python/value.py, exact old "
+                    "text, and exact replacement text."
+                )
+                page.get_by_role(
+                    "button",
+                    name="Start isolated agent",
+                ).click()
+                page.wait_for_function(
+                    "() => ['Complete', 'Failed'].includes("
+                    "document.querySelector('#agent-state')?.textContent.trim())",
+                    timeout=300_000,
+                )
+                if page.locator("#agent-state").inner_text() != "Complete":
+                    raise RuntimeError("live Quality Python agent failed")
+                python_diff_text = page.locator("#agent-diff").inner_text()
+                python_tests_text = page.locator("#agent-tests").inner_text()
+                python_plan_text = page.locator("#agent-plan").inner_text()
+                python_verification = _verify_python_worktree(state_root)
+                page.screenshot(
+                    path=screenshots / "live_python_agent.png",
                     full_page=True,
                 )
 
@@ -688,6 +1009,10 @@ def _main(argv: Sequence[str] | None = None) -> int:
                         status,
                         codev_ready_coordination,
                     )
+                codev_readiness = _probe_liveness_and_readiness(
+                    CODEV_ENDPOINT,
+                    CODEV_ID,
+                )
 
                 page.get_by_role("button", name="Chat", exact=True).click()
                 page.locator("#chat-lane").select_option("economy")
@@ -723,6 +1048,18 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 page.get_by_role("button", name="Sign out", exact=True).click()
                 page.locator("#auth-dialog").wait_for(state="visible")
                 _activate(page, PLUS_EMAIL, plus_code, plus_password)
+                page.get_by_role("button", name="Knowledge", exact=True).click()
+                page.get_by_text(
+                    "Your personal corpus is empty",
+                    exact=True,
+                ).wait_for()
+                cross_user_isolation = (
+                    page.get_by_text(
+                        "Live private references",
+                        exact=True,
+                    ).count()
+                    == 0
+                )
                 page.get_by_role("button", name="Agent", exact=True).click()
                 page.locator("#agent-repository").select_option(REPO_ID)
                 page.locator("#agent-form select[name=lane]").select_option(
@@ -748,6 +1085,10 @@ def _main(argv: Sequence[str] | None = None) -> int:
                     raise RuntimeError("live Plus agent failed")
                 diff_text = page.locator("#agent-diff").inner_text()
                 tests_text = page.locator("#agent-tests").inner_text()
+                codev_plan_text = page.locator("#agent-plan").inner_text()
+                systemverilog_verification = _verify_systemverilog_worktree(
+                    state_root
+                )
                 page.screenshot(
                     path=screenshots / "live_plus_agent.png",
                     full_page=True,
@@ -778,6 +1119,50 @@ def _main(argv: Sequence[str] | None = None) -> int:
                         status,
                         codev_after_group_coordination,
                     )
+                page.get_by_role("button", name="Chat", exact=True).click()
+                page.locator("#chat-lane").select_option("economy")
+                page.locator("#chat-domain").select_option("systemverilog")
+                page.locator("#chat-retrieval").select_option("none")
+                page.locator("#chat-message").fill(
+                    "Generate a detailed 1000-word explanation of ready/valid "
+                    "handshakes so this bounded request can be cancelled."
+                )
+                page.get_by_role("button", name="Send", exact=True).click()
+                page.locator("#stop-chat").wait_for(state="visible", timeout=10_000)
+                page.locator("#stop-chat").click()
+                page.wait_for_function(
+                    "() => document.querySelector('#chat-state')?.textContent"
+                    ".startsWith('CANCELLED')",
+                    timeout=30_000,
+                )
+                cancellation_status = page.locator("#chat-state").inner_text()
+
+                codev_release = codev.stop()
+                if not _endpoint_down(CODEV_ENDPOINT + "/v1/models"):
+                    raise RuntimeError("CodeV endpoint remained open after owned stop")
+                page.locator("#chat-message").fill(
+                    "Reply with PROVIDER_FAILURE_SHOULD_NOT_SUCCEED."
+                )
+                page.get_by_role("button", name="Send", exact=True).click()
+                page.wait_for_function(
+                    "() => document.querySelector('#chat-state')?.textContent"
+                    ".startsWith('FAILED')",
+                    timeout=30_000,
+                )
+                provider_failure_status = page.locator("#chat-state").inner_text()
+
+                page.get_by_role("button", name="Sign out", exact=True).click()
+                page.locator("#auth-dialog").wait_for(state="visible")
+                _activate(page, BASIC_EMAIL, basic_code, basic_password)
+                basic_capability_enforcement = (
+                    page.get_by_role("button", name="Agent", exact=True).count() == 0
+                    and page.get_by_role(
+                        "button",
+                        name="Knowledge",
+                        exact=True,
+                    ).count()
+                    == 0
+                )
                 browser.close()
 
             registry_text = registry.read_text(encoding="utf-8")
@@ -789,8 +1174,10 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 for secret in (
                     admin_code,
                     plus_code,
+                    basic_code,
                     admin_password,
                     plus_password,
+                    basic_password,
                 )
             )
             checks = {
@@ -803,21 +1190,61 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 and bootstrap.get("default_lane") == "quality",
                 "quality_profile_exact": p1_start.get("profile_id") == "P1_fp8_kv"
                 and p1_start.get("status") == "STARTED_READY",
+                "quality_liveness_and_readiness_distinct": p1_readiness.get(
+                    "status"
+                )
+                == "PASS",
+                "quality_real_sse_streaming": p1_streaming.get("status") == "PASS",
                 "quality_chat_readable": "Live Quality" in quality_text,
                 "quality_code_block_and_copy": quality_code_count > 0,
                 "quality_response_details": "laplace-quality-p1"
                 in quality_details,
+                "personal_corpus_indexed": staged.get("state") == "ACCEPTED"
+                and indexed.get("status") == "INDEXED",
+                "personal_corpus_retrieval_snapshot": personal_chunk_id
+                in quality_details
+                and "notes/live-evidence.md" in quality_details,
+                "personal_corpus_answer_citations": "LAP-V8-PRIVATE-2718"
+                in quality_text
+                and "notes/live-evidence.md" in quality_text
+                and personal_chunk_id in quality_text,
+                "python_agent_structured_patch": "python/value.py"
+                in python_diff_text
+                and "return 2" in python_diff_text
+                and "PASSED" in python_tests_text
+                and "laplace-quality-p1" in python_plan_text,
+                "python_verification": python_verification.get("status")
+                == "PASS",
                 "p1_released_before_codev": p1_release.get("status")
                 == "RELEASED_OWNED_PROFILE"
                 and p1_endpoint_down,
                 "codev_exact_identity": codev_ready.get("model_id") == CODEV_ID,
+                "codev_liveness_and_readiness_distinct": codev_readiness.get(
+                    "status"
+                )
+                == "PASS",
                 "codev_chat_readable": "Live CodeV" in codev_text,
                 "codev_code_block_and_copy": codev_code_count > 0,
                 "codev_response_details": CODEV_ID in codev_details,
                 "plus_account_registered": added.get("capability_tier") == "plus",
+                "basic_account_registered": basic.get("capability_tier") == "basic",
                 "plus_diff_readable": "rtl/example.sv" in diff_text
                 and "assign y = ~a" in diff_text,
                 "plus_verification_readable": "PASSED" in tests_text,
+                "codev_specialist_structured_routing": CODEV_ID
+                in codev_plan_text,
+                "systemverilog_verification": systemverilog_verification.get(
+                    "status"
+                )
+                == "PASS",
+                "cross_user_corpus_isolation": cross_user_isolation,
+                "basic_capability_enforcement": basic_capability_enforcement,
+                "queue_behavior_recorded": "Queue wait" in quality_details
+                and "Queue position" in quality_details,
+                "bounded_cancellation": cancellation_status.startswith("CANCELLED"),
+                "provider_failure_handling": provider_failure_status.startswith(
+                    "FAILED"
+                ),
                 "browser_credential_storage_empty": storage_entries == 0,
                 "opaque_http_only_session": session_cookie["httpOnly"] is True
                 and len(str(session_cookie["value"])) >= 22,
@@ -829,6 +1256,17 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 "status": "PASS" if all(checks.values()) else "FAIL",
                 "checks": checks,
                 "profiles_run_sequentially": True,
+                "specdec_coordination_status": (
+                    "PASS_NO_PROTECTED_WORKLOAD_OBSERVED"
+                ),
+                "coordination": {
+                    "initial": initial_coordination,
+                    "quality_ready": p1_ready_coordination,
+                    "quality_after_group": p1_after_group_coordination,
+                    "before_codev": before_codev_coordination,
+                    "codev_ready": codev_ready_coordination,
+                    "codev_after_group": codev_after_group_coordination,
+                },
                 "reason_for_sequential_routes": (
                     "P1 reserves 90% GPU memory; CodeV is loaded on demand after "
                     "P1 release so only one generative route is resident."
@@ -836,18 +1274,31 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 "initial_gpu": asdict(initial_gpu),
                 "p1": {
                     "startup": p1_start,
+                    "liveness_and_readiness": p1_readiness,
+                    "real_streaming": p1_streaming,
                     "gpu_at_ready": asdict(p1_ready_gpu),
                     "coordination_at_ready": p1_ready_coordination,
                     "coordination_after_group": p1_after_group_coordination,
                     "release": p1_release,
                     "gpu_after_release": after_p1_release,
+                    "python_verification": python_verification,
+                    "personal_corpus": {
+                        "status": "PASS",
+                        "source": "notes/live-evidence.md",
+                        "chunk_id": personal_chunk_id,
+                        "snapshot_revision": indexed.get("snapshot_revision"),
+                    },
                 },
                 "codev": {
                     "owned_process": codev_owned,
                     "readiness": codev_ready,
+                    "liveness_and_readiness": codev_readiness,
                     "gpu_at_ready": asdict(codev_ready_gpu),
                     "coordination_at_ready": codev_ready_coordination,
                     "coordination_after_group": codev_after_group_coordination,
+                    "systemverilog_verification": systemverilog_verification,
+                    "cancellation": cancellation_status,
+                    "provider_failure": provider_failure_status,
                 },
                 "registered_account": {
                     "email": ADMIN_EMAIL,
@@ -858,12 +1309,15 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 "console_error_count": len(console_errors),
                 "page_error_count": len(page_errors),
                 "screenshots": [
+                    "screenshots/live_personal_corpus.png",
                     "screenshots/live_quality_chat.png",
+                    "screenshots/live_python_agent.png",
                     "screenshots/live_codev_chat.png",
                     "screenshots/live_plus_agent.png",
                 ],
             }
-            admin_code = plus_code = admin_password = plus_password = ""
+            admin_code = plus_code = basic_code = ""
+            admin_password = plus_password = basic_password = ""
         finally:
             if p1_started:
                 try:
@@ -873,13 +1327,14 @@ def _main(argv: Sequence[str] | None = None) -> int:
                         "status": "RELEASE_FAILED",
                         "category": exc.category,
                     }
-            try:
-                codev_release = codev.stop()
-            except (OSError, RuntimeError) as exc:
-                codev_release = {
-                    "status": "RELEASE_FAILED",
-                    "error_type": type(exc).__name__,
-                }
+            if codev_release.get("status") == "NOT_STARTED":
+                try:
+                    codev_release = codev.stop()
+                except (OSError, RuntimeError) as exc:
+                    codev_release = {
+                        "status": "RELEASE_FAILED",
+                        "error_type": type(exc).__name__,
+                    }
             if operator_process is not None and operator_process.poll() is None:
                 if (
                     operator_process_group is not None
