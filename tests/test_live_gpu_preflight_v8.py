@@ -12,9 +12,11 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import run_live_production_gpu_certification as live_gpu  # noqa: E402
 from run_live_production_gpu_certification import (  # noqa: E402
+    ADMIN_CAPABILITIES,
     STABLE,
     _changed_worktree,
     _prepare_output,
+    _record_unexpected_failure,
     _validate_static_preflight,
     _verify_python_worktree,
     _verify_systemverilog_worktree,
@@ -80,6 +82,53 @@ def test_output_resume_requires_safe_terminal_record(tmp_path: Path) -> None:
     (output / "owned_profile_process.json").write_text("{}\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="ownership_record_present"):
         _prepare_output(output, resume=True)
+
+
+def test_live_admin_has_every_independent_capability() -> None:
+    assert set(ADMIN_CAPABILITIES) == {
+        "chat",
+        "agent",
+        "research",
+        "operator",
+        "admin",
+        "personal_corpus",
+        "shared_corpus_ingest",
+        "repository_admin",
+        "model_admin",
+    }
+
+
+def test_unexpected_live_failure_writes_terminal_shutdown_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "failed-live"
+    output.mkdir()
+    monkeypatch.setattr(live_gpu, "_endpoint_down", lambda url: True)
+
+    def unavailable() -> object:
+        raise RuntimeError("fixture GPU observer unavailable")
+
+    monkeypatch.setattr(live_gpu, "observe_gpu", unavailable)
+    result = _record_unexpected_failure(output, RuntimeError("fixture failure"))
+    assert result["status"] == "FAIL"
+    assert result["failure_category"] == "RuntimeError"
+    assert result["safe_shutdown"] == {
+        "status": "PASS",
+        "quality_endpoint_down": True,
+        "codev_endpoint_down": True,
+        "final_gpu": {"status": "UNAVAILABLE", "error_type": "RuntimeError"},
+        "final_coordination": {
+            "status": "BLOCKED_BY_UNCERTAIN_GPU_OWNERSHIP",
+            "reason": "post_failure_gpu_observation_unavailable",
+        },
+    }
+    manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "FAIL"
+    assert any(
+        item["path"] == "live_production_gpu_results.json"
+        for item in manifest["files"]
+    )
 
 
 def test_invalid_live_result_is_bounded_and_fails_the_validity_gate() -> None:

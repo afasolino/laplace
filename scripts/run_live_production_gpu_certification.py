@@ -48,6 +48,17 @@ ADMIN_EMAIL = "fixture-live-admin@example.test"
 PLUS_EMAIL = "fixture-live-plus@example.test"
 BASIC_EMAIL = "fixture-live-basic@example.test"
 ADMIN_USER_ID = "usr_fixture_live_admin"
+ADMIN_CAPABILITIES = (
+    "chat",
+    "agent",
+    "research",
+    "operator",
+    "admin",
+    "personal_corpus",
+    "shared_corpus_ingest",
+    "repository_admin",
+    "model_admin",
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -164,6 +175,58 @@ def _write_terminal_result(
     }
     _write_json(output / "live_production_gpu_results.json", result)
     _write_json(output / "run_manifest.json", _manifest(output, status=status))
+
+
+def _record_unexpected_failure(output: Path, exc: Exception) -> dict[str, object]:
+    quality_down = _endpoint_down("http://127.0.0.1:8201/v1/models")
+    codev_down = _endpoint_down(CODEV_ENDPOINT + "/v1/models")
+    try:
+        observed = observe_gpu()
+        final_gpu: dict[str, object] = asdict(observed)
+        final_coordination = classify_compute_ownership(observed.compute_pids)
+    except (OSError, RuntimeError, ServingRuntimeError) as observation_error:
+        final_gpu = {
+            "status": "UNAVAILABLE",
+            "error_type": type(observation_error).__name__,
+        }
+        final_coordination = {
+            "status": "BLOCKED_BY_UNCERTAIN_GPU_OWNERSHIP",
+            "reason": "post_failure_gpu_observation_unavailable",
+        }
+    result = {
+        "schema_version": 1,
+        "status": "FAIL",
+        "failure_category": type(exc).__name__,
+        "model_servers_started": any(output.rglob("*.server.log")),
+        "production_state_modified": False,
+        "unrelated_processes_preserved": True,
+        "safe_shutdown": {
+            "status": "PASS" if quality_down and codev_down else "FAIL",
+            "quality_endpoint_down": quality_down,
+            "codev_endpoint_down": codev_down,
+            "final_gpu": final_gpu,
+            "final_coordination": final_coordination,
+        },
+    }
+    _write_json(output / "live_production_gpu_results.json", result)
+    _write_json(output / "run_manifest.json", _manifest(output, status="FAIL"))
+    return result
+
+
+def _existing_safe_output(argv: Sequence[str] | None) -> Path | None:
+    values = list(sys.argv[1:] if argv is None else argv)
+    try:
+        output = Path(values[values.index("--output-root") + 1]).resolve()
+    except (ValueError, IndexError):
+        return None
+    stable = STABLE.resolve()
+    if (
+        not output.is_dir()
+        or output == stable
+        or stable in output.parents
+    ):
+        return None
+    return output
 
 
 class OwnedCodeV:
@@ -660,6 +723,11 @@ def _main(argv: Sequence[str] | None = None) -> int:
             "admin",
             "--default-lane",
             "quality",
+            *(
+                argument
+                for capability in ADMIN_CAPABILITIES
+                for argument in ("--capability", capability)
+            ),
             expect_activation=True,
         )
         added, plus_code = _admin(
@@ -1441,6 +1509,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
         return 3
+    except Exception as exc:
+        output = _existing_safe_output(argv)
+        if output is None:
+            raise
+        result = _record_unexpected_failure(output, exc)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 2
 
 
 if __name__ == "__main__":

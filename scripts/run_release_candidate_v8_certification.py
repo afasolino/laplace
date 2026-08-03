@@ -524,6 +524,34 @@ def _defects() -> list[dict[str, object]]:
             ),
             "pre-creation path resolution raced with concurrent Windows mkdir",
         ),
+        (
+            "RCV8-025",
+            "P1",
+            "live admin independent capabilities",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "scripts/run_live_production_gpu_certification.py",
+            ),
+            "Operator defaults omitted Agent and personal-corpus live coverage",
+        ),
+        (
+            "RCV8-026",
+            "P1",
+            "unexpected live-failure evidence",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "scripts/run_live_production_gpu_certification.py",
+            ),
+            "unexpected live exceptions left no terminal result or manifest",
+        ),
     )
     return [
         {

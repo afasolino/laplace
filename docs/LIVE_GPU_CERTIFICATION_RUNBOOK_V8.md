@@ -32,3 +32,8 @@ An existing output root is rejected. `--resume` accepts only a terminal
 coordination-blocked record with no ownership file. Never resume a partial model
 run. On SpecDec appearance, the runner releases only Laplace-owned process groups,
 records `YIELDED_TO_SPECDEC`, and does not reacquire the GPU.
+
+The synthetic administrator is granted an explicit independent-capability set;
+Operator-tier defaults alone are insufficient for Agent and personal-corpus
+coverage. Unexpected exceptions are recorded as bounded FAIL evidence only
+after ownership-aware cleanup, including closed-port and GPU-observation proof.

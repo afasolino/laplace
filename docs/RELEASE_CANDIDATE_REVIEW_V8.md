@@ -56,6 +56,9 @@ The release review deliberately distinguishes these boundaries:
   overflow, and explicitly closes governance database handles.
 - Artifact-producing workflows use an immutable official Node-24 action commit;
   the final remote review requires zero deprecation annotations.
+- The live runner explicitly grants its synthetic admin the independent Agent
+  and personal-corpus capabilities and preserves terminal failure evidence after
+  ownership-aware cleanup.
 - SSH/HTTPS sync transports remain staged policy boundaries; the fixture
   transport is a reference implementation, not a production transport.
 - Current vulnerability-database lookup and Windows-native execution remain

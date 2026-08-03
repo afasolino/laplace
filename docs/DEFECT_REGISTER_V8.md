@@ -400,3 +400,36 @@
 - Regression test: 32-way local fixture and final four-job matrix.
 - Status: FIXED in the final artifact-concurrency repair.
 - Commit: recorded in final `defect_register.json`.
+
+## RCV8-025 — P1 — live admin independent capabilities
+
+- Evidence: guarded live run `live_gpu_v8_20260803T083911Z` timed out waiting for
+  the Knowledge button immediately after successful synthetic-admin activation.
+- Reproduction: bootstrap an Operator-tier account without explicit independent
+  capabilities and inspect the navigation surface.
+- Expected: the synthetic live administrator has the exact Agent, personal
+  corpus, and administrative capabilities required by Phase 9.
+- Observed: secure Operator defaults intentionally exclude Agent and personal
+  corpus, so the new live checks were unreachable.
+- Security/data-loss impact: correct fail-closed capability behavior, but false
+  live certification failure; no cross-user data was exposed.
+- Minimal fix: explicitly enumerate all nine required synthetic-admin
+  capabilities in the bootstrap command.
+- Regression test: exact capability-set fixture plus guarded live rerun.
+- Status: FIXED in the final live-runner repair.
+- Commit: recorded in final `defect_register.json`.
+
+## RCV8-026 — P1 — unexpected live-failure evidence
+
+- Evidence: the same failed live run cleaned up its owned P1 process and closed
+  both model ports, but left only server logs and no terminal result/manifest.
+- Reproduction: inject a Playwright exception after P1 startup.
+- Expected: every unexpected failure preserves a bounded category, safe-shutdown
+  evidence, GPU ownership result, and hash manifest after cleanup.
+- Observed: `main` handled only explicit coordination blocks.
+- Security/data-loss impact: shutdown occurred, but its evidence was incomplete.
+- Minimal fix: after the runner's ownership-aware `finally`, record a sanitized
+  FAIL result and manifest only within an existing safe output root.
+- Regression test: CPU exception fixture plus guarded live rerun.
+- Status: FIXED in the final live-runner repair.
+- Commit: recorded in final `defect_register.json`.
