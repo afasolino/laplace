@@ -525,3 +525,22 @@
 - Regression test: exact design-only Verilator argv fixture plus live rerun.
 - Status: FIXED in the final legacy-toolchain compatibility repair.
 - Commit: recorded in final `defect_register.json`.
+
+## RCV8-032 — P1 — Basic capability UI synchronization
+
+- Evidence: guarded live run `live_gpu_v8_eb8a9d3_20260803T1010Z` passed every
+  model, retrieval, Agent, browser, and toolchain check but intermittently saw
+  the prior account's privileged navigation immediately after Basic activation.
+- Reproduction: inspect navigation counts as soon as the authentication dialog
+  closes; `acceptSession` hides it before asynchronous workspace initialization
+  fetches capabilities and rebuilds navigation.
+- Expected: capability enforcement is asserted only after the UI displays the
+  activated Basic tier, while API enforcement remains fail-closed throughout.
+- Observed: a DOM timing race produced a false negative; earlier runs passed.
+- Security/data-loss impact: certification-only race. Server-side capability
+  checks remained authoritative and no Basic request reached a privileged API.
+- Minimal fix: wait up to 30 seconds for `#account-tier` to show `basic` before
+  asserting the absence of Agent and Knowledge navigation.
+- Regression test: exact account-tier synchronization predicate fixture plus live rerun.
+- Status: FIXED in the final live-account synchronization repair.
+- Commit: recorded in final `defect_register.json`.

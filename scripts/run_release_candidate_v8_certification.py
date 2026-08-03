@@ -622,6 +622,20 @@ def _defects() -> list[dict[str, object]]:
             ),
             "legacy Verilator treated ignored timed-testbench delays as fatal warnings",
         ),
+        (
+            "RCV8-032",
+            "P1",
+            "Basic capability UI synchronization",
+            _git(
+                ROOT,
+                "log",
+                "-1",
+                "--format=%h",
+                "--",
+                "scripts/run_live_production_gpu_certification.py",
+            ),
+            "navigation was inspected before asynchronous Basic capability refresh",
+        ),
     )
     return [
         {

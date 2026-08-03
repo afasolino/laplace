@@ -596,6 +596,15 @@ def _unexpected_console_errors(
     return unexpected
 
 
+def _wait_for_account_tier(page: object, expected_tier: str) -> None:
+    page.wait_for_function(  # type: ignore[attr-defined]
+        "expected => document.querySelector('#account-tier')?.textContent"
+        ".startsWith(`${expected} ·`)",
+        arg=expected_tier,
+        timeout=30_000,
+    )
+
+
 def _probe_liveness_and_readiness(endpoint: str, model_id: str) -> dict[str, object]:
     health_status: int | None = None
     models_status: int | None = None
@@ -1290,6 +1299,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 page.get_by_role("button", name="Sign out", exact=True).click()
                 page.locator("#auth-dialog").wait_for(state="visible")
                 _activate(page, BASIC_EMAIL, basic_code, basic_password)
+                _wait_for_account_tier(page, "basic")
                 basic_capability_enforcement = (
                     page.get_by_role("button", name="Agent", exact=True).count() == 0
                     and page.get_by_role(

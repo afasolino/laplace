@@ -20,6 +20,7 @@ from run_live_production_gpu_certification import (  # noqa: E402
     _record_unexpected_failure,
     _unexpected_console_errors,
     _validate_static_preflight,
+    _wait_for_account_tier,
     _verify_python_worktree,
     _verify_systemverilog_worktree,
 )
@@ -114,6 +115,30 @@ def test_expected_provider_failure_console_error_is_not_a_browser_defect() -> No
         messages,
         provider_failure_start=1,
     ) == ["unexpected before failure", "unexpected after failure"]
+
+
+def test_basic_capability_check_waits_for_refreshed_account_tier() -> None:
+    calls: list[tuple[str, str, int]] = []
+
+    class FixturePage:
+        def wait_for_function(
+            self,
+            expression: str,
+            *,
+            arg: str,
+            timeout: int,
+        ) -> None:
+            calls.append((expression, arg, timeout))
+
+    _wait_for_account_tier(FixturePage(), "basic")
+    assert calls == [
+        (
+            "expected => document.querySelector('#account-tier')?.textContent"
+            ".startsWith(`${expected} ·`)",
+            "basic",
+            30_000,
+        )
+    ]
 
 
 def test_unexpected_live_failure_writes_terminal_shutdown_evidence(
