@@ -223,7 +223,7 @@ def _required_flags(profile: ServingProfile) -> frozenset[str]:
         )
     if profile.kv_offloading_size is not None:
         flags.update(("--kv-offloading-size", "--kv-offloading-backend"))
-    flags.update(profile.extra_args)
+    flags.update(argument.partition("=")[0] for argument in profile.extra_args)
     return frozenset(flags)
 
 

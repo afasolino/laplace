@@ -4,7 +4,8 @@ laplace.example.org {
 	encode zstd gzip
 
 	request_body {
-		max_size 2MB
+		# Covers the bounded 2 MiB Laplace Client result plus JSON framing.
+		max_size 4MB
 	}
 
 	header {

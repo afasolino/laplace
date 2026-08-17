@@ -22,6 +22,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repository-root", type=Path, default=root)
     parser.add_argument(
+        "--profile-root",
+        type=Path,
+        help="Profile directory relative to the repository (defaults to certified profiles).",
+    )
+    parser.add_argument(
         "--vllm",
         type=Path,
         default=Path("/home/giando/work/laplace/.venv-vllm-cu129/bin/vllm"),
@@ -64,9 +69,13 @@ def capture_installed(vllm: Path, ffmpeg_lib: Path) -> InstalledServingCapabilit
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     capabilities = capture_installed(arguments.vllm, arguments.ffmpeg_lib)
-    profiles = load_profiles(
-        arguments.repository_root.resolve() / "configs/serving_profiles"
+    repository = arguments.repository_root.resolve()
+    profile_root = (
+        arguments.profile_root.resolve()
+        if arguments.profile_root is not None
+        else repository / "configs/serving_profiles"
     )
+    profiles = load_profiles(profile_root)
     resolved = resolve_all(
         profiles,
         capabilities,

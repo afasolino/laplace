@@ -1,0 +1,33 @@
+{
+  "profile_id": "P6_qwen38_w4a16",
+  "model_route": "quality",
+  "model_path": "/home/giando/work/laplace/.models/Qwen3.8-27B-W4A16-AWQ",
+  "served_model_name": "laplace-quality-qwen38",
+  "port": 8206,
+  "max_model_len": 32768,
+  "max_num_seqs": 2,
+  "max_num_batched_tokens": 8192,
+  "kv_cache_dtype": "auto",
+  "kv_cache_memory_bytes": null,
+  "enable_prefix_caching": true,
+  "prefix_hash_algorithm": "sha256",
+  "enable_chunked_prefill": true,
+  "scheduling_policy": "fcfs",
+  "cpu_offload_gb": 0.0,
+  "cpu_offload_params": [],
+  "offload_backend": "auto",
+  "offload_group_size": 0,
+  "offload_num_in_group": 1,
+  "offload_prefetch_step": 1,
+  "kv_offloading_size": null,
+  "kv_offloading_backend": "native",
+  "gpu_memory_utilization": 0.65,
+  "startup_timeout": 1200,
+  "request_timeout": 300,
+  "extra_args": [
+    "--language-model-only",
+    "--reasoning-parser=qwen3",
+    "--enable-auto-tool-choice",
+    "--tool-call-parser=qwen3_coder"
+  ]
+}

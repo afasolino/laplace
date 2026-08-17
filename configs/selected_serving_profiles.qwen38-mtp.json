@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "selection_evidence": "PENDING_LIVE_QWEN38_MTP_CERTIFICATION",
+  "default_profile_id": "P7_qwen38_w4a16_mtp",
+  "high_context_profile_id": "P7_qwen38_w4a16_mtp",
+  "quality_reserved_slots": 1,
+  "standard_capacity": 2,
+  "economy_capacity": 4,
+  "routes": {
+    "quality": {
+      "model_id": "laplace-quality-qwen38-mtp",
+      "endpoint": "http://127.0.0.1:8207",
+      "priority": 0,
+      "context_limit": 32768,
+      "output_limit": 4096
+    },
+    "standard": {
+      "model_id": "laplace-quality-qwen38-mtp",
+      "endpoint": "http://127.0.0.1:8207",
+      "priority": 10,
+      "context_limit": 16384,
+      "output_limit": 2048
+    },
+    "economy": {
+      "model_id": "laplace-codev-r1-rl-qwen-7b-w4a16",
+      "endpoint": "http://127.0.0.1:8103",
+      "priority": 20,
+      "context_limit": 8192,
+      "output_limit": 2048
+    }
+  }
+}

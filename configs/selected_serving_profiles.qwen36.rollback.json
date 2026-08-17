@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "selection_evidence": "outputs/tiered_serving_20260727T084923Z/selected_profiles.json",
+  "default_profile_id": "P1_fp8_kv",
+  "high_context_profile_id": "P4_priority_expert_fp8",
+  "quality_reserved_slots": 1,
+  "standard_capacity": 4,
+  "economy_capacity": 4,
+  "routes": {
+    "quality": {
+      "model_id": "laplace-quality-p1",
+      "endpoint": "http://127.0.0.1:8201",
+      "priority": 0,
+      "context_limit": 32768,
+      "output_limit": 4096
+    },
+    "standard": {
+      "model_id": "laplace-quality-p1",
+      "endpoint": "http://127.0.0.1:8201",
+      "priority": 10,
+      "context_limit": 16384,
+      "output_limit": 2048
+    },
+    "economy": {
+      "model_id": "laplace-codev-r1-rl-qwen-7b-w4a16",
+      "endpoint": "http://127.0.0.1:8103",
+      "priority": 20,
+      "context_limit": 8192,
+      "output_limit": 2048
+    }
+  }
+}

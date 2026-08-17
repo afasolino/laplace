@@ -1,0 +1,35 @@
+[Unit]
+Description=Laplace loopback-only selected Qwen quality service
+After=network-online.target laplace-codev.service
+Requires=laplace-codev.service
+Wants=network-online.target
+PartOf=laplace-model-servers.service
+
+[Service]
+Type=notify
+NotifyAccess=all
+User=laplace
+Group=laplace
+WorkingDirectory=/opt/laplace
+EnvironmentFile=/etc/laplace/laplace.env
+Environment=PYTHONPATH=/opt/laplace/src
+UMask=0077
+ExecStart=/opt/laplace/.venv/bin/python /opt/laplace/scripts/run_selected_quality_service.py \
+  --repository-root /opt/laplace \
+  --state-root ${LAPLACE_MODEL_RUNTIME_ROOT} \
+  --vllm ${LAPLACE_VLLM_EXECUTABLE} \
+  --ffmpeg-lib ${LAPLACE_FFMPEG_LIBRARY_PATH}
+Restart=on-failure
+RestartSec=10s
+TimeoutStartSec=25min
+TimeoutStopSec=90s
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/laplace/model_servers/quality
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

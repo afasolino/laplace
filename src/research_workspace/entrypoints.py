@@ -16,6 +16,10 @@ def laplace_main(argv: Sequence[str] | None = None) -> int:
 
         print(version_line(Path.cwd()))
         return 0
+    if arguments and arguments[0] == "zetsu":
+        from .zetsu_cli import main as zetsu_main
+
+        return zetsu_main(arguments[1:])
     from .laplace_cli import main
 
     return main(arguments)

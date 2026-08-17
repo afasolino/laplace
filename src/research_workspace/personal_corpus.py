@@ -1724,6 +1724,61 @@ class PersonalCorpusStore:
             "results": results,
         }
 
+    def evidence(
+        self,
+        owner_user_id: str,
+        chunk_ids: tuple[str, ...],
+    ) -> JsonObject:
+        """Return owner-scoped chunks in caller order for selective expansion."""
+
+        requested = tuple(dict.fromkeys(chunk_ids))
+        if not requested or len(requested) > 20 or any(
+            not re.fullmatch(r"chk_[a-f0-9]{32}", item) for item in requested
+        ):
+            raise CorpusError("invalid_evidence_selection")
+        placeholders = ",".join("?" for _ in requested)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT c.chunk_id, c.corpus_id, c.source_id, c.snapshot_revision,
+                       c.ordinal, c.page_number, c.section, c.text,
+                       s.logical_path, s.content_sha256
+                FROM chunks AS c JOIN sources AS s ON s.source_id=c.source_id
+                WHERE c.owner_user_id=? AND c.active=1 AND s.state='INDEXED'
+                  AND c.chunk_id IN ({placeholders})
+                """,
+                (owner_user_id, *requested),
+            ).fetchall()
+        by_id = {str(row["chunk_id"]): row for row in rows}
+        results = [
+            {
+                "corpus_id": str(row["corpus_id"]),
+                "source_id": str(row["source_id"]),
+                "file": str(row["logical_path"]),
+                "page": row["page_number"],
+                "section": row["section"],
+                "chunk_id": chunk_id,
+                "chunk_ordinal": int(row["ordinal"]),
+                "snapshot_revision": int(row["snapshot_revision"]),
+                "content_sha256": str(row["content_sha256"]),
+                "text": str(row["text"]),
+                "citation": {
+                    "file": str(row["logical_path"]),
+                    "page": row["page_number"],
+                    "section": row["section"],
+                    "chunk_id": chunk_id,
+                },
+            }
+            for chunk_id in requested
+            if (row := by_id.get(chunk_id)) is not None
+        ]
+        self._event(
+            "CORPUS_EVIDENCE_EXPANSION",
+            owner_user_id=owner_user_id,
+            details={"requested_count": len(requested), "result_count": len(results)},
+        )
+        return {"results": results}
+
     def purge_deleted(self, *, before_utc: str) -> JsonObject:
         """Purge soft-deleted content. Intended for an audited local maintenance job."""
 

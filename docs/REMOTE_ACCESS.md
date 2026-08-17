@@ -24,7 +24,15 @@ Keep the Operator service bound to `127.0.0.1:8765`, then open `http://127.0.0.1
 
 ## Production HTTPS reverse proxy
 
-Use [Caddyfile.example](../deploy/caddy/Caddyfile.example) or [laplace.conf.example](../deploy/nginx/laplace.conf.example). Replace the example DNS name and paths. Do not expose ports 8102/8103.
+Use [Caddyfile.example](../deploy/caddy/Caddyfile.example) or [laplace.conf.example](../deploy/nginx/laplace.conf.example). Replace the example DNS name and paths. Do not expose any Qwen or CodeV model port, including 8102, 8103, and candidate ports 8206/8207.
+
+The same authenticated origin serves Zetsu at `/mcp` and the Laplace Client
+device/operation API under `/api/v1/client/`. Zetsu requires a normal
+owner-bound bearer identity and rejects browser sessions. Client agents use an
+outbound HTTPS connection with the same authorization model. Keep bearer token
+files outside Git with mode 0600. If the established organization ingress
+offers MFA, require it there in addition to Laplace authorization; do not add a
+parallel Zetsu or Client identity system.
 
 Example Operator arguments:
 
@@ -89,6 +97,6 @@ Direct non-loopback HTTP is rejected unless `--allow-insecure-lan-http` is expli
 
 Caddy's `flush_interval -1` and Nginx's `proxy_buffering off` preserve SSE/streaming and cancellation behavior. Proxy timeouts permit bounded chat/research calls without unlimited bodies.
 
-Folder selection and drag-and-drop run in the user's browser over the same authenticated HTTPS origin. The browser sends selected bytes and relative logical names only; the server never receives a client canonical path. Configure the proxy request-body limit to match the Operator service and per-file corpus policy while retaining bounded multipart timeouts.
+Folder selection and drag-and-drop run in the user's browser over the same authenticated HTTPS origin. The browser sends selected bytes and relative logical names only; the server never receives a client canonical path. Separately, Laplace Client can operate on explicitly granted PC roots through its outbound authenticated agent; see [LAPLACE_CLIENT.md](LAPLACE_CLIENT.md). Configure the proxy request-body limit to match the Operator service and per-file corpus policy while retaining bounded multipart timeouts.
 
 Stop the reverse proxy only if it is dedicated to Laplace and the operator authorized it. Stop the Operator service before model servers. The model lifecycle unit validates ownership before signalling PIDs.

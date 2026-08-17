@@ -36,6 +36,7 @@ from .auth_sessions import (
     RegisteredEmailAuth,
 )
 from .conversations import ConversationError, ConversationStore
+from .client_service import ClientDeviceStore, ClientServiceError
 from .contracts import ProviderCapabilitiesV1, ProviderV1, RouteV1
 from .domain_registry import (
     DEFAULT_DOMAIN_REGISTRY,
@@ -71,6 +72,7 @@ from .user_capabilities import (
     default_capabilities,
 )
 from .versioning import version_record
+from .zetsu_mcp import ZetsuError, ZetsuMcpDispatcher, ZetsuService
 
 JsonObject: TypeAlias = dict[str, object]
 LOGGER = logging.getLogger("laplace.operator")
@@ -317,6 +319,35 @@ class ServingProfileActionRequest(BaseModel):
     )
 
 
+class ClientPairRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: str = Field(min_length=1, max_length=160)
+    capabilities: dict[str, object]
+    device_id: str | None = Field(default=None, pattern=r"^dev_[a-f0-9]{32}$")
+
+
+class ClientHeartbeatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    capabilities: dict[str, object]
+
+
+class ClientOperationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    workspace_id: str = Field(pattern=r"^ws-[a-f0-9]{24}$")
+    action: Literal["list", "read", "search", "write", "git", "run"]
+    arguments: dict[str, object] = Field(default_factory=dict)
+
+
+class ClientResultRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    result: dict[str, object]
+    failed: bool = False
+
+
 @dataclass(frozen=True)
 class AuthCredential:
     role: str
@@ -491,6 +522,15 @@ def create_operator_app(
     progress_store = request_states or RequestStateStore(
         operator.state_root / "requests/request_states.sqlite3"
     )
+    client_devices = ClientDeviceStore(
+        operator.state_root / "client/client_devices.sqlite3"
+    )
+    zetsu_service = (
+        ZetsuService(operator.repository_root, corpus_store, tiered)
+        if tiered is not None
+        else None
+    )
+    zetsu_dispatcher = ZetsuMcpDispatcher(zetsu_service) if zetsu_service is not None else None
     app = FastAPI(
         title="Laplace Research and Operator Plane",
         version="1.1",
@@ -503,8 +543,16 @@ def create_operator_app(
         allow_origins=list(settings.allowed_origins),
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "X-CSRF-Token", "Authorization", "X-Request-ID"],
-        expose_headers=["X-Trace-Id", "X-Content-SHA256"],
+        allow_headers=[
+            "Content-Type",
+            "X-CSRF-Token",
+            "Authorization",
+            "X-Request-ID",
+            "MCP-Protocol-Version",
+            "Mcp-Method",
+            "Mcp-Name",
+        ],
+        expose_headers=["X-Trace-Id", "X-Content-SHA256", "MCP-Protocol-Version"],
         max_age=600,
     )
 
@@ -778,6 +826,18 @@ def create_operator_app(
         _validate_csrf(authenticated, x_csrf_token)
         return authenticated
 
+    async def client_mutation_principal(
+        request: Request,
+        authenticated: AuthPrincipal = Depends(agent_principal),
+        x_csrf_token: str | None = Header(default=None),
+    ) -> AuthPrincipal:
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in settings.allowed_origins:
+            raise HTTPException(status_code=403, detail="origin_not_allowed")
+        if authenticated.auth_method == "session":
+            _validate_csrf(authenticated, x_csrf_token)
+        return authenticated
+
     async def admin_mutation_principal(
         request: Request,
         authenticated: AuthPrincipal = Depends(admin_principal),
@@ -931,6 +991,16 @@ def create_operator_app(
                 "failure_category": category,
                 "evidence": getattr(exc, "evidence", {}),
             },
+        )
+
+    @app.exception_handler(ClientServiceError)
+    async def client_service_error(
+        _request: Request, exc: ClientServiceError
+    ) -> JSONResponse:
+        status_code = 404 if exc.category.endswith("not_found") else 409
+        return JSONResponse(
+            status_code=status_code,
+            content={"status": "ERROR", "failure_category": exc.category},
         )
 
     @app.exception_handler(ConversationError)
@@ -1184,6 +1254,7 @@ def create_operator_app(
             content={
                 "status": "READY" if not reasons else "DEGRADED",
                 "reasons": reasons,
+                "fixture_mode": settings.fixture_mode,
                 "model_endpoints_required": tiered is not None,
                 "personal_corpus": corpus_health,
             },
@@ -1201,6 +1272,154 @@ def create_operator_app(
             "build_identity": build["build_identity"],
             "deployment_mode": settings.deployment_mode,
         }
+
+    @app.get("/api/v1/zetsu/status")
+    async def zetsu_status(
+        authenticated: AuthPrincipal = Depends(principal),
+    ) -> JsonObject:
+        if zetsu_service is None:
+            raise HTTPException(status_code=503, detail="zetsu_unavailable")
+        return zetsu_service.status(authenticated.user_id)
+
+    @app.post("/mcp")
+    async def zetsu_mcp(
+        request: Request,
+        authenticated: AuthPrincipal = Depends(principal),
+        mcp_protocol_version: str | None = Header(
+            default=None, alias="MCP-Protocol-Version"
+        ),
+    ) -> Response:
+        """Authenticated stateless Streamable HTTP MCP endpoint for Zetsu."""
+
+        if authenticated.auth_method != "bearer":
+            raise HTTPException(status_code=401, detail="mcp_bearer_authentication_required")
+        _origin_allowed(request)
+        if zetsu_dispatcher is None:
+            raise HTTPException(status_code=503, detail="zetsu_unavailable")
+        if "application/json" not in request.headers.get("content-type", ""):
+            raise HTTPException(status_code=415, detail="mcp_json_required")
+        try:
+            raw: object = await request.json()
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="mcp_invalid_json") from exc
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=400, detail="mcp_batch_not_supported")
+        try:
+            result = zetsu_dispatcher.dispatch(
+                authenticated.user_id,
+                raw,
+                protocol_header=mcp_protocol_version,
+            )
+        except ZetsuError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "jsonrpc": "2.0",
+                    "id": raw.get("id"),
+                    "error": {"code": -32602, "message": exc.category},
+                },
+            )
+        if result.payload is None:
+            return Response(status_code=result.status_code)
+        return JSONResponse(
+            status_code=result.status_code,
+            content=result.payload,
+            headers={
+                "MCP-Protocol-Version": (
+                    mcp_protocol_version or "2025-11-25"
+                )
+            },
+        )
+
+    @app.post("/api/v1/client/devices/pair")
+    async def pair_client_device(
+        body: ClientPairRequest,
+        authenticated: AuthPrincipal = Depends(client_mutation_principal),
+    ) -> JsonObject:
+        return client_devices.pair(
+            authenticated.user_id,
+            name=body.name,
+            capabilities=body.capabilities,
+            device_id=body.device_id,
+        )
+
+    @app.get("/api/v1/client/devices")
+    async def list_client_devices(
+        authenticated: AuthPrincipal = Depends(agent_principal),
+    ) -> JsonObject:
+        return {"devices": client_devices.list_devices(authenticated.user_id)}
+
+    @app.delete("/api/v1/client/devices/{device_id}")
+    async def revoke_client_device(
+        device_id: str,
+        authenticated: AuthPrincipal = Depends(client_mutation_principal),
+    ) -> JsonObject:
+        return client_devices.revoke(authenticated.user_id, device_id)
+
+    @app.post("/api/v1/client/devices/{device_id}/heartbeat")
+    async def client_heartbeat(
+        device_id: str,
+        body: ClientHeartbeatRequest,
+        authenticated: AuthPrincipal = Depends(client_mutation_principal),
+    ) -> JsonObject:
+        return client_devices.heartbeat(
+            authenticated.user_id,
+            device_id,
+            body.capabilities,
+        )
+
+    @app.post("/api/v1/client/devices/{device_id}/operations")
+    async def create_client_operation(
+        device_id: str,
+        body: ClientOperationRequest,
+        authenticated: AuthPrincipal = Depends(client_mutation_principal),
+    ) -> JsonObject:
+        return client_devices.enqueue(
+            authenticated.user_id,
+            device_id,
+            workspace_id=body.workspace_id,
+            action=body.action,
+            arguments=body.arguments,
+        )
+
+    @app.get("/api/v1/client/devices/{device_id}/operations/next")
+    async def next_client_operation(
+        device_id: str,
+        authenticated: AuthPrincipal = Depends(agent_principal),
+    ) -> JsonObject:
+        operation = client_devices.claim(authenticated.user_id, device_id)
+        return {"operation": operation}
+
+    @app.post(
+        "/api/v1/client/devices/{device_id}/operations/{operation_id}/result"
+    )
+    async def complete_client_operation(
+        device_id: str,
+        operation_id: str,
+        body: ClientResultRequest,
+        authenticated: AuthPrincipal = Depends(client_mutation_principal),
+    ) -> JsonObject:
+        return client_devices.complete(
+            authenticated.user_id,
+            device_id,
+            operation_id,
+            result=body.result,
+            failed=body.failed,
+        )
+
+    @app.get("/api/v1/client/operations/{operation_id}")
+    async def get_client_operation(
+        operation_id: str,
+        authenticated: AuthPrincipal = Depends(agent_principal),
+    ) -> JsonObject:
+        return client_devices.get_operation(authenticated.user_id, operation_id)
+
+    @app.post("/api/v1/client/operations/{operation_id}/cancel")
+    async def cancel_client_operation(
+        operation_id: str,
+        authenticated: AuthPrincipal = Depends(client_mutation_principal),
+    ) -> JsonObject:
+        return client_devices.cancel(authenticated.user_id, operation_id)
 
     @app.post("/api/v1/auth/login")
     async def login(body: LoginRequest, request: Request, response: Response) -> JsonObject:

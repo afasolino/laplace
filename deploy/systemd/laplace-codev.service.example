@@ -1,0 +1,30 @@
+[Unit]
+Description=Laplace loopback-only CodeV RTL specialist
+After=network-online.target
+Wants=network-online.target
+PartOf=laplace-model-servers.service
+
+[Service]
+Type=notify
+NotifyAccess=all
+User=laplace
+Group=laplace
+WorkingDirectory=/opt/laplace
+EnvironmentFile=/etc/laplace/laplace.env
+UMask=0077
+Environment=PYTHONPATH=/opt/laplace/src
+ExecStart=/opt/laplace/.venv/bin/python /opt/laplace/scripts/run_codev_service.py \
+  --repository-root /opt/laplace
+Restart=on-failure
+RestartSec=10s
+TimeoutStartSec=25min
+TimeoutStopSec=90s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/laplace/outputs/a6000_agent_team/model_servers
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

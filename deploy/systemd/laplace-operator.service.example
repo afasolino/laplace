@@ -25,6 +25,8 @@ ExecStart=/opt/laplace/.venv/bin/python -m research_workspace.operator_server \
   --session-store ${LAPLACE_SESSION_STORE} \
   --session-idle-timeout 1800 \
   --session-absolute-timeout 43200 \
+  --enable-bearer-api \
+  --bearer-token-file ${LAPLACE_BEARER_TOKEN_FILE} \
   --no-pwa
 Restart=on-failure
 RestartSec=5s
@@ -34,7 +36,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=${LAPLACE_STATE_ROOT}
+ReadWritePaths=/var/lib/laplace
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
