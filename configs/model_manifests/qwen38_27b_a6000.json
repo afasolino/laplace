@@ -1,62 +1,127 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "requested_base_model": "Qwen/Qwen3.8-27B",
-  "base_revision": null,
+  "base_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
   "artifact_path": "/home/giando/work/laplace/.models/Qwen3.8-27B-W4A16-AWQ",
-  "artifact_revision": null,
-  "artifact_sha256": null,
-  "tokenizer_revision": null,
-  "artifact_present": false,
-  "availability_status": "BLOCKED_OFFICIAL_ARTIFACT_NOT_FOUND",
-  "availability_checked_at_utc": "2026-08-17T08:02:18Z",
+  "artifact_revision": "local-awq:315b9b21b0a085b7e2f4a65f0c5db1f1c950aff037ad777382c8ed9bd1181808",
+  "artifact_sha256": "315b9b21b0a085b7e2f4a65f0c5db1f1c950aff037ad777382c8ed9bd1181808",
+  "artifact_size_bytes": 19473078044,
+  "artifact_manifest": ".models/Qwen3.8-27B-W4A16-AWQ/laplace_artifact_manifest.json",
+  "tokenizer_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "artifact_present": true,
+  "availability_status": "AVAILABLE_OFFICIAL_SOURCE_LOCAL_AWQ",
+  "availability_checked_at_utc": "2026-08-17T11:32:41Z",
   "official_sources_checked": [
     "https://huggingface.co/Qwen/Qwen3.8-27B",
-    "https://huggingface.co/Qwen",
-    "https://github.com/vllm-project/vllm/blob/main/docs/models/supported_models.md"
+    "https://huggingface.co/Qwen/Qwen3.8-27B/tree/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "https://recipes.vllm.ai/Qwen/Qwen3.8-27B",
+    "https://docs.vllm.ai/en/latest/models/supported_models/",
+    "https://docs.vllm.ai/en/latest/features/speculative_decoding/mtp/",
+    "https://docs.vllm.ai/projects/llm-compressor/en/latest/examples/quantization_w4a16/"
   ],
-  "quantization_candidate": {
+  "upstream_inspection": {
+    "license": "Apache-2.0",
+    "architecture": "Qwen3_5ForConditionalGeneration",
+    "text_model_type": "qwen3_5_text",
+    "tokenizer_class": "Qwen2Tokenizer",
+    "processor_class": "Qwen3VLProcessor",
+    "source_dtype": "bfloat16",
+    "source_weight_bytes": 55562855904,
+    "native_context_tokens": 262144,
+    "production_context_tokens": 32768,
+    "text_layers": 64,
+    "linear_attention_layers": 48,
+    "full_attention_layers": 16,
+    "mtp_hidden_layers": 1,
+    "mtp_tensor_count": 15,
+    "mtp_source_bytes": 849398784,
+    "official_int4_checkpoint_found": false,
+    "official_fp8_checkpoint_revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+    "official_fp8_selected": false,
+    "fp8_rejection_reason": "RTX A6000 compute capability 8.6 lacks native FP8 tensor-core execution; local symmetric W4A16 is the supported memory-appropriate Ampere route."
+  },
+  "source_provenance": {
+    "verified_file_count": 32,
+    "source_tree_sha256": "05a9101111a68cba02877e56283246cba67578ef2da02d6a604be530f0fbe3e9",
+    "recipe_path": "configs/quantization/qwen38_27b_w4a16_awq.json",
+    "recipe_sha256": "5c5ad69c371abb8bc82a0c90bbd9e7105602b1c564dda502ccff1a7a39e2a393",
+    "calibration_repository": "HuggingFaceH4/ultrachat_200k",
+    "calibration_revision": "8049631c405ae6576f93f445c6b8166f76f5505a",
+    "calibration_split": "train_sft",
+    "calibration_samples": 128,
+    "calibration_sequence_length": 2048,
+    "calibration_seed": 42
+  },
+  "quantization": {
+    "status": "ARTIFACT_VERIFIED",
     "format": "compressed-tensors",
+    "algorithm": "AWQ",
     "weights_bits": 4,
     "activations_bits": 16,
     "group_size": 128,
     "symmetric": true,
     "strategy": "group",
-    "kernel_target": "Marlin-compatible Ampere W4A16",
-    "verification_status": "NOT_RUN_ARTIFACT_UNAVAILABLE"
+    "observer": "memoryless_minmax",
+    "awq_grid_points": 20,
+    "kernel_target": "compressed_tensors_marlin_w4a16_sm86",
+    "mtp_copy": "LOSSLESS_VERIFIED",
+    "mtp_shard_sha256": "1d8268aa85ace093a561e3e7b63b9d390dac1cd55a90cd55b5ec509c3c9da9fe"
   },
   "runtime_observed": {
+    "serving_python": "3.11.15",
     "vllm": "0.25.0+cu129",
     "transformers": "5.14.1",
     "torch": "2.11.0+cu129",
     "cuda_runtime": "12.9",
     "nvidia_driver": "550.135",
     "compressed_tensors": "0.17.0",
+    "quantization_python": "3.11.15",
+    "quantization_llmcompressor": "0.12.0",
+    "quantization_transformers": "5.10.1",
+    "quantization_torch": "2.12.0+cu126",
+    "quantization_cuda_runtime": "12.6",
     "gpu": "NVIDIA RTX A6000",
+    "gpu_compute_capability": "8.6",
     "gpu_total_mib": 49140
   },
-  "cli_compatibility": {
-    "status": "PASSED_WITHOUT_MODEL_LOAD",
-    "checked_at_utc": "2026-08-17T08:02:18Z",
-    "installed_help_sha256": "714e2dd768c2a9743a35f1e3b4b9b8154afe0cb867f390e7d8f0988a3efa4096",
-    "profiles": {
-      "P6_qwen38_w4a16": "eb037ff05626c1af2202267107ee97e65fbb4c1712b8434b47d8fd020e545b66",
-      "P7_qwen38_w4a16_mtp": "3bbc785837653ab1feeb1762142b5f48a46233efc1989e4ef997c841e62bd85f"
-    },
-    "evidence_note": "Installed vLLM accepted every required CLI flag; artifact loading and inference were not run."
+  "architecture_probe": {
+    "status": "PASSED_DUMMY_WEIGHTS",
+    "tested_before_environment_modification": true,
+    "resolved_architecture": "Qwen3_5ForConditionalGeneration",
+    "served_model_id": "laplace-qwen38-architecture-probe",
+    "models_http_status": 200,
+    "dummy_gpu_model_load_gib": 34.07,
+    "dummy_cpu_offload_gib": 16.15,
+    "observed_gpu_used_mib": 40910,
+    "observed_gpu_free_mib": 7761,
+    "scope": "Installed architecture, GDN/attention kernels, server startup, and model identity only; real artifact inference was not claimed."
   },
-  "serving_candidate": {
-    "profile": "P6_qwen38_w4a16",
-    "mtp_candidate_profile": "P7_qwen38_w4a16_mtp",
-    "max_model_len": 32768,
-    "max_num_seqs": 2,
-    "gpu_memory_utilization": 0.65,
-    "reasoning_parser": "qwen3",
-    "tool_call_parser": "qwen3_coder"
+  "serving_candidates": {
+    "P6_qwen38_w4a16": {
+      "profile_sha256": "7a287a248bc3d6d14e13fa1ccb0e5e9bea2b3cd9818b2a07e0aa87407a1fd76c",
+      "max_model_len": 32768,
+      "reasoning_parser": "qwen3",
+      "tool_call_parser": "qwen3_coder",
+      "live_status": "NOT_RUN_EXTERNAL_EXECUTION_QUOTA"
+    },
+    "P7_qwen38_w4a16_mtp": {
+      "profile_sha256": "648699a4d5aad57e833a2b5dfc45524b39ffe47fb536792882851856ab415e60",
+      "requested_speculative_tokens": 3,
+      "live_status": "NOT_RUN_EXTERNAL_EXECUTION_QUOTA"
+    }
   },
   "mtp": {
     "requested_speculative_tokens": 3,
-    "status": "NOT_RUN_ARTIFACT_UNAVAILABLE"
+    "asset_status": "LOSSLESS_VERIFIED",
+    "runtime_status": "NOT_RUN_EXTERNAL_EXECUTION_QUOTA",
+    "status": "NOT_CERTIFIED"
   },
-  "certification_status": "BLOCKED_ARTIFACT_UNAVAILABLE",
+  "external_blocker": {
+    "category": "EXTERNAL_EXECUTION_QUOTA_EXHAUSTED",
+    "observed_at_utc": "2026-08-17T11:32:41Z",
+    "evidence": "The platform rejected the first post-build GPU-visible command because the external-execution usage limit was reached and reported retry availability at Aug 24, 2026 9:24 AM.",
+    "confirmation": "A later required escalated rerun of a localhost-socket regression was rejected by the same usage limit, so neither GPU-visible certification nor sandbox-external test execution is currently authorized."
+  },
+  "certification_status": "BLOCKED_EXTERNAL_EXECUTION_QUOTA",
   "promotion_allowed": false
 }
