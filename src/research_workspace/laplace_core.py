@@ -15,6 +15,7 @@ from typing import Literal, TypeAlias
 from .model_routing import RoutingTaskMetadata, assess_rtl_worker_eligibility
 from .memory import MemoryService
 from .context_planner import ContextPlanner
+from .hooks import HookReport, HookService, HookStage
 from .personal_corpus import PersonalCorpusStore
 from .repository_context import (
     RepoMap,
@@ -72,6 +73,7 @@ class LaplaceCore:
         trajectory: TrajectoryService | None = None,
         context_planner: ContextPlanner | None = None,
         skill_registry: SkillRegistry | None = None,
+        hooks: HookService | None = None,
     ) -> None:
         self.repository_root = repository_root.resolve()
         self.corpus = corpus
@@ -83,11 +85,13 @@ class LaplaceCore:
         )
         self.context_planner = context_planner or ContextPlanner()
         self._skill_registry = skill_registry
+        self._hooks = hooks
         self._repository_context = repository_context
         self._agent_coordinator = agent_coordinator
         self._agent_coordinator_lock = threading.Lock()
         self._repository_context_lock = threading.Lock()
         self._skill_registry_lock = threading.Lock()
+        self._hooks_lock = threading.Lock()
 
     @property
     def skill_registry(self) -> SkillRegistry:
@@ -99,6 +103,15 @@ class LaplaceCore:
                     self.repository_root / ".laplace-state" / "skills"
                 )
             return self._skill_registry
+
+    @property
+    def hooks(self) -> HookService:
+        """Return the shared typed lifecycle hook service."""
+
+        with self._hooks_lock:
+            if self._hooks is None:
+                self._hooks = HookService(self.repository_root / ".laplace-state" / "hooks")
+            return self._hooks
 
     @property
     def repository_context(self) -> RepositoryContextService:
@@ -311,6 +324,29 @@ class LaplaceCore:
             available_tools=available_tools,
             available_verifiers=available_verifiers,
             enabled=enabled,
+        )
+
+    def emit_hook(
+        self,
+        stage: HookStage,
+        *,
+        owner_id: str,
+        project_id: str,
+        session_id: str,
+        task_id: str,
+        idempotency_key: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> HookReport:
+        """Emit one owner-bound lifecycle event through the shared hook service."""
+
+        return self.hooks.emit(
+            stage,
+            owner_id=owner_id,
+            project_id=project_id,
+            session_id=session_id,
+            task_id=task_id,
+            idempotency_key=idempotency_key,
+            payload=payload,
         )
 
     @staticmethod
