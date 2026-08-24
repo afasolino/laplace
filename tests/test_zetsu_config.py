@@ -23,9 +23,9 @@ def test_configure_is_idempotent_and_preserves_other_codex_config(
 
     text = config.read_text(encoding="utf-8")
     assert text.count("BEGIN LAPLACE ZETSU MANAGED") == 1
-    assert '[mcp_servers.other]' in text
+    assert "[mcp_servers.other]" in text
     assert 'url = "https://other.example/mcp"' in text
-    assert '[mcp_servers.zetsu]' in text
+    assert "[mcp_servers.zetsu]" in text
     parsed = tomllib.loads(text)
     assert parsed["mcp_servers"]["zetsu"]["default_tools_approval_mode"] == "writes"
     assert parsed["mcp_servers"]["zetsu"]["enabled_tools"] == [
@@ -72,7 +72,7 @@ def test_remove_preserves_other_codex_config(
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
     config = tmp_path / "codex-home" / "config.toml"
     config.parent.mkdir()
-    config.write_text('[features]\nfoo = true\n', encoding="utf-8")
+    config.write_text("[features]\nfoo = true\n", encoding="utf-8")
     configure(repo, endpoint="https://laplace.example/mcp")
 
     value = remove(repo)
@@ -168,6 +168,6 @@ def test_configure_repairs_owned_v1_configuration_drift(
     )
 
     assert repaired.compatible
-    assert config.read_text(encoding="utf-8").count("MANAGED v3") == 2
+    assert config.read_text(encoding="utf-8").count("MANAGED v4") == 2
     assert "stale.example" not in config.read_text(encoding="utf-8")
-    assert "managed-by: laplace-zetsu v3" in skill.read_text(encoding="utf-8")
+    assert "managed-by: laplace-zetsu v4" in skill.read_text(encoding="utf-8")

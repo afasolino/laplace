@@ -17,15 +17,15 @@ from typing import Any, Mapping, Sequence
 from research_workspace.personal_corpus import PersonalCorpusPolicy, PersonalCorpusStore
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_TASK_CONFIG = ROOT / "configs/benchmarks/zetsu_production_token_tasks_v3.json"
+DEFAULT_TASK_CONFIG = ROOT / "configs/benchmarks/zetsu_production_token_tasks_v4.json"
 DEFAULT_OUTPUT = (
-    ROOT / "outputs/qwen38_certification/20260824-primary-e6b4/production-token-pairs-v3"
+    ROOT / "outputs/qwen38_certification/20260824-primary-e6b4/production-token-pairs-v4"
 )
 PROFILE_PATH = ROOT / "configs/serving_profile_candidates/P7_qwen38_w4a16_mtp.json"
 VLLM = ROOT / ".venv-vllm-cu129/bin/vllm"
 FFMPEG = ROOT / ".runtime/ffmpeg7/lib"
-BASE_REVISION = "833a308e218eeb05b24a7c7d70d9fd7c1b9bceff"
-OWNER = "codex-production-token-benchmark-v2"
+COMMITTED_BASE_REVISION = "8bcd0bfbe346fbb9d67a77fc3c2ab84e83d9b3a8"
+OWNER = "codex-production-token-benchmark-v4"
 MODEL = "gpt-5.6-terra"
 REASONING = "high"
 PORT = 8878
@@ -39,7 +39,6 @@ MCP_TOOLS = (
     "rtl_task",
     "verify",
 )
-MCP_SCHEMA_UTF8_BYTES = 4_647
 CONDITIONS = ("baseline", "zetsu")
 
 
@@ -98,6 +97,55 @@ def _repository_state(worktree: Path, base_revision: str) -> str:
     return _sha256_bytes(f"commit={commit}\ntree={tree}\n".encode("utf-8"))
 
 
+def _snapshot_revision(output: Path, task_config: Path) -> tuple[str, str]:
+    """Create an immutable benchmark commit without moving or staging the branch."""
+
+    try:
+        config_relative = task_config.relative_to(ROOT)
+    except ValueError as exc:
+        raise RuntimeError("benchmark_task_config_outside_repository") from exc
+    index = output / "synthetic-snapshot.index"
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "GIT_INDEX_FILE": str(index),
+            "GIT_AUTHOR_NAME": "Laplace benchmark",
+            "GIT_AUTHOR_EMAIL": "benchmark@localhost.invalid",
+            "GIT_COMMITTER_NAME": "Laplace benchmark",
+            "GIT_COMMITTER_EMAIL": "benchmark@localhost.invalid",
+            "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
+            "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z",
+        }
+    )
+
+    def snapshot_git(*argv: str) -> subprocess.CompletedProcess[str]:
+        result = _run(("git", *argv), cwd=ROOT, env=environment)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"benchmark_snapshot_failed:{' '.join(argv)}:{result.stderr[-1000:]}"
+            )
+        return result
+
+    try:
+        snapshot_git("read-tree", COMMITTED_BASE_REVISION)
+        snapshot_git("add", "-u", "--", ".")
+        snapshot_git("add", "--", config_relative.as_posix())
+        tree = snapshot_git("write-tree").stdout.strip()
+        revision = snapshot_git(
+            "commit-tree",
+            tree,
+            "-p",
+            COMMITTED_BASE_REVISION,
+            "-m",
+            "frozen optimized Zetsu benchmark snapshot",
+        ).stdout.strip()
+    finally:
+        index.unlink(missing_ok=True)
+    if _git_value(ROOT, "rev-parse", f"{revision}^{{tree}}") != tree:
+        raise RuntimeError("benchmark_snapshot_identity_mismatch")
+    return revision, tree
+
+
 def _capabilities() -> Any:
     from research_workspace.serving_profiles import InstalledServingCapabilities
 
@@ -127,7 +175,7 @@ def _load_config(path: Path) -> dict[str, Any]:
 
 
 def _prepare_worktrees(
-    output: Path, tasks: Sequence[Mapping[str, object]]
+    output: Path, tasks: Sequence[Mapping[str, object]], base_revision: str
 ) -> dict[tuple[str, str], Path]:
     worktrees: dict[tuple[str, str], Path] = {}
     worktree_root = output / "worktrees"
@@ -142,7 +190,7 @@ def _prepare_worktrees(
                 "add",
                 "--detach",
                 str(target),
-                BASE_REVISION,
+                base_revision,
             )
             if result.returncode != 0:
                 raise RuntimeError(
@@ -229,6 +277,42 @@ def _turn_usage(events: Sequence[Mapping[str, object]]) -> list[dict[str, object
     ]
 
 
+def _codex_activity(events: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    completed: list[Mapping[str, object]] = []
+    for event in events:
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if isinstance(item, Mapping):
+            completed.append(item)
+    mcp_positions = [
+        index
+        for index, item in enumerate(completed)
+        if item.get("type") == "mcp_tool_call" and item.get("server") == "zetsu"
+    ]
+    first = mcp_positions[0] if mcp_positions else None
+    last = mcp_positions[-1] if mcp_positions else None
+
+    def count_type(items: Sequence[Mapping[str, object]], kind: str) -> int:
+        return sum(item.get("type") == kind for item in items)
+
+    before = completed[:first] if first is not None else completed
+    after = completed[last + 1 :] if last is not None else []
+    return {
+        "turn_completed_records": len(_turn_usage(events)),
+        "per_model_round_token_usage_available": False,
+        "completed_items": len(completed),
+        "agent_messages_total": count_type(completed, "agent_message"),
+        "agent_messages_before_first_zetsu": count_type(before, "agent_message"),
+        "agent_messages_after_last_zetsu": count_type(after, "agent_message"),
+        "local_command_calls_total": count_type(completed, "command_execution"),
+        "local_command_calls_before_first_zetsu": count_type(before, "command_execution"),
+        "local_command_calls_after_last_zetsu": count_type(after, "command_execution"),
+        "file_change_items_total": count_type(completed, "file_change"),
+        "zetsu_calls": len(mcp_positions),
+    }
+
+
 def _gpu_values(samples: Sequence[Mapping[str, object]], field: str) -> list[int]:
     values: list[int] = []
     for sample in samples:
@@ -244,17 +328,15 @@ def _route_from_events(events: Sequence[Mapping[str, object]]) -> str:
     return "local_codex" if not tools else "+".join(tools)
 
 
-def _developer_instruction(task: Mapping[str, object], condition: str, repo_id: str) -> str:
+def _developer_instruction(task: Mapping[str, object], repo_id: str) -> str:
     common = (
         "This is one frozen production-efficiency benchmark execution. Use no network and inspect "
         "no unrelated files. The user prompt must remain the sole task definition. Deterministic "
-        "repository assertions, not a model finish claim, decide correctness. "
+        "repository assertions, not a model finish claim, decide correctness. Apply this same "
+        "routing policy whether or not the named localhost tools are available; when a selected "
+        "tool is unavailable, complete the identical task locally. Do not read a skill file merely "
+        "to rediscover this routing policy. "
     )
-    if condition == "baseline":
-        return common + (
-            "This is standalone Codex: no Laplace or Zetsu MCP is available. Complete the request "
-            "locally and keep any mutation within the paths named by the prompt."
-        )
     task_id = str(task["id"])
     if task_id == "local_control":
         route = (
@@ -263,27 +345,27 @@ def _developer_instruction(task: Mapping[str, object], condition: str, repo_id: 
         )
     elif task_id == "production_context":
         route = (
-            "The production routing policy classifies this as indexed historical project context. "
-            "Call mcp__zetsu__project_context exactly once, with the exact user prompt as query, "
-            "max_results=4, max_chars=6000, and telemetry=true. Use its compact evidence to answer; "
-            "do not make a redundant retrieval/delegation call or scan broad unrelated paths."
+            "This is substantial indexed historical project context. If project_context is available, "
+            "call it exactly once with the exact user prompt as query, max_results=6, max_chars=7000, "
+            "and telemetry=true; use that compact evidence without another retrieval/delegation call. "
+            "Otherwise inspect only the directly relevant repository sources."
         )
-    elif task_id == "usage_inspection_feature":
+    elif task_id == "usage_comparison_feature":
         verifier = task.get("verification_argv")
         route = (
-            "The production routing policy classifies this coherent implementation as suitable for "
-            "agent_task. Before delegation bind this caller-selected verifier exactly: "
-            f"{json.dumps(verifier, separators=(',', ':'))}. Call mcp__zetsu__agent_task exactly once "
-            f"with repo_id={repo_id!r}, the exact user prompt as instruction, lane='quality', "
-            "max_steps=16, max_chars=16000, that verification_argv, and telemetry=true. The agent's "
-            "worktree is isolated: consume its exact inline handoff.patch and apply the same verified "
-            "change to the current worktree without rediscovering or independently reimplementing it. "
-            "Run the same direct pytest verifier locally after the latest mutation. Do not make a "
-            "second Zetsu call; Qwen finish text is not correctness evidence."
+            "This coherent implementation is suitable for agent_task when that tool is available. "
+            "Bind this caller-selected direct verifier exactly: "
+            f"{json.dumps(verifier, separators=(',', ':'))}. Call agent_task exactly once with "
+            f"repo_id={repo_id!r}, the exact user prompt as instruction, lane='quality', max_steps=12, "
+            "max_chars=4000, that verification_argv, apply_to_repository=true, and telemetry=true. "
+            "If status is SUCCESS, promotion.applied is true, the bound verifier passed after the latest "
+            "mutation, and unresolved_failures is empty, treat the handoff as authoritative: do not reread "
+            "the changed files or rerun the same verifier. If agent_task is unavailable, implement locally "
+            "within the prompt's named paths and run the direct verifier once."
         )
     else:
         raise RuntimeError(f"unknown_task:{task_id}")
-    return common + "Follow the checked-in production Zetsu skill. " + route
+    return common + route
 
 
 def _codex_argv(
@@ -310,7 +392,7 @@ def _codex_argv(
         "-c",
         f'model_reasoning_effort="{REASONING}"',
         "-c",
-        f"developer_instructions={json.dumps(_developer_instruction(task, condition, repo_id))}",
+        f"developer_instructions={json.dumps(_developer_instruction(task, repo_id))}",
         "-s",
         "workspace-write" if implementation else "read-only",
         "-C",
@@ -354,13 +436,16 @@ def _run_codex(
     condition: str,
     worktree: Path,
     *,
+    base_revision: str,
+    mcp_schema_utf8_bytes: int,
+    mcp_definitions: Sequence[Mapping[str, object]],
     server_url: str | None,
     token: str | None,
 ) -> dict[str, object]:
     task_id = str(task["id"])
     result_dir = output / task_id / condition
     result_dir.mkdir(parents=True, exist_ok=False)
-    repo_id = f"production-v2-{task_id}"
+    repo_id = f"production-v4-{task_id}"
     environment = dict(os.environ)
     if condition == "zetsu":
         if token is None:
@@ -402,6 +487,15 @@ def _run_codex(
         if event.get("type") == "thread.started" and isinstance(event.get("thread_id"), str)
     ]
     mcp = _mcp_events(events)
+    called_tools = tuple(dict.fromkeys(str(item.get("tool")) for item in mcp))
+    selected_definitions = tuple(
+        definition for definition in mcp_definitions if str(definition.get("name")) in called_tools
+    )
+    selected_schema_bytes = (
+        len(json.dumps(selected_definitions, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        if selected_definitions
+        else 0
+    )
     qwen_input, qwen_output, qwen_calls, qwen_exact, checkpoint = _qwen_usage(mcp)
     result_bytes = sum(
         len(
@@ -414,8 +508,8 @@ def _run_codex(
     metadata = {
         "task_config_sha256": config_sha,
         "prompt_sha256": _sha256_bytes(str(task["prompt"]).encode("utf-8")),
-        "repository_state_sha256": _repository_state(worktree, BASE_REVISION),
-        "base_revision": BASE_REVISION,
+        "repository_state_sha256": _repository_state(worktree, base_revision),
+        "base_revision": base_revision,
         "codex_model": MODEL,
         "codex_reasoning": REASONING,
         "session_id": thread_ids[-1] if thread_ids else "missing-session-id",
@@ -428,8 +522,17 @@ def _run_codex(
         ),
         "zetsu_tool_calls": len(mcp),
         "actual_production_route": _route_from_events(events),
-        "active_mcp_schema_utf8_bytes": MCP_SCHEMA_UTF8_BYTES if condition == "zetsu" else 0,
-        "active_mcp_tools": list(MCP_TOOLS) if condition == "zetsu" else [],
+        "active_mcp_schema_utf8_bytes": None,
+        "registered_mcp_schema_utf8_bytes": (mcp_schema_utf8_bytes if condition == "zetsu" else 0),
+        "eager_mcp_tool_schema_utf8_bytes": 0,
+        "selected_mcp_tool_schema_utf8_bytes": (
+            selected_schema_bytes if condition == "zetsu" else 0
+        ),
+        "active_mcp_tools": list(called_tools),
+        "mcp_schema_exposure": (
+            "installed_cli_automatic_deferred" if condition == "zetsu" else "no_mcp"
+        ),
+        "registered_mcp_tools": list(MCP_TOOLS) if condition == "zetsu" else [],
         "zetsu_evidence_context_bytes": result_bytes,
         "zetsu_evidence_context_tokens_approx": (result_bytes + 3) // 4 if result_bytes else 0,
         "zetsu_evidence_context_token_method": "utf8_compact_mcp_result_bytes_div4",
@@ -439,6 +542,10 @@ def _run_codex(
         "local_qwen_calls": qwen_calls,
         "qwen_checkpoint_path": checkpoint,
         "codex_turn_usage": _turn_usage(events),
+        "codex_activity": _codex_activity(events),
+        "developer_instruction_sha256": _sha256_bytes(
+            _developer_instruction(task, repo_id).encode("utf-8")
+        ),
         "actual_codex_credits": None,
         "elapsed_seconds": elapsed,
         "elapsed_method": "supervisor_monotonic_clock",
@@ -468,17 +575,23 @@ def _run_codex(
     return metadata
 
 
-def _ingest_context(corpus: PersonalCorpusStore, worktree: Path) -> dict[str, object]:
-    facts = (
-        "checkpoint_manifest=configs/model_manifests/qwen38_27b_a6000.json",
-        "migration_runbook=docs/QWEN38_PRODUCTION_MIGRATION.md",
-        "zetsu_contract=docs/ZETSU.md",
-        "serving_runtime=src/research_workspace/serving_profile_runtime.py",
-    )
-    paths = [item.split("=", 1)[1] for item in facts]
+def _ingest_context(
+    corpus: PersonalCorpusStore, worktree: Path, task: Mapping[str, object]
+) -> dict[str, object]:
+    correctness = task.get("correctness")
+    if not isinstance(correctness, Mapping):
+        raise RuntimeError("benchmark_context_correctness_missing")
+    answer = correctness.get("answer_exact")
+    paths = correctness.get("source_paths")
+    if (
+        not isinstance(answer, str)
+        or not isinstance(paths, list)
+        or not all(isinstance(item, str) for item in paths)
+    ):
+        raise RuntimeError("benchmark_context_definition_invalid")
     sections: list[str] = [
         "# Frozen production architecture context",
-        *facts,
+        answer.rstrip(),
         "",
         "The exact source hashes below bind these compact facts to the frozen repository state.",
     ]
@@ -491,10 +604,10 @@ def _ingest_context(corpus: PersonalCorpusStore, worktree: Path) -> dict[str, ob
             {"path": relative, "sha256": _sha256_bytes(data), "size_bytes": len(data)}
         )
     content = "\n".join(sections).encode("utf-8")
-    corpus_record = corpus.create_corpus(OWNER, "Frozen Qwen3.8 production architecture v2")
+    corpus_record = corpus.create_corpus(OWNER, "Frozen Qwen3.8 production architecture v4")
     corpus_id = str(corpus_record["corpus_id"])
     upload = corpus.create_upload(
-        OWNER, corpus_id, idempotency_key="production-token-benchmark-v2-upload"
+        OWNER, corpus_id, idempotency_key="production-token-benchmark-v4-upload"
     )
     upload_id = str(upload["upload_id"])
     staged = corpus.stage_file(
@@ -505,7 +618,7 @@ def _ingest_context(corpus: PersonalCorpusStore, worktree: Path) -> dict[str, ob
         client_mime="text/markdown",
     )
     indexed = corpus.index_upload(
-        OWNER, upload_id, idempotency_key="production-token-benchmark-v2-index"
+        OWNER, upload_id, idempotency_key="production-token-benchmark-v4-index"
     )
     return {
         "corpus_id": corpus_id,
@@ -568,24 +681,37 @@ def main() -> int:
         raise SystemExit("benchmark output under /tmp is forbidden")
     if output.exists():
         raise SystemExit(f"output root already exists; benchmark is single-run only: {output}")
-    if _git_value(ROOT, "rev-parse", "HEAD") != BASE_REVISION:
+    if _git_value(ROOT, "rev-parse", "HEAD") != COMMITTED_BASE_REVISION:
         raise SystemExit("benchmark base revision mismatch")
     config = _load_config(task_config)
     tasks = list(config["tasks"])
     config_sha = _sha256(task_config)
     output.mkdir(parents=True)
+    base_revision, base_tree = _snapshot_revision(output, task_config)
+    from research_workspace.zetsu_mcp import tool_definitions
+
+    definitions = tool_definitions()
+    actual_tools = tuple(str(item["name"]) for item in definitions)
+    actual_schema_bytes = len(
+        json.dumps(definitions, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+    if actual_tools != MCP_TOOLS:
+        raise RuntimeError("frozen_mcp_tools_drift")
     freeze = {
         "task_config": str(task_config),
         "task_config_sha256": config_sha,
-        "base_revision": BASE_REVISION,
-        "base_tree": _git_value(ROOT, "rev-parse", f"{BASE_REVISION}^{{tree}}"),
-        "repository_state_sha256": _repository_state(ROOT, BASE_REVISION),
+        "committed_parent_revision": COMMITTED_BASE_REVISION,
+        "base_revision": base_revision,
+        "base_tree": base_tree,
+        "repository_state_sha256": _repository_state(ROOT, base_revision),
         "codex_model": MODEL,
         "codex_reasoning": REASONING,
         "runs_per_condition": 1,
         "conditions": ["standalone_codex", "production_codex_laplace"],
         "mcp_tools": list(MCP_TOOLS),
-        "mcp_schema_utf8_bytes": MCP_SCHEMA_UTF8_BYTES,
+        "registered_mcp_schema_utf8_bytes": actual_schema_bytes,
+        "eager_mcp_tool_schema_utf8_bytes": 0,
+        "mcp_schema_exposure": "installed_cli_automatic_deferred",
         "profile_path": str(PROFILE_PATH),
         "profile_sha256": _sha256(PROFILE_PATH),
     }
@@ -603,7 +729,7 @@ def main() -> int:
     gpu_samples: list[dict[str, object]] = []
     exit_code = 1
     try:
-        worktrees = _prepare_worktrees(output, tasks)
+        worktrees = _prepare_worktrees(output, tasks, base_revision)
         state = output / "service-state"
         state.mkdir()
         token = secrets.token_urlsafe(48)
@@ -617,7 +743,10 @@ def main() -> int:
                 max_file_bytes=256 * 1024 * 1024,
             ),
         )
-        report["corpus"] = _ingest_context(corpus, worktrees[("production_context", "zetsu")])
+        context_task = next(item for item in tasks if item.get("id") == "production_context")
+        report["corpus"] = _ingest_context(
+            corpus, worktrees[("production_context", "zetsu")], context_task
+        )
 
         # Import the serving stack only after the spawn-isolated corpus parser has
         # finished, so its inherited address-space limit is not consumed by vLLM/API
@@ -649,24 +778,16 @@ def main() -> int:
         )
         from research_workspace.serving_profiles import ServingProfile, resolve_profile
         from research_workspace.user_capabilities import CapabilityTier, UserCapabilityStore
-        from research_workspace.zetsu_mcp import tool_definitions
 
-        definitions = tool_definitions()
-        actual_tools = tuple(str(item["name"]) for item in definitions)
-        actual_schema_bytes = len(
-            json.dumps(definitions, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        )
-        if actual_tools != MCP_TOOLS or actual_schema_bytes != MCP_SCHEMA_UTF8_BYTES:
-            raise RuntimeError("frozen_mcp_schema_drift")
         users = UserCapabilityStore(state / "users.sqlite3")
         users.set_user(OWNER, CapabilityTier.PLUS)
         authorizations = RepositoryAuthorizationStore(state / "repositories.sqlite3")
         for task in tasks:
             task_id = str(task["id"])
             repository = worktrees[(task_id, "zetsu")]
-            repo_id = f"production-v2-{task_id}"
+            repo_id = f"production-v4-{task_id}"
             authorizations.register(repo_id, repository)
-            authorizations.grant(OWNER, repo_id, base_revision=BASE_REVISION)
+            authorizations.grant(OWNER, repo_id, base_revision=base_revision)
         sandboxes = AgentSandboxManager(state / "agent-worktrees", authorizations)
         profile = ServingProfile.from_mapping(json.loads(PROFILE_PATH.read_text(encoding="utf-8")))
         resolved = resolve_profile(profile, _capabilities(), executable=VLLM, require_model=True)
@@ -778,6 +899,9 @@ def main() -> int:
                 task,
                 "baseline",
                 worktrees[(str(task["id"]), "baseline")],
+                base_revision=base_revision,
+                mcp_schema_utf8_bytes=actual_schema_bytes,
+                mcp_definitions=definitions,
                 server_url=None,
                 token=None,
             )
@@ -789,6 +913,9 @@ def main() -> int:
                 task,
                 "zetsu",
                 worktrees[(str(task["id"]), "zetsu")],
+                base_revision=base_revision,
+                mcp_schema_utf8_bytes=actual_schema_bytes,
+                mcp_definitions=definitions,
                 server_url=server_url,
                 token=token,
             )

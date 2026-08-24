@@ -14,15 +14,22 @@ from research_workspace.zetsu_mcp import (
 
 
 class _Agent:
-    def __init__(self, *, error: str | None = None) -> None:
+    def __init__(
+        self, *, error: str | None = None, result: dict[str, object] | None = None
+    ) -> None:
         self.error = error
+        self.result = result
         self.calls: list[dict[str, object]] = []
 
     def run(self, **kwargs):
         self.calls.append(kwargs)
         if self.error is not None:
             raise ServiceTierError(self.error)
-        return {"status": "SUCCESS", "content": "ok", "telemetry": {"qwen_calls": 1}}
+        return self.result or {
+            "status": "SUCCESS",
+            "content": "ok",
+            "telemetry": {"qwen_calls": 1},
+        }
 
 
 def _service(agent: _Agent) -> ZetsuService:
@@ -51,6 +58,9 @@ def test_agent_task_schema_is_bounded_and_closed() -> None:
     verifier = schema["properties"]["verification_argv"]
     assert verifier["maxItems"] == 64
     assert verifier["items"]["maxLength"] == 1_000
+    assert schema["properties"]["apply_to_repository"] == {"type": "boolean"}
+    verify = next(item for item in tool_definitions() if item["name"] == "verify")
+    assert verify["inputSchema"]["properties"]["include_patch"] == {"type": "boolean"}
 
 
 def test_agent_task_rejects_unexpected_arguments() -> None:
@@ -141,6 +151,7 @@ def test_agent_task_validates_telemetry_before_execution() -> None:
         )
     assert agent.calls == []
 
+
 def test_agent_task_validates_verification_argv_before_execution() -> None:
     agent = _Agent()
     service = _service(agent)
@@ -163,3 +174,68 @@ def test_agent_task_validates_verification_argv_before_execution() -> None:
     )
     assert result["status"] == "SUCCESS"
     assert agent.calls[-1]["verification_argv"] == ["pytest", "tests/test_x.py", "-q"]
+
+
+def test_agent_task_returns_compact_authoritative_handoff() -> None:
+    agent = _Agent(
+        result={
+            "status": "SUCCESS",
+            "session_id": "session-a",
+            "repo_id": "repo",
+            "model_id": "qwen",
+            "effective_lane": "quality",
+            "content": "verified change",
+            "changed_paths": ["src/a.py"],
+            "verification": {
+                "argv": ["pytest", "tests/test_a.py", "-q"],
+                "returncode": 0,
+                "passed": True,
+                "stdout_tail": "one passed",
+            },
+            "validation_history": [{"passed": False}, {"passed": True}],
+            "unresolved_failures": [],
+            "evidence_refs": [],
+            "checkpoint_path": "/evidence/checkpoint.json",
+            "handoff": {
+                "patch": "large exact patch",
+                "patch_inline": True,
+                "patch_chars": 17,
+                "patch_sha256": "a" * 64,
+                "patch_path": "/evidence/handoff.patch",
+            },
+            "promotion": {"requested": True, "applied": True},
+            "elapsed_seconds": 12.5,
+            "telemetry": {"qwen_calls": 4, "qwen_input_tokens": 2000},
+        }
+    )
+    result = _service(agent).call(
+        "user-a",
+        "agent_task",
+        {
+            "repo_id": "repo",
+            "instruction": "implement bounded change",
+            "verification_argv": ["pytest", "tests/test_a.py", "-q"],
+            "apply_to_repository": True,
+            "telemetry": True,
+        },
+    )
+
+    assert agent.calls[-1]["apply_to_repository"] is True
+    assert result["promotion"] == {"requested": True, "applied": True}
+    assert result["handoff"] == {
+        "patch_chars": 17,
+        "patch_sha256": "a" * 64,
+        "patch_path": "/evidence/handoff.patch",
+    }
+    assert result["verification"] == {
+        "argv": ["pytest", "tests/test_a.py", "-q"],
+        "command_id": None,
+        "returncode": 0,
+        "passed": True,
+        "aborted_category": None,
+        "qualifies_for_mutation": None,
+        "mutation_epoch": None,
+        "worktree_mutated": None,
+    }
+    assert "validation_history" not in result
+    assert "patch" not in result["handoff"]

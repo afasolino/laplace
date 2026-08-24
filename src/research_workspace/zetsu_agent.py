@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO, Mapping, Sequence, cast
@@ -193,6 +193,10 @@ class AgentExecutionState:
     last_verified_epoch: int = -1
     command_count: int = 0
     consumed_wall_seconds: float = 0.0
+    target_initial_head: str = ""
+    target_initial_status_sha256: str = ""
+    target_applied_status_sha256: str = ""
+    applied_patch_sha256: str = ""
     telemetry: AgentTelemetry = field(default_factory=AgentTelemetry)
 
 
@@ -212,6 +216,7 @@ class AgentRunContext:
     required_verification_argv: tuple[str, ...] | None
     run_started: float
     remaining_wall_seconds: float
+    apply_to_repository: bool = False
 
 
 class AgentCheckpointStore:
@@ -275,10 +280,17 @@ class ZetsuAgentCoordinator:
         )
         self._session_locks_guard = threading.Lock()
         self._session_locks: dict[str, threading.Lock] = {}
+        self._target_locks_guard = threading.Lock()
+        self._target_locks: dict[str, threading.Lock] = {}
 
     def _session_lock(self, session_id: str) -> threading.Lock:
         with self._session_locks_guard:
             return self._session_locks.setdefault(session_id, threading.Lock())
+
+    def _target_lock(self, repository: Path) -> threading.Lock:
+        key = str(repository.resolve())
+        with self._target_locks_guard:
+            return self._target_locks.setdefault(key, threading.Lock())
 
     @staticmethod
     def _system_prompt() -> str:
@@ -286,12 +298,16 @@ class ZetsuAgentCoordinator:
             "You are the bounded local Qwen repository agent subordinate to Codex. Return exactly "
             "one JSON object selecting one action. Allowed actions: "
             '{"action":"search","query":"literal","glob":"*.py"}; '
-            '{"action":"read","path":"relative/path"}; '
+            '{"action":"read","paths":["relative/a","relative/b"]}; '
             '{"action":"retrieve","query":"owner-authorized knowledge query"}; '
-            '{"action":"edit","path":"relative/path","old_text":"exact once","new_text":"replacement"}; '
+            '{"action":"edit","edits":[{"path":"relative/path","old_text":"exact once",'
+            '"new_text":"replacement"}]}; '
             '{"action":"create","path":"relative/path","content":"text"}; '
             '{"action":"verify","argv":["pytest","tests/test_x.py","-q"]}; '
             '{"action":"finish","result":"concise verified result"}. '
+            "Batch related reads and known edits. Inspect only enough to edit once, run the exact "
+            "caller verifier, and stop immediately when it passes with no unresolved failure. "
+            "Do not narrate. "
             "Use only the supplied worktree and compact retrieval interface. Never request shell, "
             "network, Git mutation, .git access, unrestricted corpus access, or paths outside the worktree. "
             "After any mutation, deterministic verification must pass after the latest mutation before finish."
@@ -383,16 +399,7 @@ class ZetsuAgentCoordinator:
             unique_changed[:_MAX_CHANGED_PATHS],
         )
 
-    def _handoff_patch(
-        self,
-        worktree: Path,
-        session_id: str,
-        changed_paths: Sequence[str],
-        *,
-        max_chars: int,
-    ) -> JsonObject:
-        """Capture exact verified code separately from disposable agent narration."""
-
+    def _exact_patch(self, worktree: Path, changed_paths: Sequence[str]) -> str:
         tracked = self._run_git(
             worktree,
             ["diff", "--no-ext-diff", "--binary", "HEAD", "--"],
@@ -423,6 +430,20 @@ class ZetsuAgentCoordinator:
                     tofile=f"b/{relative}",
                 )
             )
+        return patch
+
+    def _handoff_patch(
+        self,
+        worktree: Path,
+        session_id: str,
+        changed_paths: Sequence[str],
+        *,
+        max_chars: int,
+    ) -> JsonObject:
+        """Capture exact verified code separately from disposable agent narration."""
+
+        del max_chars
+        patch = self._exact_patch(worktree, changed_paths)
         digest = hashlib.sha256(patch.encode("utf-8")).hexdigest()
         artifact = self.checkpoints.path(session_id).with_suffix(".patch")
         temporary = artifact.with_name(f".{artifact.name}.{uuid.uuid4().hex}.tmp")
@@ -436,12 +457,145 @@ class ZetsuAgentCoordinator:
         finally:
             temporary.unlink(missing_ok=True)
         return {
-            "patch": patch if len(patch) <= max_chars else None,
-            "patch_inline": len(patch) <= max_chars,
+            "patch": None,
+            "patch_inline": False,
             "patch_chars": len(patch),
             "patch_sha256": digest,
             "patch_path": str(artifact),
         }
+
+    def handoff_evidence(self, session_id: str, *, max_chars: int) -> JsonObject:
+        """Expand a persisted exact handoff only when an authorized caller asks."""
+
+        artifact = self.checkpoints.path(session_id).with_suffix(".patch")
+        if not artifact.is_file():
+            raise ServiceTierError("zetsu_agent_handoff_patch_unavailable")
+        try:
+            size = artifact.stat().st_size
+            content = artifact.read_text(encoding="utf-8") if size <= max_chars else None
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ServiceTierError("zetsu_agent_handoff_patch_unavailable") from exc
+        try:
+            digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise ServiceTierError("zetsu_agent_handoff_patch_unavailable") from exc
+        return {
+            "patch": content,
+            "patch_inline": content is not None,
+            "patch_chars": size,
+            "patch_sha256": digest,
+            "patch_path": str(artifact),
+        }
+
+    def _apply_verified_handoff(
+        self,
+        ctx: AgentRunContext,
+        state: AgentExecutionState,
+        handoff: Mapping[str, object],
+    ) -> JsonObject:
+        """Promote one verified patch into its clean, revision-bound repository."""
+
+        if not ctx.apply_to_repository:
+            return {"requested": False, "applied": False}
+        if not self._finish_allowed(state) or state.mutation_epoch < 1 or not state.changed_paths:
+            raise ServiceTierError("zetsu_agent_apply_without_verified_mutation")
+        patch_path_value = handoff.get("patch_path")
+        patch_sha = handoff.get("patch_sha256")
+        if not isinstance(patch_path_value, str) or not isinstance(patch_sha, str):
+            raise ServiceTierError("zetsu_agent_handoff_patch_unavailable")
+        try:
+            patch_path = Path(patch_path_value).resolve(strict=True)
+        except OSError as exc:
+            raise ServiceTierError("zetsu_agent_handoff_patch_unavailable") from exc
+        if patch_path != self.checkpoints.path(ctx.session_id).with_suffix(".patch"):
+            raise ServiceTierError("zetsu_agent_handoff_patch_identity_mismatch")
+        try:
+            observed_patch_sha = hashlib.sha256(patch_path.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise ServiceTierError("zetsu_agent_handoff_patch_unavailable") from exc
+        if observed_patch_sha != patch_sha:
+            raise ServiceTierError("zetsu_agent_handoff_patch_identity_mismatch")
+
+        try:
+            target = Path(ctx.binding.canonical_repository_root).resolve(strict=True)
+        except OSError as exc:
+            raise ServiceTierError("zetsu_agent_apply_target_unavailable") from exc
+        if target == ctx.worktree:
+            raise ServiceTierError("zetsu_agent_apply_target_not_isolated")
+        for relative in state.changed_paths:
+            self._relative_target(target, relative)
+        with self._target_lock(target):
+            head, status_sha, changed = self._worktree_state(target)
+            if state.applied_patch_sha256:
+                if (
+                    state.applied_patch_sha256 == patch_sha
+                    and head == state.target_initial_head
+                    and status_sha == state.target_applied_status_sha256
+                    and changed == state.changed_paths
+                ):
+                    return {
+                        "requested": True,
+                        "applied": True,
+                        "already_applied": True,
+                        "target_status_sha256": status_sha,
+                    }
+                raise ServiceTierError("zetsu_agent_apply_target_drift")
+            if head == state.target_initial_head and changed:
+                target_patch_sha = hashlib.sha256(
+                    self._exact_patch(target, changed).encode("utf-8")
+                ).hexdigest()
+                if changed == state.changed_paths and target_patch_sha == patch_sha:
+                    state.applied_patch_sha256 = patch_sha
+                    state.target_applied_status_sha256 = status_sha
+                    return {
+                        "requested": True,
+                        "applied": True,
+                        "already_applied": True,
+                        "recovered_after_checkpoint_gap": True,
+                        "target_status_sha256": status_sha,
+                    }
+                raise ServiceTierError("zetsu_agent_apply_target_drift")
+            if (
+                head != state.target_initial_head
+                or status_sha != state.target_initial_status_sha256
+                or changed
+            ):
+                raise ServiceTierError("zetsu_agent_apply_target_drift")
+            checked = self._run_git(
+                target,
+                ["apply", "--check", "--whitespace=error-all", str(patch_path)],
+            )
+            if checked.returncode != 0:
+                raise ServiceTierError(
+                    "zetsu_agent_apply_check_failed", {"stderr": checked.stderr[-2_000:]}
+                )
+            applied = self._run_git(
+                target,
+                ["apply", "--whitespace=error-all", str(patch_path)],
+            )
+            if applied.returncode != 0:
+                raise ServiceTierError(
+                    "zetsu_agent_apply_failed", {"stderr": applied.stderr[-2_000:]}
+                )
+            after_head, after_status, after_changed = self._worktree_state(target)
+            diff_check = self._run_git(target, ["diff", "--check"])
+            if (
+                after_head != state.target_initial_head
+                or after_changed != state.changed_paths
+                or diff_check.returncode != 0
+            ):
+                rolled_back = self._run_git(target, ["apply", "--reverse", str(patch_path)])
+                if rolled_back.returncode != 0:
+                    raise ServiceTierError("zetsu_agent_apply_rollback_failed")
+                raise ServiceTierError("zetsu_agent_apply_postcondition_failed")
+            state.applied_patch_sha256 = patch_sha
+            state.target_applied_status_sha256 = after_status
+            return {
+                "requested": True,
+                "applied": True,
+                "already_applied": False,
+                "target_status_sha256": after_status,
+            }
 
     @staticmethod
     def _check_text(value: str, *, maximum: int) -> None:
@@ -488,14 +642,34 @@ class ZetsuAgentCoordinator:
         return "\n".join(matches) if matches else "NO_MATCHES"
 
     def _read(self, worktree: Path, action: Mapping[str, object]) -> str:
-        target = self._relative_target(worktree, action.get("path"))
-        if not target.is_file() or target.stat().st_size > 2_000_000:
-            raise ServiceTierError("zetsu_agent_read_target_unavailable")
-        try:
-            text = target.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            raise ServiceTierError("zetsu_agent_read_target_not_text") from exc
-        return text[:_MAX_READ_CHARS]
+        values = action.get("paths")
+        if values is None:
+            values = [action.get("path")]
+        if (
+            not isinstance(values, Sequence)
+            or isinstance(values, (str, bytes))
+            or not 1 <= len(values) <= 8
+            or len(set(str(item) for item in values)) != len(values)
+        ):
+            raise ServiceTierError("zetsu_agent_read_paths_invalid")
+        result: dict[str, str] = {}
+        remaining = _MAX_READ_CHARS
+        for value in values:
+            target = self._relative_target(worktree, value)
+            if not target.is_file() or target.stat().st_size > 2_000_000:
+                raise ServiceTierError("zetsu_agent_read_target_unavailable")
+            try:
+                content = target.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise ServiceTierError("zetsu_agent_read_target_not_text") from exc
+            relative = target.relative_to(worktree).as_posix()
+            result[relative] = content[:remaining]
+            remaining -= len(result[relative])
+            if remaining <= 0:
+                break
+        if len(result) == 1 and action.get("paths") is None:
+            return next(iter(result.values()))
+        return json.dumps(result, sort_keys=True, ensure_ascii=False)
 
     def _retrieve(
         self, ctx: AgentRunContext, state: AgentExecutionState, action: Mapping[str, object]
@@ -525,29 +699,53 @@ class ZetsuAgentCoordinator:
 
     def _edit(self, ctx: AgentRunContext, action: Mapping[str, object]) -> str:
         self._require_edit_policy(ctx.binding.tool_policy)
-        target = self._relative_target(ctx.worktree, action.get("path"))
-        old = action.get("old_text")
-        new = action.get("new_text")
-        if not isinstance(old, str) or not old or not isinstance(new, str):
+        edits = action.get("edits")
+        if edits is None:
+            edits = [action]
+        if (
+            not isinstance(edits, Sequence)
+            or isinstance(edits, (str, bytes))
+            or not 1 <= len(edits) <= 16
+            or not all(isinstance(item, Mapping) for item in edits)
+        ):
             raise ServiceTierError("zetsu_agent_edit_invalid")
-        self._check_text(old, maximum=_MAX_NEW_FILE_CHARS)
-        self._check_text(new, maximum=_MAX_NEW_FILE_CHARS)
-        if not target.is_file():
-            raise ServiceTierError("zetsu_agent_edit_target_unavailable")
+        originals: dict[Path, str] = {}
+        updated: dict[Path, str] = {}
+        for item in edits:
+            target = self._relative_target(ctx.worktree, item.get("path"))
+            old = item.get("old_text")
+            new = item.get("new_text")
+            if not isinstance(old, str) or not old or not isinstance(new, str):
+                raise ServiceTierError("zetsu_agent_edit_invalid")
+            self._check_text(old, maximum=_MAX_NEW_FILE_CHARS)
+            self._check_text(new, maximum=_MAX_NEW_FILE_CHARS)
+            if not target.is_file():
+                raise ServiceTierError("zetsu_agent_edit_target_unavailable")
+            if target not in originals:
+                try:
+                    originals[target] = target.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as exc:
+                    raise ServiceTierError("zetsu_agent_edit_target_not_text") from exc
+            current = updated.get(target, originals[target])
+            if current.count(old) != 1:
+                raise ServiceTierError("zetsu_agent_edit_anchor_not_unique")
+            replacement = current.replace(old, new, 1)
+            self._check_text(replacement, maximum=_MAX_NEW_FILE_CHARS)
+            updated[target] = replacement
         try:
-            original = target.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            raise ServiceTierError("zetsu_agent_edit_target_not_text") from exc
-        if original.count(old) != 1:
-            raise ServiceTierError("zetsu_agent_edit_anchor_not_unique")
-        target.write_text(original.replace(old, new, 1), encoding="utf-8")
-        check = self._run_git(ctx.worktree, ["diff", "--check"])
-        if check.returncode != 0:
-            target.write_text(original, encoding="utf-8")
-            raise ServiceTierError(
-                "zetsu_agent_edit_diff_check_failed", {"stderr": check.stderr[-2_000:]}
-            )
-        return f"EDITED:{target.relative_to(ctx.worktree).as_posix()}"
+            for target, replacement in updated.items():
+                target.write_text(replacement, encoding="utf-8")
+            check = self._run_git(ctx.worktree, ["diff", "--check"])
+            if check.returncode != 0:
+                raise ServiceTierError(
+                    "zetsu_agent_edit_diff_check_failed", {"stderr": check.stderr[-2_000:]}
+                )
+        except (OSError, ServiceTierError):
+            for target, original in originals.items():
+                target.write_text(original, encoding="utf-8")
+            raise
+        paths = ",".join(sorted(path.relative_to(ctx.worktree).as_posix() for path in updated))
+        return f"EDITED:{paths}:replacements={len(edits)}"
 
     def _create(self, ctx: AgentRunContext, action: Mapping[str, object]) -> str:
         self._require_edit_policy(ctx.binding.tool_policy)
@@ -877,6 +1075,8 @@ class ZetsuAgentCoordinator:
             "model_id": state.model_id,
             "context_limit": state.context_limit,
             "required_verification_argv": state.required_verification_argv,
+            "target_initial_head": state.target_initial_head,
+            "applied_patch_sha256": state.applied_patch_sha256,
             "validation_history": validation_summary,
             "unresolved_failures": state.unresolved_failures,
             "evidence_refs": state.evidence_refs,
@@ -991,6 +1191,11 @@ class ZetsuAgentCoordinator:
             "last_verified_epoch": state.last_verified_epoch,
             "command_count": state.command_count,
             "consumed_wall_seconds": round(consumed, 6),
+            "apply_to_repository": ctx.apply_to_repository,
+            "target_initial_head": state.target_initial_head,
+            "target_initial_status_sha256": state.target_initial_status_sha256,
+            "target_applied_status_sha256": state.target_applied_status_sha256,
+            "applied_patch_sha256": state.applied_patch_sha256,
             "step_limit": ctx.max_steps,
             "max_chars": ctx.max_chars,
             "compaction_ratio": ctx.compaction_ratio,
@@ -1026,6 +1231,7 @@ class ZetsuAgentCoordinator:
             raw.get("step_limit") != ctx.max_steps
             or raw.get("max_chars") != ctx.max_chars
             or raw.get("compaction_ratio") != ctx.compaction_ratio
+            or raw.get("apply_to_repository", False) is not ctx.apply_to_repository
         ):
             raise ServiceTierError("zetsu_agent_resume_budget_mismatch")
         expected_tool_policy: JsonObject = {
@@ -1071,6 +1277,12 @@ class ZetsuAgentCoordinator:
             if not isinstance(value, str) or len(value) > maximum or "\x00" in value:
                 raise ServiceTierError("zetsu_agent_checkpoint_state_invalid")
             if not allow_empty and not value:
+                raise ServiceTierError("zetsu_agent_checkpoint_state_invalid")
+            return value
+
+        def optional_string(name: str, *, maximum: int) -> str:
+            value = raw.get(name, "")
+            if not isinstance(value, str) or len(value) > maximum or "\x00" in value:
                 raise ServiceTierError("zetsu_agent_checkpoint_state_invalid")
             return value
 
@@ -1127,6 +1339,33 @@ class ZetsuAgentCoordinator:
             raise ServiceTierError("zetsu_agent_checkpoint_state_invalid")
         command_count = integer("command_count")
         consumed_wall_seconds = number("consumed_wall_seconds")
+        target_initial_head = optional_string("target_initial_head", maximum=128)
+        target_initial_status_sha256 = optional_string("target_initial_status_sha256", maximum=64)
+        target_applied_status_sha256 = optional_string("target_applied_status_sha256", maximum=64)
+        applied_patch_sha256 = optional_string("applied_patch_sha256", maximum=64)
+        for digest in (
+            target_initial_status_sha256,
+            target_applied_status_sha256,
+            applied_patch_sha256,
+        ):
+            if digest and (len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest)):
+                raise ServiceTierError("zetsu_agent_checkpoint_state_invalid")
+        if ctx.apply_to_repository:
+            if (
+                target_initial_head != ctx.binding.base_revision
+                or not target_initial_status_sha256
+                or bool(target_applied_status_sha256) is not bool(applied_patch_sha256)
+            ):
+                raise ServiceTierError("zetsu_agent_checkpoint_state_invalid")
+        elif any(
+            (
+                target_initial_head,
+                target_initial_status_sha256,
+                target_applied_status_sha256,
+                applied_patch_sha256,
+            )
+        ):
+            raise ServiceTierError("zetsu_agent_checkpoint_state_invalid")
 
         state = AgentExecutionState(
             objective=instruction,
@@ -1152,6 +1391,10 @@ class ZetsuAgentCoordinator:
             last_verified_epoch=last_verified_raw,
             command_count=command_count,
             consumed_wall_seconds=consumed_wall_seconds,
+            target_initial_head=target_initial_head,
+            target_initial_status_sha256=target_initial_status_sha256,
+            target_applied_status_sha256=target_applied_status_sha256,
+            applied_patch_sha256=applied_patch_sha256,
             telemetry=AgentTelemetry.from_mapping(raw.get("telemetry")),
         )
         if not (
@@ -1234,6 +1477,7 @@ class ZetsuAgentCoordinator:
         max_chars: int = 8_000,
         compaction_ratio: float = 0.80,
         verification_argv: Sequence[str] | None = None,
+        apply_to_repository: bool = False,
     ) -> JsonObject:
         if session_id is None:
             return self._run_unlocked(
@@ -1246,6 +1490,7 @@ class ZetsuAgentCoordinator:
                 max_chars=max_chars,
                 compaction_ratio=compaction_ratio,
                 verification_argv=verification_argv,
+                apply_to_repository=apply_to_repository,
             )
         lock = self._session_lock(session_id)
         if not lock.acquire(blocking=False):
@@ -1261,6 +1506,7 @@ class ZetsuAgentCoordinator:
                 max_chars=max_chars,
                 compaction_ratio=compaction_ratio,
                 verification_argv=verification_argv,
+                apply_to_repository=apply_to_repository,
             )
         finally:
             lock.release()
@@ -1277,6 +1523,7 @@ class ZetsuAgentCoordinator:
         max_chars: int = 8_000,
         compaction_ratio: float = 0.80,
         verification_argv: Sequence[str] | None = None,
+        apply_to_repository: bool = False,
     ) -> JsonObject:
         if lane not in {ModelLane.QUALITY, ModelLane.STANDARD}:
             raise ServiceTierError("zetsu_agent_lane_invalid")
@@ -1286,6 +1533,10 @@ class ZetsuAgentCoordinator:
             raise ServiceTierError("zetsu_agent_budget_invalid")
         if not 0.75 <= compaction_ratio <= 0.85:
             raise ServiceTierError("zetsu_agent_compaction_ratio_invalid")
+        if not isinstance(apply_to_repository, bool):
+            raise ServiceTierError("zetsu_agent_apply_mode_invalid")
+        if apply_to_repository and verification_argv is None:
+            raise ServiceTierError("zetsu_agent_apply_requires_verifier")
 
         effective_session = session_id or f"zetsu-{uuid.uuid4().hex}"
         creating = session_id is None
@@ -1348,6 +1599,7 @@ class ZetsuAgentCoordinator:
             required_verification_argv=required_verification_argv,
             run_started=run_started,
             remaining_wall_seconds=remaining_wall,
+            apply_to_repository=apply_to_repository,
         )
         state = (
             AgentExecutionState(
@@ -1369,7 +1621,17 @@ class ZetsuAgentCoordinator:
             state.worktree_head = head
             state.worktree_status_sha256 = status_sha256
             state.changed_paths = changed
-        if state.step >= max_steps:
+            if apply_to_repository:
+                target = Path(binding.canonical_repository_root).resolve(strict=True)
+                target_head, target_status, target_changed = self._worktree_state(target)
+                if target_head != binding.base_revision or target_changed:
+                    raise ServiceTierError("zetsu_agent_apply_target_not_clean")
+                state.target_initial_head = target_head
+                state.target_initial_status_sha256 = target_status
+        resume_verified_finish = (
+            not creating and state.next_state == "finished" and self._finish_allowed(state)
+        )
+        if state.step >= max_steps and not resume_verified_finish:
             raise ServiceTierError("zetsu_agent_step_budget_exhausted")
 
         self.tiered.sandboxes.start_task(
@@ -1380,11 +1642,16 @@ class ZetsuAgentCoordinator:
             instruction_digest=digest,
         )
         threshold = int(route.context_limit * compaction_ratio)
-        status = "INCOMPLETE"
-        final_result = ""
+        status = "SUCCESS" if resume_verified_finish else "INCOMPLETE"
+        final_result = (
+            "Resumed from a persisted caller-verified finish state."
+            if resume_verified_finish
+            else ""
+        )
         failure_category: str | None = None
         try:
-            for step in range(state.step + 1, max_steps + 1):
+            pending_steps = () if resume_verified_finish else range(state.step + 1, max_steps + 1)
+            for step in pending_steps:
                 state.step = step
                 self._ensure_active(ctx, state)
                 messages = self._messages(state)
@@ -1477,6 +1744,16 @@ class ZetsuAgentCoordinator:
                 state.recent_observations = state.recent_observations[-_MAX_RECENT_OBSERVATIONS:]
                 state.next_state = "choose_action"
                 self._checkpoint(ctx, state)
+                if (
+                    action_name == "verify"
+                    and state.mutation_epoch > 0
+                    and self._finish_allowed(state)
+                ):
+                    final_result = "Caller-selected deterministic verification passed after the latest mutation."
+                    status = "SUCCESS"
+                    state.next_state = "finished"
+                    self._checkpoint(ctx, state)
+                    break
             if status != "SUCCESS":
                 failure_category = "max_steps_exhausted"
         except (AgentSandboxError, CorpusError) as exc:
@@ -1506,6 +1783,23 @@ class ZetsuAgentCoordinator:
         state.worktree_head = head
         state.worktree_status_sha256 = worktree_status_sha256
         state.changed_paths = changed
+        if not final_result:
+            final_result = "Maximum bounded agent steps reached before verified finish."
+        truncated = len(final_result) > max_chars
+        if truncated:
+            final_result = final_result[: max_chars - 1].rstrip() + "…"
+        handoff = self._handoff_patch(
+            worktree,
+            effective_session,
+            changed,
+            max_chars=max_chars,
+        )
+        try:
+            promotion = self._apply_verified_handoff(ctx, state, handoff)
+            self._checkpoint(replace(ctx, run_started=time.monotonic()), state)
+        except ServiceTierError as exc:
+            self._record_failure_best_effort(ctx, state, exc.category)
+            raise
         verification_summary = (
             f"PASSED:verified_epoch={state.last_verified_epoch}"
             if status == "SUCCESS"
@@ -1517,17 +1811,6 @@ class ZetsuAgentCoordinator:
             command_count=state.command_count,
             verification_summary=verification_summary,
             failed=status != "SUCCESS",
-        )
-        if not final_result:
-            final_result = "Maximum bounded agent steps reached before verified finish."
-        truncated = len(final_result) > max_chars
-        if truncated:
-            final_result = final_result[: max_chars - 1].rstrip() + "…"
-        handoff = self._handoff_patch(
-            worktree,
-            effective_session,
-            changed,
-            max_chars=max_chars,
         )
         return {
             "status": status,
@@ -1543,6 +1826,7 @@ class ZetsuAgentCoordinator:
             "evidence_refs": state.evidence_refs,
             "checkpoint_path": str(self.checkpoints.path(effective_session)),
             "handoff": handoff,
+            "promotion": promotion,
             "truncated": truncated,
             "max_chars": max_chars,
             "elapsed_seconds": round(time.monotonic() - run_started, 3),

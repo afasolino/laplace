@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import threading
@@ -9,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from research_workspace.agent_sandbox import AgentSessionBinding, AgentToolPolicy
-from research_workspace.service_tiers import ModelLane, ServiceTierError
+from research_workspace.service_tiers import LanePolicy, ModelLane, ModelRoute, ServiceTierError
 from research_workspace.zetsu_agent import (
     AgentCheckpointStore,
     AgentExecutionState,
@@ -364,12 +365,316 @@ def test_handoff_patch_preserves_tracked_and_new_file_code(tmp_path: Path) -> No
         ["created.py", "existing.py"],
         max_chars=8_000,
     )
-    assert result["patch_inline"] is True
-    assert "-old = 1" in str(result["patch"])
-    assert "+old = 2" in str(result["patch"])
-    assert "+created = True" in str(result["patch"])
+    assert result["patch_inline"] is False
+    assert result["patch"] is None
     artifact = Path(str(result["patch_path"]))
-    assert artifact.read_text(encoding="utf-8") == result["patch"]
+    exact = artifact.read_text(encoding="utf-8")
+    assert "-old = 1" in exact
+    assert "+old = 2" in exact
+    assert "+created = True" in exact
+    expanded = coordinator.handoff_evidence("handoff-session", max_chars=8_000)
+    assert expanded["patch_inline"] is True
+    assert expanded["patch"] == exact
+    assert expanded["patch_sha256"] == result["patch_sha256"]
+
+
+def test_verified_handoff_promotes_once_and_rejects_target_drift(tmp_path: Path) -> None:
+    canonical = tmp_path / "canonical"
+    internal = tmp_path / "internal"
+    canonical.mkdir()
+    subprocess.run(["git", "init", "-q", str(canonical)], check=True)
+    subprocess.run(
+        ["git", "-C", str(canonical), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(canonical), "config", "user.name", "Test"], check=True)
+    (canonical / "existing.py").write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(canonical), "add", "existing.py"], check=True)
+    subprocess.run(["git", "-C", str(canonical), "commit", "-qm", "base"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(canonical), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-C", str(canonical), "worktree", "add", "-q", "--detach", str(internal), head],
+        check=True,
+    )
+    (internal / "existing.py").write_text("value = 2\n", encoding="utf-8")
+    (internal / "created.py").write_text("created = True\n", encoding="utf-8")
+
+    coordinator = ZetsuAgentCoordinator(
+        _Tiered(internal), checkpoint_store=AgentCheckpointStore(tmp_path / "checkpoints")
+    )
+    target_head, target_status, _ = coordinator._worktree_state(canonical)
+    binding = AgentSessionBinding(
+        session_id="promotion-session",
+        user_id="user-a",
+        repo_id="repo",
+        canonical_repository_root=str(canonical),
+        worktree_root=str(internal),
+        base_revision=head,
+        grant_revision=1,
+        tool_policy=AgentToolPolicy(
+            policy_id="test",
+            allowed_tools=("apply_patch", "run_tests"),
+            max_commands=4,
+            max_wall_seconds=60,
+        ),
+        environment={},
+        created_at_utc="2026-08-22T00:00:00+00:00",
+    )
+    ctx = AgentRunContext(
+        user_id="user-a",
+        session_id="promotion-session",
+        repo_id="repo",
+        lane=ModelLane.QUALITY,
+        binding=binding,
+        worktree=internal,
+        max_steps=12,
+        max_chars=8_000,
+        compaction_ratio=0.80,
+        model_id="test-model",
+        context_limit=131_072,
+        required_verification_argv=("pytest", "tests/test_x.py", "-q"),
+        run_started=time.monotonic(),
+        remaining_wall_seconds=60,
+        apply_to_repository=True,
+    )
+    changed = ["created.py", "existing.py"]
+    state = AgentExecutionState(
+        objective="objective",
+        changed_paths=changed,
+        mutation_epoch=1,
+        last_verified_epoch=1,
+        target_initial_head=target_head,
+        target_initial_status_sha256=target_status,
+    )
+    handoff = coordinator._handoff_patch(internal, "promotion-session", changed, max_chars=8_000)
+
+    promoted = coordinator._apply_verified_handoff(ctx, state, handoff)
+    assert promoted["applied"] is True
+    assert promoted["already_applied"] is False
+    assert (canonical / "existing.py").read_text(encoding="utf-8") == "value = 2\n"
+    assert (canonical / "created.py").read_text(encoding="utf-8") == "created = True\n"
+    assert coordinator._apply_verified_handoff(ctx, state, handoff)["already_applied"] is True
+
+    state.applied_patch_sha256 = ""
+    state.target_applied_status_sha256 = ""
+    recovered = coordinator._apply_verified_handoff(ctx, state, handoff)
+    assert recovered["already_applied"] is True
+    assert recovered["recovered_after_checkpoint_gap"] is True
+
+    (canonical / "unrelated.txt").write_text("drift\n", encoding="utf-8")
+    with pytest.raises(ServiceTierError, match="zetsu_agent_apply_target_drift"):
+        coordinator._apply_verified_handoff(ctx, state, handoff)
+
+
+def test_batched_read_and_edit_are_bounded_and_transactional(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "a.py").write_text("a = 1\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("b = 1\n", encoding="utf-8")
+    coordinator = ZetsuAgentCoordinator(
+        _Tiered(tmp_path), checkpoint_store=AgentCheckpointStore(tmp_path / "checkpoints")
+    )
+    ctx = _ctx(tmp_path, session="batch-session", user="user-a")
+
+    read = coordinator._read(tmp_path, {"paths": ["a.py", "b.py"]})
+    assert '"a.py": "a = 1\\n"' in read
+    assert '"b.py": "b = 1\\n"' in read
+    edited = coordinator._edit(
+        ctx,
+        {
+            "edits": [
+                {"path": "a.py", "old_text": "a = 1", "new_text": "a = 2"},
+                {"path": "b.py", "old_text": "b = 1", "new_text": "b = 2"},
+            ]
+        },
+    )
+    assert edited == "EDITED:a.py,b.py:replacements=2"
+    assert (tmp_path / "a.py").read_text(encoding="utf-8") == "a = 2\n"
+    assert (tmp_path / "b.py").read_text(encoding="utf-8") == "b = 2\n"
+
+
+def test_agent_stops_after_bound_verifier_and_promotes_without_final_model_call(
+    tmp_path: Path,
+) -> None:
+    canonical = tmp_path / "canonical"
+    internal = tmp_path / "internal"
+    canonical.mkdir()
+    subprocess.run(["git", "init", "-q", str(canonical)], check=True)
+    subprocess.run(
+        ["git", "-C", str(canonical), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(canonical), "config", "user.name", "Test"], check=True)
+    (canonical / "source.py").write_text("VALUE = 1\n", encoding="utf-8")
+    tests = canonical / "tests"
+    tests.mkdir()
+    (tests / "test_value.py").write_text(
+        "from pathlib import Path\n\ndef test_value():\n"
+        "    assert (Path(__file__).parents[1] / 'source.py').read_text() == 'VALUE = 2\\n'\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(canonical), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(canonical), "commit", "-qm", "base"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(canonical), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-C", str(canonical), "worktree", "add", "-q", "--detach", str(internal), head],
+        check=True,
+    )
+    binding = AgentSessionBinding(
+        session_id="unused",
+        user_id="user-a",
+        repo_id="repo",
+        canonical_repository_root=str(canonical),
+        worktree_root=str(internal),
+        base_revision=head,
+        grant_revision=1,
+        tool_policy=AgentToolPolicy(
+            policy_id="zetsu-qwen-agent-v2",
+            allowed_tools=("apply_patch", "run_tests"),
+            network_enabled=False,
+            max_commands=24,
+            max_wall_seconds=1_800,
+        ),
+        environment={},
+        created_at_utc="2026-08-22T00:00:00+00:00",
+    )
+
+    class Sandboxes:
+        sandbox_root = tmp_path / "sandboxes"
+
+        @staticmethod
+        def require_active(_session_id: str, *, user_id: str) -> AgentSessionBinding:
+            assert user_id == "user-a"
+            return binding
+
+        @staticmethod
+        def start_task(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        @staticmethod
+        def record_result(*_args: object, **_kwargs: object) -> dict[str, object]:
+            return {"status": "DIRTY"}
+
+    class Tiered:
+        sandboxes = Sandboxes()
+        lane_policy = LanePolicy(
+            {
+                ModelLane.QUALITY: ModelRoute(
+                    ModelLane.QUALITY,
+                    "test-qwen",
+                    "http://127.0.0.1:1",
+                    0,
+                    131_072,
+                    4096,
+                ),
+                ModelLane.STANDARD: ModelRoute(
+                    ModelLane.STANDARD,
+                    "test-qwen",
+                    "http://127.0.0.1:1",
+                    10,
+                    131_072,
+                    2048,
+                ),
+                ModelLane.ECONOMY: ModelRoute(
+                    ModelLane.ECONOMY,
+                    "codev",
+                    "http://127.0.0.1:2",
+                    20,
+                    8192,
+                    2048,
+                ),
+            }
+        )
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        @staticmethod
+        def create_agent_session(**_kwargs: object) -> dict[str, object]:
+            return {"status": "ACTIVE"}
+
+        @staticmethod
+        def agent_session_status(**_kwargs: object) -> dict[str, object]:
+            return {"status": "RUNNING"}
+
+        def chat(self, **_kwargs: object) -> dict[str, object]:
+            actions = (
+                {
+                    "action": "edit",
+                    "edits": [
+                        {
+                            "path": "source.py",
+                            "old_text": "VALUE = 1",
+                            "new_text": "VALUE = 2",
+                        }
+                    ],
+                },
+                {
+                    "action": "verify",
+                    "argv": ["pytest", "tests/test_value.py", "-q"],
+                },
+            )
+            if self.calls >= len(actions):
+                raise AssertionError("unexpected final model call")
+            action = actions[self.calls]
+            self.calls += 1
+            return {
+                "response": {
+                    "content": json.dumps(action),
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 10},
+                }
+            }
+
+    tiered = Tiered()
+    coordinator = ZetsuAgentCoordinator(
+        tiered, checkpoint_store=AgentCheckpointStore(tmp_path / "checkpoints")
+    )
+    result = coordinator.run(
+        user_id="user-a",
+        repo_id="repo",
+        instruction="Change VALUE to 2.",
+        lane=ModelLane.QUALITY,
+        max_steps=12,
+        max_chars=4_000,
+        verification_argv=["pytest", "tests/test_value.py", "-q"],
+        apply_to_repository=True,
+    )
+
+    assert tiered.calls == 2
+    assert result["status"] == "SUCCESS"
+    assert result["promotion"] == {
+        "requested": True,
+        "applied": True,
+        "already_applied": False,
+        "target_status_sha256": result["promotion"]["target_status_sha256"],
+    }
+    assert result["verification"]["passed"] is True
+    assert result["unresolved_failures"] == []
+    assert (canonical / "source.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+
+    resumed = coordinator.run(
+        user_id="user-a",
+        repo_id="repo",
+        instruction="Change VALUE to 2.",
+        lane=ModelLane.QUALITY,
+        session_id=result["session_id"],
+        max_steps=12,
+        max_chars=4_000,
+        verification_argv=["pytest", "tests/test_value.py", "-q"],
+        apply_to_repository=True,
+    )
+    assert tiered.calls == 2
+    assert resumed["status"] == "SUCCESS"
+    assert resumed["promotion"]["already_applied"] is True
 
 
 def test_compaction_preserves_exact_state_and_can_continue(tmp_path: Path) -> None:

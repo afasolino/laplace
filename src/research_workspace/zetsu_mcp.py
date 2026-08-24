@@ -33,16 +33,14 @@ from .zetsu_context import (
 
 JsonObject: TypeAlias = dict[str, object]
 
-ZETSU_SCHEMA_VERSION = "1.2"
-ZETSU_SKILL_VERSION = "1.2.0"
+ZETSU_SCHEMA_VERSION = "1.3"
+ZETSU_SKILL_VERSION = "1.3.0"
 MCP_LATEST_PROTOCOL_VERSION = "2026-07-28"
 MCP_LEGACY_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
 MCP_SUPPORTED_PROTOCOL_VERSIONS = (MCP_LATEST_PROTOCOL_VERSION, *MCP_LEGACY_PROTOCOL_VERSIONS)
 ZETSU_INSTRUCTIONS = (
-    "Use Zetsu for compact owner-authorized evidence and persistent Laplace memory. "
-    "Use Codex local repository and shell directly for simple current-checkout work; expand "
-    "only selected evidence IDs. Use agent_task for coherent bounded Qwen repository work. "
-    "CodeV remains restricted to policy-eligible RTL implementation/repair with verification."
+    "Local work stays in Codex. Zetsu supplies compact evidence, verified Qwen repository "
+    "tasks, and policy-bounded CodeV RTL; expand exact evidence only when needed."
 )
 
 
@@ -88,10 +86,7 @@ def _verification_argv(value: object) -> list[str] | None:
         not isinstance(value, list)
         or not 1 <= len(value) <= 64
         or any(
-            not isinstance(item, str)
-            or not item
-            or len(item) > 1_000
-            or "\x00" in item
+            not isinstance(item, str) or not item or len(item) > 1_000 or "\x00" in item
             for item in value
         )
     ):
@@ -113,6 +108,13 @@ def _telemetry_requested(args: Mapping[str, object]) -> bool:
     return value
 
 
+def _boolean(args: Mapping[str, object], name: str, *, default: bool = False) -> bool:
+    value = args.get(name, default)
+    if not isinstance(value, bool):
+        raise ZetsuError(f"invalid_{name}")
+    return value
+
+
 def _schema(properties: JsonObject, required: tuple[str, ...]) -> JsonObject:
     return {
         "type": "object",
@@ -129,7 +131,7 @@ def tool_definitions() -> tuple[JsonObject, ...]:
     return (
         {
             "name": "search",
-            "description": "Compact ranked owner-authorized evidence with exact chunk provenance.",
+            "description": "Search compact owner evidence with provenance.",
             "inputSchema": _schema(
                 {
                     "query": query,
@@ -144,7 +146,7 @@ def tool_definitions() -> tuple[JsonObject, ...]:
         },
         {
             "name": "get_evidence",
-            "description": "Expand only selected evidence chunk IDs within a hard response budget.",
+            "description": "Expand selected evidence chunk IDs.",
             "inputSchema": _schema(
                 {
                     "chunk_ids": {
@@ -163,7 +165,7 @@ def tool_definitions() -> tuple[JsonObject, ...]:
         },
         {
             "name": "project_context",
-            "description": "Compact persistent project context; expand selected chunks only.",
+            "description": "Retrieve compact persistent project context.",
             "inputSchema": _schema(
                 {
                     "query": query,
@@ -177,7 +179,7 @@ def tool_definitions() -> tuple[JsonObject, ...]:
         },
         {
             "name": "experiment_context",
-            "description": "Compact prior experiment/result context with preserved provenance.",
+            "description": "Retrieve compact experiment context.",
             "inputSchema": _schema(
                 {
                     "query": query,
@@ -191,7 +193,7 @@ def tool_definitions() -> tuple[JsonObject, ...]:
         },
         {
             "name": "delegate",
-            "description": "Bounded Qwen supervisor reasoning with no repository or shell access.",
+            "description": "Run bounded Qwen reasoning without tools.",
             "inputSchema": _schema(
                 {
                     "instruction": {"type": "string", "minLength": 1, "maxLength": 40_000},
@@ -206,10 +208,7 @@ def tool_definitions() -> tuple[JsonObject, ...]:
         },
         {
             "name": "agent_task",
-            "description": (
-                "Bounded autonomous Qwen repository task with isolated inspect/edit/verify and "
-                "rolling context compaction."
-            ),
+            "description": "Run an isolated verified Qwen repository task with optional promotion.",
             "inputSchema": _schema(
                 {
                     "repo_id": {"type": "string", "minLength": 1, "maxLength": 128},
@@ -229,15 +228,20 @@ def tool_definitions() -> tuple[JsonObject, ...]:
                         "maxItems": 64,
                         "items": {"type": "string", "minLength": 1, "maxLength": 1_000},
                     },
+                    "apply_to_repository": {"type": "boolean"},
                     "telemetry": {"type": "boolean"},
                 },
                 ("repo_id", "instruction"),
             ),
-            "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+            "annotations": {
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "openWorldHint": False,
+            },
         },
         {
             "name": "rtl_task",
-            "description": "Policy-bounded CodeV RTL implementation/repair in an existing worktree.",
+            "description": "Run a policy-bounded CodeV RTL task.",
             "inputSchema": _schema(
                 {
                     "session_id": {
@@ -270,11 +274,15 @@ def tool_definitions() -> tuple[JsonObject, ...]:
                     "module_count",
                 ),
             ),
-            "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+            "annotations": {
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "openWorldHint": False,
+            },
         },
         {
             "name": "verify",
-            "description": "Return deterministic verification evidence for an owned agent session.",
+            "description": "Return owned agent verification or exact handoff evidence.",
             "inputSchema": _schema(
                 {
                     "session_id": {
@@ -282,7 +290,9 @@ def tool_definitions() -> tuple[JsonObject, ...]:
                         "minLength": 1,
                         "maxLength": 128,
                         "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
-                    }
+                    },
+                    "include_patch": {"type": "boolean"},
+                    "max_chars": budget,
                 },
                 ("session_id",),
             ),
@@ -317,6 +327,7 @@ _TOOL_ARGUMENTS: Mapping[str, frozenset[str]] = {
             "max_steps",
             "max_chars",
             "verification_argv",
+            "apply_to_repository",
             "telemetry",
         }
     ),
@@ -331,8 +342,56 @@ _TOOL_ARGUMENTS: Mapping[str, frozenset[str]] = {
             "max_chars",
         }
     ),
-    "verify": frozenset({"session_id"}),
+    "verify": frozenset({"session_id", "include_patch", "max_chars"}),
 }
+
+
+def _compact_verification(value: object) -> JsonObject | None:
+    if not isinstance(value, Mapping):
+        return None
+    return {
+        key: value.get(key)
+        for key in (
+            "argv",
+            "command_id",
+            "returncode",
+            "passed",
+            "aborted_category",
+            "qualifies_for_mutation",
+            "mutation_epoch",
+            "worktree_mutated",
+        )
+    }
+
+
+def _compact_agent_result(result: Mapping[str, object]) -> JsonObject:
+    handoff = result.get("handoff")
+    handoff_ref = (
+        {key: handoff.get(key) for key in ("patch_chars", "patch_sha256", "patch_path")}
+        if isinstance(handoff, Mapping)
+        else None
+    )
+    content = result.get("content")
+    short_result = str(content)[:512] if isinstance(content, str) else ""
+    compact: JsonObject = {
+        "status": result.get("status"),
+        "session_id": result.get("session_id"),
+        "repo_id": result.get("repo_id"),
+        "model_id": result.get("model_id"),
+        "effective_lane": result.get("effective_lane"),
+        "result": short_result,
+        "changed_paths": result.get("changed_paths"),
+        "verification": _compact_verification(result.get("verification")),
+        "unresolved_failures": result.get("unresolved_failures"),
+        "evidence_refs": result.get("evidence_refs"),
+        "checkpoint_path": result.get("checkpoint_path"),
+        "handoff": handoff_ref,
+        "promotion": result.get("promotion"),
+        "elapsed_seconds": result.get("elapsed_seconds"),
+    }
+    if isinstance(result.get("telemetry"), Mapping):
+        compact["telemetry"] = dict(cast(Mapping[str, object], result["telemetry"]))
+    return compact
 
 
 def _bounded_model_result(result: Mapping[str, object], *, max_chars: int) -> JsonObject:
@@ -452,15 +511,16 @@ class ZetsuService:
             )
             packet["context_kind"] = name
             if _telemetry_requested(args):
+                raw_results = raw.get("results") if isinstance(raw, Mapping) else None
                 packet["_telemetry"] = {
                     "token_estimate_method": "utf8_json_bytes_div4",
                     "retrieved_result_tokens_approx": _rough_tokens(raw),
-                    "selected_evidence_tokens_approx": _rough_tokens(packet.get("evidence", packet)),
+                    "selected_evidence_tokens_approx": _rough_tokens(
+                        packet.get("evidence", packet)
+                    ),
                     "payload_tokens_approx": _rough_tokens(packet),
                     "retrieved_result_count": (
-                        len(raw.get("results", []))
-                        if isinstance(raw, Mapping) and isinstance(raw.get("results"), list)
-                        else None
+                        len(raw_results) if isinstance(raw_results, list) else None
                     ),
                 }
             return packet
@@ -554,16 +614,19 @@ class ZetsuService:
                     maximum=24_000,
                 ),
                 verification_argv=verification_argv,
+                apply_to_repository=_boolean(args, "apply_to_repository"),
             )
             if not telemetry_requested:
                 result.pop("telemetry", None)
-            return result
+            return _compact_agent_result(result)
         if name == "rtl_task":
             session_id = _session_id(args.get("session_id"))
             instruction = _text(args.get("instruction"), label="instruction", maximum=40_000)
             editable = args.get("editable_sources")
-            if not isinstance(editable, list) or len(editable) != 1 or not all(
-                isinstance(item, str) and item for item in editable
+            if (
+                not isinstance(editable, list)
+                or len(editable) != 1
+                or not all(isinstance(item, str) and item for item in editable)
             ):
                 raise ZetsuError("invalid_editable_sources")
             task_kind = args.get("task_kind")
@@ -618,13 +681,24 @@ class ZetsuService:
                 "changed_paths": worktree_status.get("changed_paths"),
                 "diff_hash": worktree_status.get("diff_hash"),
             }
-        return {
+        result = {
             "status": status.get("status"),
             "session_id": session_id,
             "repo_id": status.get("repo_id"),
             "worktree_status": worktree_status,
             "verification": verification,
         }
+        if _boolean(args, "include_patch"):
+            result["handoff"] = self._agent_service().handoff_evidence(
+                session_id,
+                max_chars=_integer(
+                    args.get("max_chars", DEFAULT_MAX_CHARS),
+                    label="max_chars",
+                    minimum=512,
+                    maximum=24_000,
+                ),
+            )
+        return result
 
 
 @dataclass(frozen=True)
@@ -727,7 +801,13 @@ class ZetsuMcpDispatcher:
                 name = _text(params.get("name"), label="tool_name", maximum=128)
                 arguments = _object(params.get("arguments", {}), label="tool_arguments")
                 value = self.service.call(user_id, name, arguments)
-            except (ValueError, ZetsuError, ServiceTierError, AgentSandboxError, CorpusError) as exc:
+            except (
+                ValueError,
+                ZetsuError,
+                ServiceTierError,
+                AgentSandboxError,
+                CorpusError,
+            ) as exc:
                 category = getattr(exc, "category", str(exc))
                 result = {
                     "content": [{"type": "text", "text": json.dumps({"error": category})}],

@@ -1,0 +1,85 @@
+{
+  "schema_version": 5,
+  "benchmark_id": "zetsu-production-optimized-v4",
+  "runs_per_condition": 1,
+  "freeze_rule": "Before all six executions, hash this file and create one immutable synthetic Git commit/tree containing the audited integration changes without moving the branch. Bind every pair to that same commit+tree repository-state SHA-256, exact prompt SHA-256, gpt-5.6-terra, high reasoning, run_index=1, identical developer routing policy, and distinct fresh in-project worktrees and sessions. Standalone has no MCP. Production exposes only the normal localhost Zetsu MCP; the installed CLI automatically defers MCP schemas until tool search selects them.",
+  "tasks": [
+    {
+      "id": "local_control",
+      "kind": "read_only",
+      "prompt": "Inspect the current checkout locally and return exactly these two repository facts as two `key=path` lines, with no prose: active_selector, rollback_selector.",
+      "production_route": {
+        "expected": "local_codex",
+        "min_zetsu_calls": 0,
+        "max_zetsu_calls": 0
+      },
+      "correctness": {
+        "type": "answer_contains_paths",
+        "artifact": "final_answer.txt",
+        "required_paths": [
+          "configs/selected_serving_profiles.json",
+          "configs/selected_serving_profiles.qwen36.rollback.json"
+        ],
+        "answer_exact": "active_selector=configs/selected_serving_profiles.json\nrollback_selector=configs/selected_serving_profiles.qwen36.rollback.json\n"
+      }
+    },
+    {
+      "id": "production_context",
+      "kind": "read_only",
+      "prompt": "Inspect the frozen historical Qwen3.8 production architecture context and return exactly these twelve `key=value` lines with no prose, in this order: source_repository, source_revision, artifact_sha256, quantization_format, weight_group_size, p7_profile, p7_context_limit, p7_gpu_utilization, p7_mtp_tokens, quality_model, economy_model, rollback_quality_model.",
+      "production_route": {
+        "expected": "project_context",
+        "min_zetsu_calls": 1,
+        "max_zetsu_calls": 1
+      },
+      "correctness": {
+        "type": "answer_exact",
+        "artifact": "final_answer.txt",
+        "required_paths": [],
+        "source_paths": [
+          "configs/model_manifests/qwen38_27b_a6000.json",
+          "configs/serving_profile_candidates/P7_qwen38_w4a16_mtp.json",
+          "configs/selected_serving_profiles.json",
+          "configs/selected_serving_profiles.qwen36.rollback.json"
+        ],
+        "answer_exact": "source_repository=barrydeen/Qwen3.8-27B-AWQ-4bit\nsource_revision=e6b4b8b025f85b3e18f13281db576e0b7d5fe314\nartifact_sha256=4d72d8123b8b292edd5de9c1a3cbb7cd351eca7eb14fdf0aa996d9fcab340bb2\nquantization_format=compressed-tensors\nweight_group_size=128\np7_profile=P7_qwen38_w4a16_mtp\np7_context_limit=131072\np7_gpu_utilization=0.77\np7_mtp_tokens=3\nquality_model=laplace-quality-qwen38-mtp\neconomy_model=laplace-codev-r1-rl-qwen-7b-w4a16\nrollback_quality_model=laplace-quality-p1\n"
+      }
+    },
+    {
+      "id": "usage_comparison_feature",
+      "kind": "implementation",
+      "prompt": "Implement this exact change: add a `--compare-codex-usage BASELINE_JSONL PRODUCTION_JSONL` option to `scripts/benchmark_zetsu_token_efficiency.py`. It must reuse the existing non-recursive Codex usage parser, return both normalized usage objects, compute `raw_token_saving` from `comparison_total_tokens` and `uncached_input_reduction` from `uncached_input_tokens`, use null when either required value is unavailable or the baseline denominator is zero, print exactly one compact sorted JSON object followed by a newline, and exit 0 without requiring `result_root`. Extend focused tests in `tests/test_zetsu_token_benchmark.py`. Do not change other behavior or files.",
+      "production_route": {
+        "expected": "agent_task",
+        "min_zetsu_calls": 1,
+        "max_zetsu_calls": 1
+      },
+      "verification_argv": [
+        "pytest",
+        "tests/test_zetsu_token_benchmark.py",
+        "-q"
+      ],
+      "correctness": {
+        "type": "commands",
+        "commands": [
+          {
+            "argv": [
+              "pytest",
+              "tests/test_zetsu_token_benchmark.py",
+              "-q"
+            ],
+            "returncode": 0
+          }
+        ],
+        "allowed_changed_paths": [
+          "scripts/benchmark_zetsu_token_efficiency.py",
+          "tests/test_zetsu_token_benchmark.py"
+        ],
+        "required_changed_paths": [
+          "scripts/benchmark_zetsu_token_efficiency.py",
+          "tests/test_zetsu_token_benchmark.py"
+        ]
+      }
+    }
+  ]
+}

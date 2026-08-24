@@ -301,6 +301,9 @@ def _check_read_only(
     required = correctness.get("required_paths")
     if not isinstance(artifact, str) or not isinstance(required, list):
         return "FAIL", "invalid_read_only_correctness_spec"
+    source_paths = correctness.get("source_paths", [])
+    if not isinstance(source_paths, list):
+        return "FAIL", "invalid_read_only_source_paths"
     answer_path = folder / artifact
     if not answer_path.is_file():
         return "FAIL", "answer_artifact_missing"
@@ -316,6 +319,9 @@ def _check_read_only(
             return "FAIL", f"repository_fact_missing:{raw}"
         if raw not in answer:
             return "FAIL", f"answer_missing_required_path:{raw}"
+    for raw in source_paths:
+        if not isinstance(raw, str) or not (worktree / raw).is_file():
+            return "FAIL", f"repository_source_missing:{raw}"
     base_revision = metadata.get("base_revision")
     if not isinstance(base_revision, str) or _worktree_head(worktree) != base_revision:
         return "FAIL", "read_only_head_changed"
@@ -541,6 +547,11 @@ def _run_record(
         "actual_production_route": metadata.get("actual_production_route"),
         "mcp_calls": _mcp_calls_from_codex_jsonl(jsonl_path) if jsonl_path.is_file() else [],
         "active_mcp_schema_utf8_bytes": metadata.get("active_mcp_schema_utf8_bytes"),
+        "registered_mcp_schema_utf8_bytes": metadata.get("registered_mcp_schema_utf8_bytes"),
+        "eager_mcp_tool_schema_utf8_bytes": metadata.get("eager_mcp_tool_schema_utf8_bytes"),
+        "selected_mcp_tool_schema_utf8_bytes": metadata.get("selected_mcp_tool_schema_utf8_bytes"),
+        "mcp_schema_exposure": metadata.get("mcp_schema_exposure"),
+        "codex_activity": metadata.get("codex_activity"),
         "actual_codex_credits": metadata.get("actual_codex_credits"),
     }
 
@@ -604,6 +615,9 @@ def main() -> int:
     pairs: list[dict[str, Any]] = []
     baseline_sum = 0
     zetsu_sum = 0
+    baseline_uncached_sum = 0
+    zetsu_uncached_sum = 0
+    uncached_valid_count = 0
     valid_count = 0
     for task_id in task_ids:
         task = task_by_id[task_id]
@@ -614,6 +628,7 @@ def main() -> int:
         pass_pair = baseline["correctness"] == "PASS" and zetsu["correctness"] == "PASS"
         pair_methodology_valid, pair_methodology_reasons = _pair_methodology(baseline, zetsu)
         saving: float | None = None
+        uncached_saving: float | None = None
         if (
             pass_pair
             and pair_methodology_valid
@@ -625,6 +640,28 @@ def main() -> int:
             baseline_sum += baseline_tokens
             zetsu_sum += zetsu_tokens
             valid_count += 1
+            baseline_usage = baseline.get("usage")
+            zetsu_usage = zetsu.get("usage")
+            baseline_uncached = (
+                baseline_usage.get("uncached_input_tokens")
+                if isinstance(baseline_usage, Mapping)
+                else None
+            )
+            zetsu_uncached = (
+                zetsu_usage.get("uncached_input_tokens")
+                if isinstance(zetsu_usage, Mapping)
+                else None
+            )
+            if (
+                isinstance(baseline_uncached, int)
+                and baseline_uncached > 0
+                and isinstance(zetsu_uncached, int)
+                and zetsu_uncached >= 0
+            ):
+                uncached_saving = 1.0 - (zetsu_uncached / baseline_uncached)
+                baseline_uncached_sum += baseline_uncached
+                zetsu_uncached_sum += zetsu_uncached
+                uncached_valid_count += 1
         pairs.append(
             {
                 "task": task_id,
@@ -633,6 +670,7 @@ def main() -> int:
                 "baseline_codex_tokens": baseline_tokens,
                 "zetsu_codex_tokens": zetsu_tokens,
                 "saving": saving,
+                "uncached_input_saving": uncached_saving,
                 "pass_pair": pass_pair,
                 "pair_methodology_valid": pair_methodology_valid,
                 "pair_methodology_reasons": pair_methodology_reasons,
@@ -640,6 +678,11 @@ def main() -> int:
             }
         )
     aggregate = 1.0 - (zetsu_sum / baseline_sum) if valid_count and baseline_sum > 0 else None
+    aggregate_uncached = (
+        1.0 - (zetsu_uncached_sum / baseline_uncached_sum)
+        if uncached_valid_count and baseline_uncached_sum > 0
+        else None
+    )
     report = {
         "schema_version": 3,
         "method": "three_frozen_single-run_paired_engineering_tasks",
@@ -650,6 +693,14 @@ def main() -> int:
         "aggregate_baseline_codex_tokens": baseline_sum if valid_count else None,
         "aggregate_zetsu_codex_tokens": zetsu_sum if valid_count else None,
         "aggregate_codex_saving": aggregate,
+        "aggregate_uncached_input_pair_count": uncached_valid_count,
+        "aggregate_baseline_uncached_input_tokens": (
+            baseline_uncached_sum if uncached_valid_count else None
+        ),
+        "aggregate_zetsu_uncached_input_tokens": (
+            zetsu_uncached_sum if uncached_valid_count else None
+        ),
+        "aggregate_uncached_input_saving": aggregate_uncached,
         "statistical_claim": False,
         "codex_usage_policy": (
             "prefer the final model-reported cumulative total; otherwise sum each distinct "

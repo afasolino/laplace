@@ -4,7 +4,7 @@ Zetsu is the authenticated Laplace↔Codex pairing layer. It is served at `/mcp`
 by the existing loopback-bound Laplace Operator process. HTTPS terminates at the
 normal Laplace ingress; Qwen, CodeV, databases, and control ports remain private.
 
-Zetsu schema version is 1.2 and Skill version is 1.2.0. The tool set is
+Zetsu schema version is 1.3 and Skill version is 1.3.0. The tool set is
 `search`, `get_evidence`, `project_context`, `experiment_context`, `delegate`,
 `agent_task`, `rtl_task`, and `verify`. Normal Laplace capabilities determine
 which tools each identity sees.
@@ -27,6 +27,10 @@ the repository-local `.agents/skills/zetsu/SKILL.md`. The MCP registration is
 therefore available to Codex sessions, while each project carries the usage
 policy that teaches Codex when to use it. The bearer value is referenced through
 an environment variable and is never written to either file.
+
+The installed Codex CLI automatically defers MCP tool schemas until tool search
+selects the server. All eight capabilities remain registered, but unused Zetsu
+does not eagerly serialize their full schemas into the model context.
 
 Run `configure` from a new project repository to install or refresh its managed
 Skill. Existing unrelated Codex configuration is preserved. An unmarked
@@ -59,6 +63,16 @@ edit existing text files, create bounded new text files, and execute only the
 verification allowlist. It has no generic shell, network access, `.git` access,
 or arbitrary filesystem access.
 
+Related reads and exact anchored edits can be batched into one bounded action.
+For an authorized mutation, the caller may request `apply_to_repository`: after
+the caller-bound verifier passes following the latest mutation, Laplace hashes
+and persists the exact patch, locks the canonical destination, rechecks its bound
+revision and clean status, and applies the patch atomically. Destination drift or
+any patch/postcondition mismatch fails closed. The eager result contains only
+status, changed paths, verifier result, unresolved failures, evidence/checkpoint
+references, patch identity, and promotion state. `verify` with `include_patch`
+expands the exact persisted handoff only when an anomaly requires it.
+
 Mutating tasks cannot finish successfully until deterministic verification has
 passed after the latest mutation. Cancellation, command limits, step limits, and
 overall wall-clock limits are checked during the iterative loop. A supplied
@@ -71,6 +85,11 @@ persistent: objective, worktree revision/status, changed paths, validation
 history/results, unresolved failures, evidence references, step/accounting state,
 and the next execution state. Failed or insufficient compaction stops the task
 rather than continuing with incomplete state.
+
+Once the bound verifier passes after a mutation, the agent stops without a final
+model round. A successful applied handoff with no unresolved failures is
+authoritative; Codex should not reread all changed files or rerun the same verifier
+unless it observes an anomaly.
 
 ## Compact retrieval and provenance
 
@@ -106,6 +125,10 @@ completed turn once. Unavailable Codex fields stay null. Local Qwen tokens and
 approximate Zetsu evidence/context estimates are reported separately and never added
 to Codex-credit consumption. This is a three-pair engineering sanity check, not a
 statistical benchmark.
+
+The optimized production measurement is frozen separately in
+`configs/benchmarks/zetsu_production_token_tasks_v4.json`; older benchmark roots
+remain diagnostic evidence and are never overwritten or reinterpreted.
 
 ## Laplace Client boundary
 
