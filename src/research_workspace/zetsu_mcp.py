@@ -11,13 +11,14 @@ import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, TypeAlias, cast
+from typing import Literal, Mapping, TypeAlias, cast
 
 from .model_routing import (
     RoutingTaskMetadata,
     assess_rtl_worker_eligibility,
 )
 from .agent_sandbox import AgentSandboxError
+from .laplace_core import LaplaceCore
 from .personal_corpus import CorpusError, PersonalCorpusStore
 from .service_tiers import ModelLane, ServiceTierError, TieredServingService
 from .user_capabilities import Capability
@@ -501,10 +502,13 @@ class ZetsuService:
         repository_root: Path,
         corpus: PersonalCorpusStore,
         tiered: TieredServingService,
+        *,
+        core: LaplaceCore | None = None,
     ) -> None:
         self.repository_root = repository_root.resolve()
         self.corpus = corpus
         self.tiered = tiered
+        self.core = core or LaplaceCore(self.repository_root, corpus, tiered)
         # Retrieval and the dedicated CodeV path do not require a Qwen-agent sandbox.
         # Construct the coordinator only for agent_task, while retaining one shared
         # per-session lock table even when concurrent requests arrive first.
@@ -514,8 +518,18 @@ class ZetsuService:
     def _agent_service(self) -> ZetsuAgentCoordinator:
         with self._agent_coordinator_lock:
             if self._agent_coordinator is None:
-                self._agent_coordinator = ZetsuAgentCoordinator(self.tiered, self.corpus)
+                self._agent_coordinator = self._core().agent_coordinator
             return self._agent_coordinator
+
+    def _core(self) -> LaplaceCore:
+        """Return the injected core, retaining compatibility with small fixtures."""
+
+        core = getattr(self, "core", None)
+        if isinstance(core, LaplaceCore):
+            return core
+        core = LaplaceCore(self.repository_root, self.corpus, self.tiered)
+        self.core = core
+        return core
 
     def available_tools(self, user_id: str) -> tuple[JsonObject, ...]:
         capabilities = self.tiered.effective_capabilities(user_id)
@@ -556,7 +570,7 @@ class ZetsuService:
                 ),
                 "policy": "bounded_policy_eligible_rtl_only",
             },
-            "agent_scheduler": self._agent_service().scheduler_status(user_id=user_id),
+            "agent_scheduler": self._core().scheduler_status(user_id=user_id),
         }
 
     def call(self, user_id: str, name: str, arguments: Mapping[str, object]) -> JsonObject:
@@ -583,7 +597,7 @@ class ZetsuService:
             corpus_id_value = args.get("corpus_id") if name == "search" else None
             if corpus_id_value is not None and not isinstance(corpus_id_value, str):
                 raise ZetsuError("invalid_corpus_id")
-            raw = self.corpus.search(
+            raw = self._core().retrieve(
                 user_id,
                 query,
                 corpus_id=corpus_id_value,
@@ -628,14 +642,17 @@ class ZetsuService:
                 minimum=512,
                 maximum=24_000,
             )
-            raw = self.corpus.evidence(user_id, tuple(chunk_ids))
-            packet = compact_expanded_results(raw, max_chars=max_chars)
+            typed_chunk_ids = tuple(item for item in chunk_ids if isinstance(item, str))
+            raw_evidence = self._core().evidence(user_id, typed_chunk_ids)
+            packet = compact_expanded_results(raw_evidence, max_chars=max_chars)
             if _telemetry_requested(args):
                 packet["_telemetry"] = {
                     "token_estimate_method": "utf8_json_bytes_div4",
-                    "selected_evidence_tokens_approx": _rough_tokens(raw),
+                    "selected_evidence_tokens_approx": _rough_tokens(raw_evidence),
                     "payload_tokens_approx": _rough_tokens(packet),
-                    "selected_evidence_count": len(raw) if isinstance(raw, list) else None,
+                    "selected_evidence_count": (
+                        len(raw_evidence) if isinstance(raw_evidence, list) else None
+                    ),
                 }
             return packet
         if name == "delegate":
@@ -644,7 +661,7 @@ class ZetsuService:
             lane_value = args.get("lane", "quality")
             if lane_value not in {"quality", "standard"}:
                 raise ZetsuError("invalid_delegate_lane")
-            result = self.tiered.chat(
+            result = self._core().chat(
                 user_id=user_id,
                 lane=ModelLane(str(lane_value)),
                 messages=(
@@ -757,12 +774,19 @@ class ZetsuService:
             eligibility = assess_rtl_worker_eligibility(metadata)
             if not eligibility.eligible:
                 raise ZetsuError(f"rtl_task_not_eligible:{eligibility.reason}")
-            result = self.tiered.agent(
+            task_kind_value: Literal["implementation", "repair"] = (
+                "implementation" if task_kind == "implementation" else "repair"
+            )
+            module_count = _integer(
+                args.get("module_count"), label="module_count", minimum=1, maximum=1
+            )
+            result = self._core().rtl_task(
                 user_id=user_id,
-                session_id=session_id,
-                lane=ModelLane.ECONOMY,
                 instruction=instruction,
-                domain="systemverilog",
+                task_kind=task_kind_value,
+                editable_sources=tuple(editable),
+                module_count=module_count,
+                session_id=session_id,
             )
             return _bounded_model_result(
                 result,

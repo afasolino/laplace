@@ -48,6 +48,7 @@ from .operator_service import (
     OperatorServiceError,
     RunExecutor,
 )
+from .laplace_core import LaplaceCore
 from .personal_corpus import (
     CorpusError,
     PersonalCorpusStore,
@@ -483,6 +484,8 @@ def create_operator_app(
     research: DeepResearchService | None = None,
     run_executor: RunExecutor | None = None,
     tiered: TieredServingService | None = None,
+    core: LaplaceCore | None = None,
+    zetsu_enabled: bool = True,
     serving_profile_operator: ServingProfileOperator | None = None,
     registered_auth: RegisteredEmailAuth | None = None,
     conversation_store: ConversationStore | None = None,
@@ -502,8 +505,19 @@ def create_operator_app(
         operator.state_root / "requests/request_states.sqlite3"
     )
     client_devices = ClientDeviceStore(operator.state_root / "client/client_devices.sqlite3")
+    shared_core = (
+        core
+        if core is not None
+        else (
+            LaplaceCore(operator.repository_root, corpus_store, tiered)
+            if tiered is not None
+            else None
+        )
+    )
     zetsu_service = (
-        ZetsuService(operator.repository_root, corpus_store, tiered) if tiered is not None else None
+        ZetsuService(operator.repository_root, corpus_store, tiered, core=shared_core)
+        if tiered is not None and zetsu_enabled
+        else None
     )
     zetsu_dispatcher = ZetsuMcpDispatcher(zetsu_service) if zetsu_service is not None else None
     app = FastAPI(
@@ -2068,6 +2082,11 @@ def create_operator_app(
             raise HTTPException(status_code=503, detail="tiered_serving_unavailable")
         return tiered
 
+    def require_core() -> LaplaceCore:
+        if shared_core is None:
+            raise HTTPException(status_code=503, detail="laplace_core_unavailable")
+        return shared_core
+
     @app.get("/api/v1/help")
     async def role_aware_help(
         authenticated: AuthPrincipal = Depends(principal),
@@ -2370,7 +2389,7 @@ def create_operator_app(
         request: Request,
         authenticated: AuthPrincipal = Depends(chat_mutation_principal),
     ) -> dict[str, object]:
-        service = require_tiered()
+        require_tiered()
         _require_named(authenticated, Capability.CHAT)
         domain_registry.require(body.domain, surface="chat")
         progress_id = body.request_id or f"ui-chat-{uuid.uuid4().hex}"
@@ -2408,7 +2427,7 @@ def create_operator_app(
                 (message.content for message in reversed(body.messages) if message.role == "user"),
                 "",
             )
-            personal = corpus_store.search(
+            personal = require_core().retrieve(
                 authenticated.user_id,
                 retrieval_query,
                 corpus_id=(
@@ -2491,7 +2510,7 @@ def create_operator_app(
                 state="GENERATING",
             )
             if settings.fixture_mode:
-                result = service.chat(
+                result = require_core().chat(
                     user_id=authenticated.user_id,
                     lane=ModelLane(body.lane),
                     messages=messages,
@@ -2500,7 +2519,7 @@ def create_operator_app(
                 )
             else:
                 result = await run_in_threadpool(
-                    service.chat,
+                    require_core().chat,
                     user_id=authenticated.user_id,
                     lane=ModelLane(body.lane),
                     messages=messages,
@@ -2937,7 +2956,7 @@ def create_operator_app(
         body: AgentRunRequest,
         authenticated: AuthPrincipal = Depends(tier_mutation_principal),
     ) -> dict[str, object]:
-        service = require_tiered()
+        require_tiered()
         _require_named(authenticated, Capability.AGENT)
         instruction = body.instruction
         retrieval: JsonObject = {
@@ -2957,7 +2976,7 @@ def create_operator_app(
                 and body.personal_corpus_id is None
             ):
                 raise CorpusError("selected_personal_corpus_required")
-            personal = corpus_store.search(
+            personal = require_core().retrieve(
                 authenticated.user_id,
                 body.instruction,
                 corpus_id=(
@@ -2992,7 +3011,7 @@ def create_operator_app(
         elif body.personal_corpus_id is not None:
             raise CorpusError("personal_corpus_id_without_selection")
         if settings.fixture_mode:
-            result = service.agent(
+            result = require_core().agent_session(
                 user_id=authenticated.user_id,
                 session_id=session_id,
                 lane=ModelLane(body.lane),
@@ -3001,7 +3020,7 @@ def create_operator_app(
             )
         else:
             result = await run_in_threadpool(
-                service.agent,
+                require_core().agent_session,
                 user_id=authenticated.user_id,
                 session_id=session_id,
                 lane=ModelLane(body.lane),
