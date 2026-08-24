@@ -273,6 +273,27 @@ def test_restart_resume_and_idempotency_conflict_fail_closed(tmp_path: Path) -> 
             idempotency_key="resume-1",
             payload={"checkpoint": "different"},
         )
+    with pytest.raises(HookError, match="hook_owner_or_project_denied"):
+        restarted.emit(
+            HookStage.TASK_RESUME,
+            owner_id="bob",
+            project_id="lab",
+            session_id="session-1",
+            task_id="task-1",
+            idempotency_key="resume-1",
+            payload={"checkpoint": "c1"},
+        )
+
+
+def test_malformed_persisted_hook_state_fails_closed(tmp_path: Path) -> None:
+    root = tmp_path / "hooks"
+    root.mkdir()
+    (root / "events.json").write_text(
+        '{"schema_version":1,"revision":0,"events":{"bad":{"executed":3}}}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(HookError, match="hook_state_event_keys_invalid"):
+        HookService(root)
 
 
 def test_core_exposes_shared_hooks_without_zetsu(tmp_path: Path) -> None:
