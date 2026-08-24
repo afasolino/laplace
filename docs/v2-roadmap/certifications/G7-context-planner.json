@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "phase": "G7",
+  "title": "Shared ContextPlanner, Condensation and Compact Handoffs",
+  "lifecycle_state": "CERTIFICATION",
+  "feature_lifecycle_state": "SHADOW",
+  "status": "CERTIFIED",
+  "generated_at_utc": "2026-08-24T18:58:50Z",
+  "control_plane": {
+    "production_root": "/home/giando/work/laplace",
+    "production_branch": "production/v1",
+    "production_source_modified": false,
+    "v2_root": "/home/giando/work/laplace-v2",
+    "v2_branch": "feature/laplace-v2",
+    "base_commit": "57d2f36f34cecb85563e8e5918e2e701d9c68214",
+    "candidate_commit": "4997816f2dcbe569330617cc9ee7e07b16e707e1",
+    "worktree_status_before_certification_artifact": "clean",
+    "zetsu_mutation_note": "The repaired read-only repository-agent proof passed without per_user_worktree_quota. The bounded mutating delegation remained deterministically blocked by the stale promotion target (zetsu_agent_apply_target_not_clean); local implementation was used under the documented fallback, and the production control-plane checkout was not modified."
+  },
+  "implementation": {
+    "service": "src/research_workspace/context_planner.py:ContextPlanner",
+    "core_integration": "LaplaceCore exposes one shared ContextPlanner instance; ZetsuAgentCoordinator uses it for context assembly, compaction prompts and compaction-trigger decisions.",
+    "ordered_sections": [
+      "objective",
+      "authorization fingerprint",
+      "authoritative policy",
+      "authoritative required verification",
+      "authoritative exact task state",
+      "authoritative project rules",
+      "advisory relevant memory",
+      "advisory RepoMap",
+      "advisory Personal Corpus/RAG evidence",
+      "advisory semantic summary",
+      "advisory recent trajectory"
+    ],
+    "authoritative_invariants": [
+      "Exact task state is serialized separately and fingerprinted; the planner never asks a summary to reconstruct it.",
+      "Owner/session authorization, policy and required verifier fingerprints are preserved across compaction.",
+      "Rules remain explicitly authoritative while memory, RepoMap, retrieval and semantic narration remain advisory.",
+      "Only narration and recent-history fields are bounded/compacted; exact state, policy, commands, provenance and verifier evidence are not summarized.",
+      "Compaction ratio remains 0.80, validated to the existing 0.75–0.85 policy range.",
+      "Repeated compaction reconstructs the same deterministic plan and restart produces byte-identical messages for identical inputs."
+    ],
+    "changed_paths": [
+      "src/research_workspace/context_planner.py",
+      "src/research_workspace/laplace_core.py",
+      "src/research_workspace/zetsu_agent.py",
+      "tests/test_context_planner_g7.py"
+    ]
+  },
+  "upstream_evaluation": [
+    {
+      "name": "OpenHands software-agent-sdk",
+      "repository": "https://github.com/OpenHands/software-agent-sdk",
+      "inspected_revision": "c20709fb587f71d38d4af62c4813ff4d2681fa02",
+      "license": "MIT",
+      "license_path": "https://github.com/OpenHands/software-agent-sdk/blob/c20709fb587f71d38d4af62c4813ff4d2681fa02/LICENSE",
+      "inspected_api": "openhands/sdk/context/condenser/base.py and context-condenser example: read-only history views, rolling condensation, soft/hard requirements and model-generated semantic condensation",
+      "reuse_mode": "architectural reference only; no OpenHands source, dependency, hosted inference, model or runtime was copied. Laplace keeps exact state and authorization outside summaries."
+    }
+  ],
+  "executed_gates": {
+    "focused_development": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest tests/test_context_planner_g7.py -q",
+      "returncode": 0,
+      "tests": 4
+    },
+    "frozen_phase_acceptance_and_previous_regression": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest -q tests/test_context_planner_g7.py tests/test_bounded_aci_g6.py tests/test_trajectory_g5.py tests/test_repository_context_g4.py tests/test_rules_g3.py tests/test_memory_g2.py tests/test_laplace_core_g1.py tests/test_zetsu_mcp.py tests/test_zetsu_agent_mcp.py tests/test_zetsu_agent_checkpoint.py tests/test_personal_corpus_api_v6.py tests/test_tiered_serving.py tests/test_auth_provenance_security.py tests/test_operator_api.py tests/test_architecture_v7.py",
+      "returncode": 0,
+      "host_socket_permission_required": true,
+      "scope": "Controlled histories over 128K logical characters, 0.80 trigger, repeated compaction, exact-state/policy/verifier invariants, restart equivalence, Core exposure and G1–G6 plus selected v1 regressions"
+    },
+    "security_and_negative": {
+      "result": "PASS",
+      "commands": [
+        "PYTHONPATH=src ruff check src/research_workspace/context_planner.py src/research_workspace/laplace_core.py src/research_workspace/zetsu_agent.py tests/test_context_planner_g7.py",
+        "PYTHONPATH=src mypy src/research_workspace/context_planner.py src/research_workspace/laplace_core.py src/research_workspace/zetsu_agent.py tests/test_context_planner_g7.py",
+        "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m compileall -q src/research_workspace/context_planner.py src/research_workspace/laplace_core.py src/research_workspace/zetsu_agent.py",
+        "PYTHONPATH=src bandit -q -lll -r src/research_workspace/context_planner.py src/research_workspace/laplace_core.py src/research_workspace/zetsu_agent.py",
+        "git diff --check"
+      ],
+      "returncodes": [0, 0, 0, 0, 0],
+      "covered": [
+        "invalid ratios, non-JSON exact state, non-finite values, oversized sections and malformed verifier argv fail closed",
+        "hostile semantic narration cannot change policy, authorization, objective, exact state or required verifier",
+        "exact state and provenance are retained across six repeated compactions",
+        "no cloud inference, network, telemetry, shell execution or model-controlled privilege path was added"
+      ],
+      "bandit_note": "Bandit returned zero high-severity findings; its manager emitted only warnings from security-comment words such as argv/shell/allowlisted."
+    }
+  },
+  "persistence_and_recovery": {
+    "result": "PASS",
+    "restart_resume": "A fresh ContextPlanner reconstructed byte-identical messages and identical authorization/exact-state fingerprints from the same inputs.",
+    "repeated_compaction": "Six consecutive compactions retained exact state, policy and required verifier values and remained below the controlled 131072-token context limit estimate.",
+    "threshold": "The existing 0.80 trigger is now delegated to ContextPlanner.should_compact and remains bounded by the accepted 0.75–0.85 range.",
+    "summary_boundary": "Semantic summaries are explicitly advisory and separate from the authoritative state/policy/verifier sections."
+  },
+  "comparison": {
+    "result": "PASS",
+    "method": "The structured planner was compared with the prior coordinator handoff on controlled histories and the full existing compaction/checkpoint coding regression. Correctness and security were preserved; exact fields remain explicit in both paths.",
+    "correctness": "NO_LOSS",
+    "security": "NO_LOSS",
+    "compact_handoff_efficiency": {
+      "codex_context_reduction": "NOT_MEASURED",
+      "model_token_reduction": "NOT_MEASURED",
+      "model_call_reduction": "NOT_MEASURED",
+      "latency_reduction": "NOT_MEASURED",
+      "human_intervention": "NOT_MEASURED"
+    },
+    "default_enable_decision": "NO",
+    "reason": "The deterministic planner improves authority separation and repeatable bounds, but no material Codex-context or local-model token reduction was measured on CPU-only controlled fixtures. Keep compact handoff optimization in SHADOW until a frozen local-model workload demonstrates benefit without correctness loss.",
+    "task_aware_reasoning_budget_decision": "NOT_EVALUATED; deferred until stable planner measurements exist"
+  },
+  "metrics": {
+    "focused_test_returncode": 0,
+    "frozen_regression_returncode": 0,
+    "ruff_returncode": 0,
+    "mypy_returncode": 0,
+    "compileall_returncode": 0,
+    "bandit_high_returncode": 0,
+    "controlled_history_logical_characters": ">128000",
+    "compaction_ratio": 0.8,
+    "gpu_vram_latency_throughput": "NOT_MEASURED"
+  },
+  "limitations": [
+    "SHADOW lifecycle is intentional because compact handoff efficiency has not been measured against a real local-model workload.",
+    "The planner API accepts rules, memory, RepoMap and retrieval evidence; the existing agent coordinator currently supplies its trajectory, exact state and policy while higher-level Core callers may provide the other sections.",
+    "Token counts use the repository's deterministic UTF-8 bytes-divided-by-four estimate where no tokenizer is exposed; this is not a production model tokenizer claim.",
+    "The existing Zetsu repository-agent registry remains stale relative to the current v2 checkout; local implementation was used after the deterministic promotion-target failure recorded in prior certifications.",
+    "The socket-concurrency regression requires host socket permission because the restricted shell denies socket creation; the selected unchanged suite passed under that permission.",
+    "The full G0 production certification was not repeated, per the roadmap instruction and prior phase certifications."
+  ],
+  "rollback_target": {
+    "commit": "57d2f36f34cecb85563e8e5918e2e701d9c68214",
+    "description": "G6-certified shadow bounded ACI with G5/G4/G3/G2/G1 capabilities and production/v1 remaining separately immutable."
+  },
+  "certification_artifact": "docs/v2-roadmap/certifications/G7-context-planner.json"
+}
