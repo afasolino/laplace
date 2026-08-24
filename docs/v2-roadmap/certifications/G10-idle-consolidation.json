@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "phase": "G10",
+  "title": "Idle/Sleep Consolidation and Controlled Self-Improvement",
+  "lifecycle_state": "CERTIFICATION",
+  "feature_lifecycle_state": "SHADOW",
+  "status": "CERTIFIED",
+  "generated_at_utc": "2026-08-24T19:39:11Z",
+  "control_plane": {
+    "production_root": "/home/giando/work/laplace",
+    "production_branch": "production/v1",
+    "production_source_modified": false,
+    "v2_root": "/home/giando/work/laplace-v2",
+    "v2_branch": "feature/laplace-v2",
+    "base_commit": "8d768eda39e46f31ed8b80a8ea214d6f8c95ef07",
+    "candidate_commit": "c96e50fd9d95a57e6bc712e5bb56aa359860caa7",
+    "worktree_status_before_certification_artifact": "clean after pushed G10 implementation commit; this artifact is the only pending change",
+    "zetsu_mutation_note": "The required bounded read-only repository-agent proof passed without per_user_worktree_quota. A later bounded mutating delegation was deterministically blocked by the stale promotion target (zetsu_agent_apply_target_not_clean); local implementation was used under the documented fallback. The immutable production checkout was not modified."
+  },
+  "implementation": {
+    "service": "src/research_workspace/idle_consolidation.py:IdleConsolidator",
+    "core_integration": "LaplaceCore exposes one lazy shared IdleConsolidator and run_idle_consolidation lifecycle adapter; IDLE_START and IDLE_END remain typed hook boundaries.",
+    "changed_paths": [
+      "src/research_workspace/idle_consolidation.py",
+      "src/research_workspace/laplace_core.py",
+      "tests/test_idle_consolidation_g10.py",
+      "docs/v2-roadmap/certifications/G10-idle-consolidation.json"
+    ],
+    "properties": [
+      "Deterministic analysis of bounded trajectory and memory snapshots produces episodic summaries, explicitly labelled durable-fact candidates, contradiction/supersession review, duplicate and obsolete-memory demotion review, recurring failures, candidate skills, process improvements and optional code-change proposals.",
+      "All proposals are persisted as shadow, human-approval-required records with owner/project scope, source event and memory identifiers, input hash, analyzer and policy provenance; no authoritative memory, skill activation, rules, routing policy or source file is changed.",
+      "Candidate harness changes are limited to one explicit bounded candidate per cycle and carry a baseline/candidate, development, held-out, correctness and security evaluation contract.",
+      "A/B evidence is hash-bound and deterministic at the ledger boundary; correctness or security regression rejects the candidate, while a pass records awaiting_human_approval. Human approval records human_approved_shadow_only and never promotes or executes the candidate.",
+      "Cycle and proposal state uses atomic fsync-and-replace persistence, strict restart validation, idempotent replay, input/scope conflict detection, duplicate proposal de-duplication and crash-safe pre-commit behavior.",
+      "Maintenance budgets bound input records and bytes, logical tokens, proposal count, cycle storage, state bytes, minimum interval and cycles per window. No model or GPU work is performed; reported GPU use is exactly zero."
+    ],
+    "security_boundaries": [
+      "The module has no subprocess, shell, network, dynamic import, evaluation, document-command execution or unrestricted recursive self-modification path.",
+      "Sensitive input keys are rejected before analysis; persisted state is schema-validated and state symlinks are rejected.",
+      "No delete or auto-promotion operation exists. Duplicate, contradiction and obsolete findings remain review proposals with delete_allowed false where applicable.",
+      "The service accepts typed records or to_json snapshots only and never treats model text as executable instructions."
+    ]
+  },
+  "upstream_evaluation": [
+    {
+      "name": "NousResearch/hermes-agent",
+      "repository": "https://github.com/NousResearch/hermes-agent",
+      "inspected_revision": "74ad422d50e6d76e26ba5ce3b4d2a4d520e923dd",
+      "license": "MIT",
+      "license_path": "https://github.com/NousResearch/hermes-agent/blob/main/LICENSE",
+      "inspected_material": "Current curator documentation and memory-provider documentation: inactivity and interval cadence, recoverable skill archival, usage sidecar, background review, prefetch/sync lifecycle and provider boundaries.",
+      "reuse_mode": "Boundary reference only. No Hermes source, provider, auxiliary model, telemetry, external memory service or background agent was copied or added."
+    },
+    {
+      "name": "Yaxin9Luo/AutoDesign",
+      "repository": "https://github.com/Yaxin9Luo/AutoDesign",
+      "inspected_revision": "e4ccc6c1f8e90234b99df8da2f38e1d0be51d0c7",
+      "license": "MIT",
+      "license_path": "https://github.com/Yaxin9Luo/AutoDesign/blob/main/LICENSE",
+      "inspected_material": "README methodology and the AutoDesign paper (arXiv:2608.13560): bounded candidate harness changes evaluated through rollout feedback and benchmark evidence.",
+      "reuse_mode": "Architecture reference only. Laplace implements a smaller deterministic ledger with frozen-task, development-task and held-out-task evidence, mandatory security/correctness rejection and explicit human approval; no AutoDesign source or remote dependency was copied."
+    }
+  ],
+  "executed_gates": {
+    "focused_development": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest -q tests/test_idle_consolidation_g10.py",
+      "returncode": 0,
+      "tests": 5,
+      "covered": "Controlled idle cycles, episodic and durable-fact proposals, contradictions, duplicates, obsolete-memory demotion, recurring failures, candidate skills, process/code candidates, one-change A/B contract, human approval, crash-safe restart, idempotent replay, owner/project isolation, malformed state, sensitive input rejection and Core integration."
+    },
+    "frozen_phase_acceptance_and_previous_regression": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest -q tests/test_idle_consolidation_g10.py tests/test_hooks_g9.py tests/test_skills_g8.py tests/test_context_planner_g7.py tests/test_bounded_aci_g6.py tests/test_trajectory_g5.py tests/test_repository_context_g4.py tests/test_rules_g3.py tests/test_memory_g2.py tests/test_laplace_core_g1.py tests/test_zetsu_mcp.py tests/test_zetsu_agent_mcp.py tests/test_zetsu_agent_checkpoint.py tests/test_personal_corpus_api_v6.py tests/test_tiered_serving.py tests/test_auth_provenance_security.py tests/test_operator_api.py tests/test_architecture_v7.py",
+      "returncode": 0,
+      "host_socket_permission_required": true,
+      "covered": "G10 acceptance plus G9 through G1 and selected v1 serving, API, security, checkpoint, MCP and architecture regressions."
+    },
+    "security_and_negative": {
+      "result": "PASS",
+      "commands": [
+        "PYTHONPATH=src ruff check src/research_workspace/idle_consolidation.py src/research_workspace/laplace_core.py tests/test_idle_consolidation_g10.py",
+        "PYTHONPATH=src mypy src/research_workspace/idle_consolidation.py src/research_workspace/laplace_core.py tests/test_idle_consolidation_g10.py",
+        "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m compileall -q src/research_workspace/idle_consolidation.py src/research_workspace/laplace_core.py tests/test_idle_consolidation_g10.py",
+        "PYTHONPATH=src bandit -q -lll -r src/research_workspace/idle_consolidation.py src/research_workspace/laplace_core.py",
+        "git diff --check"
+      ],
+      "returncodes": [0, 0, 0, 0, 0],
+      "covered": [
+        "Budget, scope, replay, malformed-state, symlink, sensitive-key, duplicate and A/B security negative paths",
+        "No subprocess, shell, network, dynamic execution or unrestricted self-modification path",
+        "Atomic pre-commit crash behavior and restart validation",
+        "Bandit returned zero high-severity findings"
+      ]
+    }
+  },
+  "comparison": {
+    "result": "PASS",
+    "method": "The frozen suite exercises multiple controlled idle conditions, contradiction and duplicate proposals, a simulated crash and restart, duplicate replay, deterministic A/B pass and security-regression rejection. All candidates remain shadow and the evidence contract includes development and held-out task identifiers.",
+    "correctness": "NO_LOSS",
+    "security": "NO_LOSS",
+    "model_or_hardware_efficiency": "NOT_MEASURED",
+    "default_enable_decision": "NO",
+    "reason": "The mechanism is a local proposal ledger only. It performs no model/GPU work, does not alter authoritative stores or routing, and requires explicit human approval before a future promotion path."
+  },
+  "metrics": {
+    "focused_test_returncode": 0,
+    "frozen_regression_returncode": 0,
+    "ruff_returncode": 0,
+    "mypy_returncode": 0,
+    "compileall_returncode": 0,
+    "bandit_high_returncode": 0,
+    "gpu_seconds_used": 0.0,
+    "gpu_vram_latency_throughput": "NOT_MEASURED"
+  },
+  "limitations": [
+    "G10 certifies the shadow mechanism, not automatic promotion. No production mutation, durable-memory deletion, skill activation, rules change, routing change or source edit is permitted by this phase.",
+    "The deterministic ledger records A/B evidence supplied by a verifier; it does not run model rollouts or invent correctness, security, latency or hardware measurements.",
+    "The current Core adapter is explicit; existing memory and trajectory call sites are not silently redirected into maintenance.",
+    "No G0 certification rerun was performed, per the roadmap instruction and previous certifications.",
+    "The socket-concurrency regression requires host socket permission because the restricted shell denies socket creation; the final selected suite passed with that permission."
+  ],
+  "rollback_target": {
+    "commit": "8d768eda39e46f31ed8b80a8ea214d6f8c95ef07",
+    "description": "G9-certified typed lifecycle hooks with G8-G1 capabilities; production/v1 remains separately immutable."
+  },
+  "certification_artifact": "docs/v2-roadmap/certifications/G10-idle-consolidation.json"
+}
