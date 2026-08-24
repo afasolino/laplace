@@ -29,6 +29,7 @@ from .agent_sandbox import (
     AgentSessionBinding,
     AgentToolPolicy,
 )
+from .bounded_aci import BoundedACIError, BoundedRepositoryACI
 from .personal_corpus import CorpusError, PersonalCorpusStore
 from .repository_authorization import RepositoryAuthorizationError, validate_workspace_path
 from .service_tiers import ModelLane, ServiceTierError, TieredServingService
@@ -325,6 +326,16 @@ class ZetsuAgentCoordinator:
         return (
             "You are the bounded local Qwen repository agent subordinate to Codex. Return exactly "
             "one JSON object selecting one action. Allowed actions: "
+            '{"action":"repo_map","query":"literal","token_budget":1000}; '
+            '{"action":"find_symbol","name":"Symbol"}; '
+            '{"action":"find_references","name":"Symbol"}; '
+            '{"action":"search_text","query":"literal","glob":"*.py"}; '
+            '{"action":"read_region","path":"relative/a.py","start_line":1,"end_line":40}; '
+            '{"action":"inspect_diff","paths":["relative/a.py"]}; '
+            '{"action":"edit_region","path":"relative/a.py","old_text":"exact once",'
+            '"new_text":"replacement"}; '
+            '{"action":"create_text_file","path":"relative/a.py","content":"text"}; '
+            '{"action":"git_state"}; '
             '{"action":"search","query":"literal","glob":"*.py"}; '
             '{"action":"read","paths":["relative/a","relative/b"]}; '
             '{"action":"retrieve","query":"owner-authorized knowledge query"}; '
@@ -721,6 +732,21 @@ class ZetsuAgentCoordinator:
                     if isinstance(chunk_id, str) and chunk_id not in state.evidence_refs:
                         state.evidence_refs.append(chunk_id)
         return json.dumps(packet, sort_keys=True, ensure_ascii=False)
+
+    def _typed_aci(self, ctx: AgentRunContext, state: AgentExecutionState) -> BoundedRepositoryACI:
+        """Construct the structured ACI while retaining coordinator ownership checks."""
+
+        return BoundedRepositoryACI(
+            ctx.worktree,
+            owner_user_id=ctx.user_id,
+            session_id=ctx.session_id,
+            allow_mutation="apply_patch" in ctx.binding.tool_policy.allowed_tools,
+            required_verification_argv=ctx.required_verification_argv,
+            is_cancelled=lambda: self.tiered.agent_session_status(
+                user_id=ctx.user_id, session_id=ctx.session_id
+            ).get("status")
+            == "CANCELLED",
+        )
 
     @staticmethod
     def _require_edit_policy(policy: AgentToolPolicy) -> None:
@@ -1977,7 +2003,89 @@ class ZetsuAgentCoordinator:
                     break
 
                 self._consume_tool_budget(ctx, state)
-                if action_name == "search":
+                if action_name in {
+                    "repo_map",
+                    "find_symbol",
+                    "find_references",
+                    "search_text",
+                    "read_region",
+                    "inspect_diff",
+                    "edit_region",
+                    "create_text_file",
+                    "git_state",
+                }:
+                    try:
+                        aci = self._typed_aci(ctx, state)
+                        if action_name == "repo_map":
+                            focus = action.get("focus_paths", ())
+                            if not isinstance(focus, Sequence) or isinstance(focus, (str, bytes)):
+                                raise ServiceTierError("zetsu_agent_focus_paths_invalid")
+                            result = aci.repo_map(
+                                query=cast(str, action.get("query", "")),
+                                focus_paths=tuple(cast(str, item) for item in focus),
+                                token_budget=cast(int, action.get("token_budget", 1_000)),
+                            )
+                        elif action_name == "find_symbol":
+                            result = aci.find_symbol(cast(str, action.get("name")))
+                        elif action_name == "find_references":
+                            result = aci.find_references(cast(str, action.get("name")))
+                        elif action_name == "search_text":
+                            result = aci.search_text(
+                                query=cast(str, action.get("query")),
+                                glob=cast(str, action.get("glob", "*")),
+                            )
+                        elif action_name == "read_region":
+                            result = aci.read_region(
+                                path=cast(str, action.get("path")),
+                                start_line=cast(int, action.get("start_line")),
+                                end_line=cast(int, action.get("end_line")),
+                            )
+                        elif action_name == "inspect_diff":
+                            paths = action.get("paths", ())
+                            if not isinstance(paths, Sequence) or isinstance(paths, (str, bytes)):
+                                raise ServiceTierError("zetsu_agent_diff_paths_invalid")
+                            result = aci.inspect_diff(
+                                paths=tuple(cast(str, item) for item in paths)
+                            )
+                        elif action_name == "edit_region":
+                            if ctx.required_verification_argv is None:
+                                raise ServiceTierError("zetsu_agent_mutation_requires_verifier")
+                            result = aci.edit_region(
+                                path=cast(str, action.get("path")),
+                                old_text=cast(str, action.get("old_text")),
+                                new_text=cast(str, action.get("new_text")),
+                            )
+                            state.mutation_epoch += 1
+                            state.unresolved_failures = [
+                                item
+                                for item in state.unresolved_failures
+                                if not item.startswith("latest_mutation_unverified:")
+                            ]
+                            state.unresolved_failures.append(
+                                self._mutation_marker(state.mutation_epoch)
+                            )
+                        elif action_name == "create_text_file":
+                            if ctx.required_verification_argv is None:
+                                raise ServiceTierError("zetsu_agent_mutation_requires_verifier")
+                            result = aci.create_text_file(
+                                path=cast(str, action.get("path")),
+                                content=cast(str, action.get("content")),
+                            )
+                            state.mutation_epoch += 1
+                            state.unresolved_failures = [
+                                item
+                                for item in state.unresolved_failures
+                                if not item.startswith("latest_mutation_unverified:")
+                            ]
+                            state.unresolved_failures.append(
+                                self._mutation_marker(state.mutation_epoch)
+                            )
+                        else:
+                            result = aci.git_state()
+                        observation = json.dumps(result, sort_keys=True, ensure_ascii=False)
+                    except BoundedACIError as exc:
+                        raise ServiceTierError(exc.category, exc.evidence) from exc
+                elif action_name == "search":
                     observation = self._search(ctx, state, action)
                 elif action_name == "read":
                     observation = self._read(worktree, action)
