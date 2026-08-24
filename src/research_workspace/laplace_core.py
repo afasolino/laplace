@@ -14,6 +14,7 @@ from typing import Literal, TypeAlias
 
 from .model_routing import RoutingTaskMetadata, assess_rtl_worker_eligibility
 from .memory import MemoryService
+from .context_planner import ContextPlanner
 from .personal_corpus import PersonalCorpusStore
 from .repository_context import (
     RepoMap,
@@ -68,6 +69,7 @@ class LaplaceCore:
         rules: RuleService | None = None,
         repository_context: RepositoryContextService | None = None,
         trajectory: TrajectoryService | None = None,
+        context_planner: ContextPlanner | None = None,
     ) -> None:
         self.repository_root = repository_root.resolve()
         self.corpus = corpus
@@ -77,6 +79,7 @@ class LaplaceCore:
         self.trajectory = trajectory or TrajectoryService(
             self.repository_root / ".laplace-state" / "trajectory"
         )
+        self.context_planner = context_planner or ContextPlanner()
         self._repository_context = repository_context
         self._agent_coordinator = agent_coordinator
         self._agent_coordinator_lock = threading.Lock()

@@ -30,6 +30,7 @@ from .agent_sandbox import (
     AgentToolPolicy,
 )
 from .bounded_aci import BoundedACIError, BoundedRepositoryACI
+from .context_planner import DEFAULT_COMPACTION_RATIO, ContextPlanner, ContextPlannerError
 from .personal_corpus import CorpusError, PersonalCorpusStore
 from .repository_authorization import RepositoryAuthorizationError, validate_workspace_path
 from .service_tiers import ModelLane, ServiceTierError, TieredServingService
@@ -288,6 +289,7 @@ class ZetsuAgentCoordinator:
     ) -> None:
         self.tiered = tiered
         self.corpus = corpus
+        self.context_planner = ContextPlanner()
         self.checkpoints = checkpoint_store or AgentCheckpointStore(
             tiered.sandboxes.sandbox_root / "zetsu_agent_checkpoints"
         )
@@ -1154,21 +1156,48 @@ class ZetsuAgentCoordinator:
         }
         return json.dumps(exact, sort_keys=True, ensure_ascii=False)
 
-    def _messages(self, state: AgentExecutionState) -> tuple[dict[str, str], dict[str, str]]:
-        prompt = (
-            f"OBJECTIVE:\n{state.objective}\n\nEXACT STATE (authoritative):\n{self._state_digest(state)}\n\n"
-            f"SEMANTIC SUMMARY:\n{state.summary or 'NONE'}\n\nRECENT OBSERVATIONS:\n"
-            + (
-                "\n\n".join(state.recent_observations[-_MAX_RECENT_OBSERVATIONS:])
-                if state.recent_observations
-                else "NONE"
+    @classmethod
+    def _exact_state_object(cls, state: AgentExecutionState) -> JsonObject:
+        try:
+            value: object = json.loads(cls._state_digest(state))
+        except json.JSONDecodeError as exc:
+            raise ServiceTierError("zetsu_agent_exact_state_invalid") from exc
+        if not isinstance(value, dict):
+            raise ServiceTierError("zetsu_agent_exact_state_invalid")
+        return cast(JsonObject, value)
+
+    def _messages(
+        self, state: AgentExecutionState, ctx: AgentRunContext | None = None
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        owner = ctx.user_id if ctx is not None else "agent"
+        session = ctx.session_id if ctx is not None else "session"
+        policy: JsonObject = {
+            "policy_id": ctx.binding.tool_policy.policy_id if ctx is not None else "internal",
+            "allowed_tools": (
+                list(ctx.binding.tool_policy.allowed_tools) if ctx is not None else []
+            ),
+            "network_enabled": False,
+            "max_commands": (
+                ctx.binding.tool_policy.max_commands if ctx is not None else 0
+            ),
+        }
+        required = ctx.required_verification_argv if ctx is not None else state.required_verification_argv
+        try:
+            plan = self.context_planner.plan(
+                owner_user_id=owner,
+                session_id=session,
+                objective=state.objective,
+                exact_state=self._exact_state_object(state),
+                policy=policy,
+                required_verification_argv=required,
+                system_prompt=self._system_prompt(),
+                recent_trajectory=state.recent_observations,
+                semantic_summary=state.summary,
+                compaction_ratio=ctx.compaction_ratio if ctx is not None else DEFAULT_COMPACTION_RATIO,
             )
-            + "\n\nChoose the next action."
-        )
-        return (
-            {"role": "system", "content": self._system_prompt()},
-            {"role": "user", "content": prompt},
-        )
+        except ContextPlannerError as exc:
+            raise ServiceTierError(exc.category, exc.evidence) from exc
+        return plan.messages
 
     @staticmethod
     def _approximate_active_tokens(messages: Sequence[Mapping[str, str]]) -> int:
@@ -1176,32 +1205,20 @@ class ZetsuAgentCoordinator:
         return _rough_tokens(serialized)
 
     def _compact(self, ctx: AgentRunContext, state: AgentExecutionState, threshold: int) -> None:
-        messages_before = self._messages(state)
+        messages_before = self._messages(state, ctx)
         before = self._approximate_active_tokens(messages_before)
-        exact_state = self._state_digest(state)
+        exact_state = self._exact_state_object(state)
         self._ensure_active(ctx, state)
         result = self.tiered.chat(
             user_id=ctx.user_id,
             lane=ctx.lane,
             domain="json",
             session_id=ctx.session_id,
-            messages=(
-                {
-                    "role": "system",
-                    "content": (
-                        "Return exactly one JSON object with string field summary. Compact only semantic "
-                        "history. Preserve decisions, paths/symbols, unresolved reasoning and the next useful "
-                        "action. Do not rewrite or infer the separately supplied exact state."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"OBJECTIVE:\n{state.objective}\n\nAUTHORITATIVE EXACT STATE:\n{exact_state}\n\n"
-                        f"PRIOR SUMMARY:\n{state.summary}\n\nRECENT HISTORY:\n"
-                        + "\n\n".join(state.recent_observations)
-                    ),
-                },
+            messages=self.context_planner.compaction_messages(
+                objective=state.objective,
+                exact_state=exact_state,
+                prior_summary=state.summary,
+                recent_trajectory=state.recent_observations,
             ),
         )
         state.telemetry.add_usage(result, compaction=True)
@@ -1210,7 +1227,7 @@ class ZetsuAgentCoordinator:
         # The last reported prompt count described the pre-compaction/compaction prompt,
         # not the newly compacted active context. Do not reuse it as the next trigger.
         state.telemetry.last_model_reported_input_tokens = None
-        after = self._approximate_active_tokens(self._messages(state))
+        after = self._approximate_active_tokens(self._messages(state, ctx))
         state.telemetry.compactions += 1
         state.telemetry.approximate_active_context_tokens_before_last_compaction = before
         state.telemetry.approximate_active_context_tokens_after_last_compaction = after
@@ -1948,13 +1965,17 @@ class ZetsuAgentCoordinator:
             for step in pending_steps:
                 state.step = step
                 self._ensure_active(ctx, state)
-                messages = self._messages(state)
+                messages = self._messages(state, ctx)
                 approximate = self._approximate_active_tokens(messages)
                 reported = state.telemetry.last_model_reported_input_tokens or 0
-                if max(approximate, reported) >= threshold:
+                if self.context_planner.should_compact(
+                    approximate_tokens=max(approximate, reported),
+                    context_limit=route.context_limit,
+                    ratio=compaction_ratio,
+                ):
                     self._compact(ctx, state, threshold)
                     self._checkpoint(ctx, state)
-                    messages = self._messages(state)
+                    messages = self._messages(state, ctx)
                 self._ensure_active(ctx, state)
                 try:
                     result = self.tiered.chat(
