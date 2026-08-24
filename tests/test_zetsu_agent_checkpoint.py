@@ -296,6 +296,75 @@ def test_cancellation_and_command_budget_fail_closed(tmp_path: Path) -> None:
         coordinator._ensure_active(ctx, state)
 
 
+def test_output_cap_continuation_preserves_state_without_duplicate_mutation(
+    tmp_path: Path,
+) -> None:
+    tiered = _Tiered(tmp_path)
+    coordinator = ZetsuAgentCoordinator(
+        tiered, checkpoint_store=AgentCheckpointStore(tmp_path / "checkpoints")
+    )
+    ctx = _ctx(tmp_path, session="cap-session", user="user-a")
+    state = AgentExecutionState(
+        objective="x",
+        mutation_epoch=1,
+        changed_paths=["src/already_applied.py"],
+        command_count=1,
+    )
+    error = ServiceTierError(
+        "model_output_limit_reached",
+        {
+            "gate_id": "no_silent_truncation",
+            "finish_reason": "length",
+            "partial_content": '{"action":"edit","edits":[{"path":"src/already_applied.py"',
+            "model_reported_usage": {"prompt_tokens": 100, "completion_tokens": 4096},
+        },
+    )
+    for step in range(1, 5):
+        assert coordinator._record_model_failure(ctx, state, step, error) is True
+        assert state.mutation_epoch == 1
+        assert state.command_count == 1
+        assert state.changed_paths == ["src/already_applied.py"]
+    assert coordinator._record_model_failure(ctx, state, 5, error) is False
+    assert state.output_cap_continuations == 4
+    assert len(coordinator.results.staging_artifacts("cap-session")) == 4
+    assert state.next_state == "continue_after_output_cap"
+
+
+def test_oversized_verifier_streams_are_persisted_exactly_not_injected(
+    tmp_path: Path, monkeypatch
+) -> None:
+    tiered = _Tiered(tmp_path)
+    coordinator = ZetsuAgentCoordinator(
+        tiered, checkpoint_store=AgentCheckpointStore(tmp_path / "checkpoints")
+    )
+    ctx = _ctx(tmp_path, session="large-verify", user="user-a")
+    state = AgentExecutionState(objective="x")
+    executable = tmp_path / "pytest"
+    executable.write_text(
+        "#!/usr/bin/env python3\nimport sys\n"
+        "sys.stdout.write('O' * 200000)\nsys.stderr.write('E' * 180000)\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    monkeypatch.setattr(
+        "research_workspace.zetsu_agent.shutil.which",
+        lambda _name, path=None: str(executable),
+    )
+    monkeypatch.setattr(
+        "research_workspace.zetsu_agent.AgentSandboxManager.fixed_environment",
+        staticmethod(lambda _binding: dict(os.environ)),
+    )
+    monkeypatch.setattr(coordinator, "_worktree_state", lambda _root: ("a" * 40, "0" * 64, []))
+
+    record = coordinator._verify(ctx, state, {"argv": ["pytest", "tests/test_x.py"]})
+    assert record["passed"] is True
+    assert len(str(record["stdout_tail"])) == 8_000
+    assert len(str(record["stderr_tail"])) == 8_000
+    staged = coordinator.results.staging_artifacts("large-verify")
+    assert staged["verify-001.stdout"].stat().st_size == 200_000
+    assert staged["verify-001.stderr"].stat().st_size == 180_000
+
+
 def test_running_verification_honors_cancellation(tmp_path: Path, monkeypatch) -> None:
     tiered = _Tiered(tmp_path)
     coordinator = ZetsuAgentCoordinator(

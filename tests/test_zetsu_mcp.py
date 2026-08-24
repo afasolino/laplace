@@ -11,7 +11,13 @@ from research_workspace.zetsu_mcp import (
     ZetsuMcpDispatcher,
     ZetsuService,
 )
-from research_workspace.service_tiers import ModelLane
+from research_workspace.service_tiers import (
+    LanePolicy,
+    ModelLane,
+    ModelRoute,
+    ServiceTierError,
+    TieredServingService,
+)
 from research_workspace.user_capabilities import Capability
 
 
@@ -133,3 +139,26 @@ def test_rtl_task_is_codev_routed_only_after_bounded_policy_check() -> None:
 
     with pytest.raises(ZetsuError, match="unexpected_tool_arguments"):
         service.call("owner", "rtl_task", {**arguments, "shell": "uname -a"})
+
+
+def test_codev_specific_route_is_deterministically_unavailable_when_disabled() -> None:
+    routes = {
+        ModelLane.QUALITY: ModelRoute(
+            ModelLane.QUALITY, "qwen", "http://127.0.0.1:8207", 0
+        ),
+        ModelLane.STANDARD: ModelRoute(
+            ModelLane.STANDARD, "qwen", "http://127.0.0.1:8207", 10
+        ),
+        ModelLane.ECONOMY: ModelRoute(
+            ModelLane.ECONOMY, "codev", "http://127.0.0.1:8103", 20
+        ),
+    }
+    service = object.__new__(TieredServingService)
+    service.lane_policy = LanePolicy(routes, codev_enabled=False)
+    with pytest.raises(ServiceTierError, match="codev_route_unavailable") as exc:
+        service._route(ModelLane.ECONOMY, domain="systemverilog")
+    assert exc.value.evidence == {"reason": "intentionally_disabled_by_runtime_topology"}
+    standard = service._route(ModelLane.STANDARD, domain="python")
+    assert standard.model_id == "qwen"
+    economy_non_rtl = service._route(ModelLane.ECONOMY, domain="python")
+    assert economy_non_rtl.model_id == "qwen"

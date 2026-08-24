@@ -131,6 +131,79 @@ def test_start_configures_and_delegates_to_owned_runtime(
     }
 
 
+def test_start_nocodev_passes_persisted_topology_choice(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    repo = tmp_path / "repo"
+    state = tmp_path / "state"
+    repo.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    observed: dict[str, object] = {}
+
+    def start_runtime(repository: Path, state_root: Path, **kwargs: object) -> dict[str, object]:
+        observed.update(repository=repository, state_root=state_root, **kwargs)
+        return {
+            "status": "DRY_RUN",
+            "topology": "nocodev",
+            "codev": "intentionally_disabled",
+        }
+
+    monkeypatch.setattr(zetsu_cli, "start_local_runtime", start_runtime)
+    assert zetsu_cli.main(
+        [
+            "start",
+            "--repo",
+            str(repo),
+            "--state-root",
+            str(state),
+            "--nocodev",
+            "--dry-run",
+            "--json",
+        ]
+    ) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["runtime"]["topology"] == "nocodev"
+    assert observed["codev_enabled"] is False
+
+
+def test_worktrees_and_gc_cli_are_bounded_and_dry_run_by_default_only_when_requested(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    class Manager:
+        def operator_inventory(self) -> list[dict[str, object]]:
+            return [{"session_id": "terminal", "physical_state": "PRESENT"}]
+
+        def collect_garbage(self, *, dry_run: bool, limit: int) -> dict[str, object]:
+            return {
+                "status": "DRY_RUN" if dry_run else "COMPLETE",
+                "examined": 1,
+                "released": 0 if dry_run else 1,
+                "protected": 0,
+                "items": [
+                    {
+                        "session_id": "terminal",
+                        "action": "WOULD_RELEASE" if dry_run else "RELEASED",
+                    }
+                ],
+                "limit": limit,
+            }
+
+    monkeypatch.setattr(zetsu_cli, "_worktree_manager", lambda _state: Manager())
+    assert zetsu_cli.main(["worktrees", "--state-root", str(tmp_path), "--json"]) == 0
+    inventory = json.loads(capsys.readouterr().out)
+    assert inventory["worktrees"][0]["session_id"] == "terminal"
+    assert zetsu_cli.main(
+        ["gc", "--state-root", str(tmp_path), "--dry-run", "--limit", "7", "--json"]
+    ) == 0
+    dry_run = json.loads(capsys.readouterr().out)
+    assert dry_run["status"] == "DRY_RUN"
+    assert dry_run["items"][0]["action"] == "WOULD_RELEASE"
+    assert zetsu_cli.main(["gc", "--state-root", str(tmp_path), "--json"]) == 0
+    collected = json.loads(capsys.readouterr().out)
+    assert collected["status"] == "COMPLETE"
+    assert collected["items"][0]["action"] == "RELEASED"
+
+
 def test_status_fails_closed_on_degraded_operator_readiness(
     tmp_path: Path, capsys, monkeypatch
 ) -> None:

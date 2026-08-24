@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-24",
+  "branch": "hotfix/zetsu-worktree-lifecycle",
+  "commit": "SELF",
+  "status": "PASS",
+  "scope": {
+    "worktree_lifecycle": true,
+    "stale_active_reconciliation": true,
+    "bounded_fifo_scheduler": true,
+    "owned_process_tree_shutdown": true,
+    "durable_paged_results": true,
+    "output_cap_continuation": true,
+    "optional_codev": true
+  },
+  "scheduler": {
+    "full": {
+      "selected_execution_slots": 1,
+      "measured_max_within_test_bound": 4
+    },
+    "nocodev": {
+      "selected_execution_slots": 1,
+      "measured_max_within_test_bound": 4
+    },
+    "pending_queue_capacity": 16,
+    "per_user_live_resumable_worktree_limit": 8,
+    "global_live_resumable_worktree_limit": 64,
+    "selection_reason": "Available RTX A6000 evidence is not transferable to the target 8 GiB GPU; preserve the conservative one-slot baseline."
+  },
+  "gpu_capacity_evidence": {
+    "host_gpu": "NVIDIA RTX A6000",
+    "host_memory_mib": 49140,
+    "target_memory_mib": 8192,
+    "direct_inference_only": true,
+    "agent_task_executor_used": false,
+    "tested_concurrency": [1, 2, 3, 4],
+    "full": {
+      "all_responses_valid": true,
+      "oom": false,
+      "gpu_memory_used_mib_range": [44940, 44943],
+      "latency_seconds": [0.677290, 0.887317, 1.122301, 1.453343],
+      "completion_tokens_per_second": [23.623559, 46.206692, 50.788533, 50.229039],
+      "stop_survivors": 0
+    },
+    "nocodev": {
+      "all_responses_valid": true,
+      "oom": false,
+      "gpu_memory_used_mib_range": [38249, 38255],
+      "latency_seconds": [0.582673, 0.716119, 0.961788, 1.142955],
+      "completion_tokens_per_second": [27.459667, 57.253033, 59.264630, 71.743863],
+      "stop_survivors": 0
+    }
+  },
+  "live_gc_dry_run": {
+    "examined": 8,
+    "would_migrate_and_release": 8,
+    "released": 0,
+    "manual_git_metadata_edits": 0
+  },
+  "validation": {
+    "pytest_total": 456,
+    "pytest_passed": 456,
+    "ruff": "PASS",
+    "mypy": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "migration": {
+    "database_schema_migration": "automatic and idempotent",
+    "runtime_record_schema": "legacy runtime must be stopped before hotfix deployment",
+    "manual_worktree_deletion": false
+  }
+}

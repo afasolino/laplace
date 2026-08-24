@@ -34,6 +34,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     manager = repository / "scripts/manage_multilanguage_model_servers.sh"
     model_manager = repository / "scripts/manage_multilanguage_models.py"
     environment = dict(os.environ)
+    control_python = Path(
+        environment.get("LAPLACE_CONTROL_PLANE_PYTHON", str(repository / ".venv/bin/python"))
+    )
+    if not control_python.is_absolute() or not control_python.is_file():
+        raise RuntimeError("codev_control_plane_python_invalid")
     started = subprocess.run(  # nosec B603
         [str(manager), "start-phase3-worker"],
         cwd=repository,
@@ -59,7 +64,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         while time.monotonic() < deadline:
             health = subprocess.run(  # nosec B603
                 [
-                    str(repository / ".venv/bin/python"),
+                    str(control_python),
                     str(model_manager),
                     "endpoint",
                     "--artifact",

@@ -24,8 +24,11 @@ DEFAULT_TOOLS = (
     "experiment_context",
     "delegate",
     "agent_task",
+    "agent_task_status",
+    "cancel_agent_task",
     "rtl_task",
     "verify",
+    "get_result",
 )
 _BEGIN = "# BEGIN LAPLACE ZETSU MANAGED v4"
 _END = "# END LAPLACE ZETSU MANAGED v4"

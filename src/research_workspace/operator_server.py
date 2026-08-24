@@ -62,7 +62,7 @@ def _atomic_private_json(path: Path, value: object) -> None:
             temporary.unlink()
 
 
-def _selected_lane_policy(repository_root: Path) -> LanePolicy:
+def _selected_lane_policy(repository_root: Path, *, codev_enabled: bool = True) -> LanePolicy:
     path = repository_root.resolve() / "configs/selected_serving_profiles.json"
     raw: object = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict) or raw.get("schema_version") != 1:
@@ -94,6 +94,7 @@ def _selected_lane_policy(repository_root: Path) -> LanePolicy:
         quality_reserved_slots=int(raw["quality_reserved_slots"]),
         standard_capacity=int(raw["standard_capacity"]),
         economy_capacity=int(raw["economy_capacity"]),
+        codev_enabled=codev_enabled,
     )
 
 
@@ -209,6 +210,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable-bearer-api", action="store_true")
     parser.add_argument("--bearer-token-file", type=Path)
     parser.add_argument("--no-pwa", action="store_true")
+    parser.add_argument("--codev-disabled", action="store_true")
     return parser
 
 
@@ -325,7 +327,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         authorizations,
     )
     local_chat = LocalOpenAIChatBackend()
-    lane_policy = _selected_lane_policy(arguments.repository_root)
+    lane_policy = _selected_lane_policy(
+        arguments.repository_root,
+        codev_enabled=not arguments.codev_disabled,
+    )
     tiered = TieredServingService(
         users=users,
         sandboxes=sandboxes,
@@ -375,6 +380,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             external_url=arguments.external_url,
             allow_insecure_lan_http=arguments.allow_insecure_lan_http,
             bearer_api_enabled=arguments.enable_bearer_api,
+            codev_enabled=not arguments.codev_disabled,
             pwa_enabled=(
                 not arguments.no_pwa
                 and arguments.deployment_mode != "reverse-proxy"
