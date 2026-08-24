@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "phase": "G4",
+  "title": "Repository Intelligence / RepoMap",
+  "lifecycle_state": "CERTIFICATION",
+  "feature_lifecycle_state": "SHADOW",
+  "status": "CERTIFIED",
+  "generated_at_utc": "2026-08-24T18:24:32Z",
+  "control_plane": {
+    "production_root": "/home/giando/work/laplace",
+    "production_branch": "production/v1",
+    "production_source_modified": false,
+    "v2_root": "/home/giando/work/laplace-v2",
+    "v2_branch": "feature/laplace-v2",
+    "base_commit": "7cc8b7e37897fb4434f7acbee810add409c6f423",
+    "candidate_commit": "c94a5a33913055c031a73a8600d54452893b4b73",
+    "worktree_status_before_certification_artifact": "clean",
+    "zetsu_mutation_note": "The previously recorded promotion-target stale-head defect remained deterministic; the read-only path was healthy and local Codex implementation was used under the documented fallback rule."
+  },
+  "implementation": {
+    "service": "src/research_workspace/repository_context.py:RepositoryContextService",
+    "models": [
+      "RepositorySymbol",
+      "RepositoryEdge",
+      "RepositoryFile",
+      "RepositoryIndex",
+      "RepoMap",
+      "RepositoryContext"
+    ],
+    "core_integration": "LaplaceCore.repository_context, repo_map, find_symbol and find_references expose the capability without a Zetsu dependency.",
+    "languages": [
+      "Python",
+      "C",
+      "C++",
+      "Verilog",
+      "SystemVerilog"
+    ],
+    "features": [
+      "symbols and definitions where reliably extractable",
+      "Python imports, C/C++ includes, RTL includes and module instantiations",
+      "unique-symbol reference edges",
+      "deterministic query/focus relevance ranking",
+      "bounded advisory RepoMap output",
+      "content-addressed snapshot invalidation for edit, rename, add and delete",
+      "stale-context rejection before downstream use",
+      "relative-path, symlink and file-size safety checks"
+    ],
+    "authority": "RepoMap is advisory context only; exact file reads remain required for mutation and deterministic verification.",
+    "parser_strategy": "The baseline uses Python ast and conservative standard-library extraction. Tree-sitter language-pack support remains an optional future backend and is not a runtime dependency.",
+    "changed_paths": [
+      "src/research_workspace/repository_context.py",
+      "src/research_workspace/laplace_core.py",
+      "tests/test_repository_context_g4.py"
+    ]
+  },
+  "upstream_evaluation": [
+    {
+      "name": "Aider RepoMap",
+      "repository": "https://github.com/Aider-AI/aider",
+      "inspected_revision": "0189cf4f0009aa58fd24a3b8c834819c8230fa77",
+      "branch_observed": "main",
+      "license": "Apache-2.0",
+      "license_path": "https://github.com/Aider-AI/aider/blob/0189cf4f0009aa58fd24a3b8c834819c8230fa77/LICENSE.txt",
+      "inspected_api": "aider/repomap.py RepoMap tag extraction, graph ranking, cache keys and token-bounded tree rendering",
+      "reuse_mode": "architectural reference only; no Aider source, dependency, model, network or runtime was copied"
+    },
+    {
+      "name": "tree-sitter-language-pack",
+      "repository": "https://github.com/xberg-io/tree-sitter-language-pack",
+      "inspected_revision": "86fa5a8925b1dc7b1adca47373e8c97167991fc2",
+      "release_observed": "v1.15.8",
+      "license": "MIT",
+      "license_path": "https://github.com/xberg-io/tree-sitter-language-pack/blob/86fa5a8925b1dc7b1adca47373e8c97167991fc2/LICENSE",
+      "inspected_api": "language loading, structure/import extraction, bundled queries and on-demand parser model",
+      "reuse_mode": "architectural reference only; no grammar, binary, source, dependency or remote download was added"
+    }
+  ],
+  "executed_gates": {
+    "focused_development": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest tests/test_repository_context_g4.py -q",
+      "returncode": 0,
+      "tests": 4
+    },
+    "lint_and_types": [
+      {
+        "command": "PYTHONPATH=src ruff check src/research_workspace/repository_context.py src/research_workspace/laplace_core.py tests/test_repository_context_g4.py",
+        "returncode": 0
+      },
+      {
+        "command": "PYTHONPATH=src mypy src/research_workspace/repository_context.py src/research_workspace/laplace_core.py tests/test_repository_context_g4.py",
+        "returncode": 0
+      },
+      {
+        "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m compileall -q src/research_workspace/repository_context.py src/research_workspace/laplace_core.py",
+        "returncode": 0
+      }
+    ],
+    "frozen_phase_acceptance_and_previous_regression": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest -q tests/test_repository_context_g4.py tests/test_rules_g3.py tests/test_memory_g2.py tests/test_laplace_core_g1.py tests/test_zetsu_mcp.py tests/test_zetsu_agent_mcp.py tests/test_personal_corpus_api_v6.py tests/test_tiered_serving.py tests/test_auth_provenance_security.py tests/test_operator_api.py tests/test_architecture_v7.py",
+      "returncode": 0,
+      "host_socket_permission_required": true,
+      "scope": "G4 mixed-language symbols/edges, bounded map, cache invalidation and stale rejection plus G3/G2/G1 and selected v1 authorization, corpus, serving, operator and architecture regressions"
+    },
+    "security_and_negative": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src bandit -q -lll -r src/research_workspace/repository_context.py src/research_workspace/laplace_core.py && git diff --check",
+      "returncode": 0,
+      "covered": [
+        "repository paths outside the root are rejected",
+        "symlinked source files are not indexed",
+        "oversized source files are bounded and produce no structural claims",
+        "invalid symbol queries and non-positive budgets fail closed",
+        "stale maps are rejected after source mutation",
+        "RepoMap explicitly marks itself advisory and requires exact reads for writes/verification"
+      ]
+    }
+  },
+  "cache_and_restart": {
+    "result": "PASS",
+    "cache": "In-memory cache keys include the complete sorted path/size/content-hash snapshot, query, focus paths and token budget; any edit, rename, add or delete clears affected cached results.",
+    "stale_rejection": "RepositoryContextService.assert_fresh compares the stored snapshot hash with a new content-addressed snapshot and raises RepositoryContextStaleError on mismatch.",
+    "durable_persistence": "NOT_APPLICABLE; no persistent index or generated repository artifact was introduced. Rebuilding from source bytes is deterministic across process restarts."
+  },
+  "comparison": {
+    "result": "PASS",
+    "method": "Frozen fixture compared exact-file context semantics with the advisory RepoMap path; the RepoMap preserved symbol/edge correctness and bounded output.",
+    "default_enable_decision": "NO",
+    "reason": "No material reduction in files read, model tokens, tool calls or latency was measured in this CPU-only deterministic phase. Keep RepoMap opt-in until a separately measured frozen workload demonstrates a benefit without correctness loss.",
+    "live_model_measurements": "NOT_RUN"
+  },
+  "development_smoke": {
+    "repository": "/home/giando/work/laplace-v2",
+    "supported_source_files_indexed": 337,
+    "symbols_extracted": 3848,
+    "edges_extracted": 12741,
+    "measurement_note": "One local deterministic smoke run after implementation; these are structural counts, not model-quality or performance claims."
+  },
+  "security_and_negative_results": {
+    "status": "PASS",
+    "network": "No network, cloud inference, telemetry, remote upload, parser download or hosted service was added.",
+    "mutation_boundary": "RepositoryContextService only reads source and returns advisory metadata; it has no edit, shell or verification execution path."
+  },
+  "metrics": {
+    "focused_test_returncode": 0,
+    "frozen_regression_returncode": 0,
+    "ruff_returncode": 0,
+    "mypy_returncode": 0,
+    "compileall_returncode": 0,
+    "bandit_high_returncode": 0,
+    "token_estimate": "Deterministic four-characters-per-token bound; not a claim about any production model tokenizer.",
+    "gpu_vram_latency_throughput": "NOT_MEASURED"
+  },
+  "limitations": [
+    "The standard-library extractor is conservative and does not claim complete grammar coverage; malformed Python files yield no Python symbols rather than guessed symbols.",
+    "C/C++ references are emitted only when a unique in-repository definition makes the edge reliable; unresolved or ambiguous references are omitted.",
+    "The cache is process-local and intentionally has no durable index; restart performs a deterministic source rescan.",
+    "RepoMap is not default-enabled because no material frozen-task benefit was measured.",
+    "The existing Zetsu repository-agent registry remains stale relative to the current v2 checkout; local implementation was used after the deterministic promotion-target failure recorded in G1.",
+    "The socket-concurrency regression requires host socket permission because the restricted shell denies socket creation; the unchanged selected suite passed under that permission.",
+    "The full G0 production certification was not repeated, per the roadmap instruction and prior phase certifications."
+  ],
+  "rollback_target": {
+    "commit": "7cc8b7e37897fb4434f7acbee810add409c6f423",
+    "description": "G3-certified authoritative rules and context hierarchy with production/v1 remaining separately immutable."
+  },
+  "certification_artifact": "docs/v2-roadmap/certifications/G4-repository-intelligence.json"
+}
