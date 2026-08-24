@@ -17,6 +17,12 @@ from .memory import MemoryService
 from .context_planner import ContextPlanner
 from .hooks import HookReport, HookService, HookStage
 from .idle_consolidation import ConsolidationReport, IdleConsolidator
+from .logical_subagents import (
+    GpuAwareSubagentScheduler,
+    LogicalSubagentOutcome,
+    LogicalSubagentTask,
+    SubagentExecutor,
+)
 from .personal_corpus import PersonalCorpusStore
 from .repository_context import (
     RepoMap,
@@ -76,6 +82,7 @@ class LaplaceCore:
         skill_registry: SkillRegistry | None = None,
         hooks: HookService | None = None,
         consolidation: IdleConsolidator | None = None,
+        logical_subagents: GpuAwareSubagentScheduler | None = None,
     ) -> None:
         self.repository_root = repository_root.resolve()
         self.corpus = corpus
@@ -89,6 +96,7 @@ class LaplaceCore:
         self._skill_registry = skill_registry
         self._hooks = hooks
         self._consolidation = consolidation
+        self._logical_subagents = logical_subagents
         self._repository_context = repository_context
         self._agent_coordinator = agent_coordinator
         self._agent_coordinator_lock = threading.Lock()
@@ -96,6 +104,7 @@ class LaplaceCore:
         self._skill_registry_lock = threading.Lock()
         self._hooks_lock = threading.Lock()
         self._consolidation_lock = threading.Lock()
+        self._logical_subagents_lock = threading.Lock()
 
     @property
     def skill_registry(self) -> SkillRegistry:
@@ -127,6 +136,15 @@ class LaplaceCore:
                     self.repository_root / ".laplace-state" / "consolidation"
                 )
             return self._consolidation
+
+    @property
+    def logical_subagents(self) -> GpuAwareSubagentScheduler:
+        """Return the conservative, single-GPU logical-subagent scheduler."""
+
+        with self._logical_subagents_lock:
+            if self._logical_subagents is None:
+                self._logical_subagents = GpuAwareSubagentScheduler()
+            return self._logical_subagents
 
     @property
     def repository_context(self) -> RepositoryContextService:
@@ -429,6 +447,15 @@ class LaplaceCore:
             },
         )
         return report
+
+    def run_logical_subagents(
+        self,
+        tasks: Sequence[LogicalSubagentTask],
+        executor: SubagentExecutor,
+    ) -> tuple[LogicalSubagentOutcome, ...]:
+        """Run owner-scoped logical children through the GPU-aware queue."""
+
+        return self.logical_subagents.run_batch(tasks, executor)
 
     @staticmethod
     def deterministic_verification(
