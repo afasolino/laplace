@@ -1,0 +1,236 @@
+{
+  "schema_version": 1,
+  "phase": "G0",
+  "title": "Freeze and Prove the v1 Baseline",
+  "lifecycle_state": "CERTIFICATION",
+  "status": "CERTIFIED",
+  "generated_at_utc": "2026-08-24T15:10:02Z",
+  "control_plane": {
+    "production_root": "/home/giando/work/laplace",
+    "production_branch": "production/v1",
+    "production_commit": "d30c8e72f8f32bd043c84e8560c7447e6faef0e9",
+    "production_tag": "laplace-v1-production",
+    "v2_root": "/home/giando/work/laplace-v2",
+    "v2_branch": "feature/laplace-v2",
+    "v2_commit_at_freeze": "047af111fc864b4eae2ffdfa62fabe716d3fb16d",
+    "worktree_separation": {
+      "production": "/home/giando/work/laplace -> d30c8e72f8f32bd043c84e8560c7447e6faef0e9",
+      "v2": "/home/giando/work/laplace-v2 -> 047af111fc864b4eae2ffdfa62fabe716d3fb16d",
+      "v2_process_match_count": 0,
+      "production_status": "clean",
+      "v2_status_before_certification_artifact": "clean"
+    },
+    "live_service_observation": {
+      "local_process_scan": "no Laplace/vLLM/Qwen service process was present in this session namespace",
+      "health_endpoint": "http://127.0.0.1:8765 unavailable (curl error 7: Couldn't connect to server)",
+      "interpretation": "The Zetsu MCP control path is external to this shell namespace; no v2 process or live service was started by G0."
+    }
+  },
+  "zetsu_bootstrap": {
+    "mcp_available": true,
+    "authenticated_owner_scope": "authenticated_user_personal_corpus",
+    "personal_corpus_state": {
+      "queries": [
+        "certified v1 production baseline for afasolino/laplace; G0 freeze and worktree separation",
+        "afasolino/laplace v1 production baseline",
+        "Laplace v1 certified production baseline",
+        "Laplace"
+      ],
+      "grounded": false,
+      "evidence_count": 0,
+      "interpretation": "empty/ungrounded Personal Corpus result; not populated artificially and not treated as a connectivity failure"
+    },
+    "delegate_execution": {
+      "status": "SUCCESS",
+      "marker": "ZETSU_QWEN_ROUTE_OK",
+      "model_id": "laplace-quality-qwen38-mtp",
+      "effective_lane": "quality",
+      "request_id": "chat-078798c7f2fa4f3da0924e146fc6aeef",
+      "trace_id": "trace-e55a4d033553444f82ee8a84b220b092",
+      "session_id": "chat-session-d01c5676843c4fc7ad5f5e785ece0610"
+    },
+    "repository_agent": {
+      "repo_id": "laplace-v2",
+      "canonical_root": "/home/giando/work/laplace-v2",
+      "status": "SUCCESS",
+      "session_id": "zetsu-c14bc361b1d243858cc8465c8d242dbc",
+      "model_id": "laplace-quality-qwen38-mtp",
+      "changed_paths": [],
+      "scope": "read-only batch over eight v2 repository files"
+    }
+  },
+  "certified_v1_configuration": {
+    "active_selector": {
+      "path": "configs/selected_serving_profiles.json",
+      "sha256": "6b55c89098f3b54ec9341e5d12b8334fc74ee7978de4530769c763d7a47018bd",
+      "default_profile_id": "P7_qwen38_w4a16_mtp",
+      "high_context_profile_id": "P7_qwen38_w4a16_mtp"
+    },
+    "rollback_selector": {
+      "path": "configs/selected_serving_profiles.qwen36.rollback.json",
+      "sha256": "6dbdddf2dfbae6a033783c9ea952b9c7aa8e78d6b7b47a6a9b8a1c9cd8d56159",
+      "default_profile_id": "P1_fp8_kv",
+      "high_context_profile_id": "P4_priority_expert_fp8"
+    },
+    "routing": {
+      "quality": {
+        "model_id": "laplace-quality-qwen38-mtp",
+        "endpoint": "http://127.0.0.1:8207",
+        "context_limit": 131072,
+        "output_limit": 4096
+      },
+      "standard": {
+        "model_id": "laplace-quality-qwen38-mtp",
+        "endpoint": "http://127.0.0.1:8207",
+        "context_limit": 131072,
+        "output_limit": 2048
+      },
+      "economy": {
+        "model_id": "laplace-codev-r1-rl-qwen-7b-w4a16",
+        "endpoint": "http://127.0.0.1:8103",
+        "context_limit": 8192,
+        "output_limit": 2048
+      }
+    },
+    "model": {
+      "source_repository": "barrydeen/Qwen3.8-27B-AWQ-4bit",
+      "source_revision": "e6b4b8b025f85b3e18f13281db576e0b7d5fe314",
+      "base_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "artifact_revision": "hf:barrydeen/Qwen3.8-27B-AWQ-4bit@e6b4b8b025f85b3e18f13281db576e0b7d5fe314",
+      "artifact_sha256": "4d72d8123b8b292edd5de9c1a3cbb7cd351eca7eb14fdf0aa996d9fcab340bb2",
+      "quantization": "compressed-tensors AWQ, 4-bit, group size 128, ampere_marlin_w4a16",
+      "certification_status": "PASSED",
+      "promotion_allowed": true,
+      "certified_repository_revision": "833a308e218eeb05b24a7c7d70d9fd7c1b9bceff"
+    },
+    "mtp": {
+      "enabled": true,
+      "requested_speculative_tokens": 3,
+      "reason": "P6 non-MTP and independent P7 profile/co-resident production gates passed; P7 measured acceptance rate was 0.8713826366559485 with 3.605769230769231 committed tokens per step.",
+      "p7_minimum_free_headroom_mib": 4031,
+      "p7_peak_used_mib": 45109,
+      "p6_minimum_free_headroom_mib": 4456,
+      "p6_peak_used_mib": 44684
+    },
+    "certification_artifacts": [
+      {
+        "profile": "P6",
+        "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p6-util0755/certification.json",
+        "sha256": "28a529019db24314732a0c6e0944161bbf3b8f505da57abe5febcab85e68e819",
+        "status": "PASSED"
+      },
+      {
+        "profile": "P6 production",
+        "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p6-production-final-v2/production_gate.json",
+        "sha256": "65ce2e25dc8d3fd602cd5731a3136e1b06e76da23fdba5a2dc0a7fafb251c6b3",
+        "status": "PASSED"
+      },
+      {
+        "profile": "P7 MTP",
+        "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p7-k3-util077-cert-v1/certification.json",
+        "sha256": "1be434bee5bd3317c423e8b101b10dc84cb725f7dd82e018d3372892d2795f2e",
+        "status": "PASSED"
+      },
+      {
+        "profile": "P7 production",
+        "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p7-k3-codev0134-prod-v1/production_gate.json",
+        "sha256": "e25ca5243325671e1834d88c239cb2f437da8f5525b3d68d4583a5c7e88e0d81",
+        "status": "PASSED"
+      }
+    ]
+  },
+  "upstream_dependencies": [
+    {
+      "name": "barrydeen/Qwen3.8-27B-AWQ-4bit",
+      "revision": "e6b4b8b025f85b3e18f13281db576e0b7d5fe314",
+      "license": "Apache-2.0",
+      "reuse_mode": "reference to certified local artifact; no upstream source copied in G0"
+    },
+    {
+      "name": "vLLM",
+      "revision": "0.25.0+cu129",
+      "license": "recorded in the v1 dependency inventory",
+      "reuse_mode": "certified local serving runtime"
+    }
+  ],
+  "executed_gates": {
+    "mandatory_v1_regression": {
+      "status": "PASS",
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=/home/giando/work/laplace-v2/outputs/g0-v1-regression-production/pycache PYTEST_ADDOPTS='-p no:cacheprovider' MYPY_CACHE_DIR=/home/giando/work/laplace-v2/outputs/g0-v1-regression-production/mypy-cache PYTHONPATH=/home/giando/work/laplace/src /home/giando/work/laplace/.venv/bin/python /home/giando/work/laplace-v2/scripts/run_tiered_final_checks.py --repository-root /home/giando/work/laplace --output-root /home/giando/work/laplace-v2/outputs/g0-v1-regression-production",
+      "output": "/home/giando/work/laplace-v2/outputs/g0-v1-regression-production/final_test_results.json",
+      "gates": [
+        "compileall",
+        "targeted_pytest",
+        "full_pytest",
+        "ruff",
+        "mypy",
+        "bandit_high",
+        "git_diff_check"
+      ],
+      "all_returncodes": 0
+    },
+    "rollback_and_restoration": {
+      "rollback_command": "PYTHONPATH=/home/giando/work/laplace/src /home/giando/work/laplace/.venv/bin/python scripts/select_production_model.py qwen36 --repository-root /home/giando/work/laplace --output /home/giando/work/laplace-v2/outputs/g0-rollback/selected_qwen36.json",
+      "rollback_status": "PASS",
+      "rollback_output_sha256": "6dbdddf2dfbae6a033783c9ea952b9c7aa8e78d6b7b47a6a9b8a1c9cd8d56159",
+      "restoration_command": "PYTHONPATH=/home/giando/work/laplace/src /home/giando/work/laplace/.venv/bin/python scripts/select_production_model.py qwen38 --repository-root /home/giando/work/laplace --output /home/giando/work/laplace-v2/outputs/g0-rollback/selected_qwen38_restored.json",
+      "restoration_status": "PASS",
+      "restoration_output_sha256": "59f458e75fa5bab5edd71eb79e3a168970894ea402cf2d664efa7f4b54fb8eb4",
+      "restored_profile_id": "P7_qwen38_w4a16_mtp",
+      "restored_semantics_sha256": "8c09c6bb6e43e1c8e31d17b6613d88f9374f1b55860f8d949428b460648fd6ae",
+      "production_selector_after_sha256": "6b55c89098f3b54ec9341e5d12b8334fc74ee7978de4530769c763d7a47018bd",
+      "production_checkout_modified": false,
+      "live_restart": "not run: no localhost Laplace service was present; staged selector exercise was used to preserve the immutable control plane"
+    },
+    "frozen_evaluations": {
+      "frozen_before_v2_implementation": true,
+      "definitions": [
+        {
+          "identity": "laplace-v7-frozen-fixtures-1",
+          "path": "benchmarks/evaluation/frozen_suite_v1.json",
+          "sha256": "33489c1d70d62b242de1ea29a6f71e9356e710701472c7c36ee0af98c4a7d545",
+          "case_count": 14
+        },
+        {
+          "identity": "zetsu-production-optimized-v4",
+          "path": "configs/benchmarks/zetsu_production_token_tasks_v4.json",
+          "sha256": "f0359e7d5864f43103bac84ee92730e8047ebe2cdd9b4d32405663b7b228e324",
+          "case_count": 3,
+          "runs_per_condition": 1
+        },
+        {
+          "identity": "serving-quality-manifest-v1",
+          "path": "configs/serving_quality_manifest.json",
+          "sha256": "181c1f378c76171fab7cb5aa401e4785a389b4cc5241bc127a28b8506c569ac7",
+          "case_count": 6
+        }
+      ]
+    }
+  },
+  "security_and_negative_results": {
+    "status": "PASS",
+    "evidence": "targeted_pytest includes tests/test_auth_provenance_security.py and tests/test_production_robustness.py; Bandit high-severity scan returned 0; production checkout remained clean",
+    "personal_corpus_cross_scope": "not populated or exercised at G0; empty/ungrounded corpus state preserved"
+  },
+  "persistence_and_restart": {
+    "selector_write": "atomic selector output succeeded for rollback and restoration staging",
+    "live_service_restart": "NOT_RUN",
+    "reason": "No local control-plane service was present and production checkout/live instance must remain untouched"
+  },
+  "diagnostics_and_limitations": [
+    "A preliminary regression against v2 failed because the v2 worktree intentionally lacks production-only .venv-vllm-cu129 and .runtime/ffmpeg7 assets, and the sandbox denied socket creation; the required v1-root regression was then run once with host socket permission and passed.",
+    "Additional read-only Zetsu repository batches were blocked by per_user_worktree_quota after successful batch A; five clean session worktrees could not be removed because their linked production Git metadata is read-only. No changes were made to production.",
+    "The localhost health/readiness endpoint was unavailable in this shell namespace; the authenticated Zetsu route and repository/worktree separation checks succeeded."
+  ],
+  "rollback_target": {
+    "profile": "qwen36",
+    "selector": "configs/selected_serving_profiles.qwen36.rollback.json",
+    "sha256": "6dbdddf2dfbae6a033783c9ea952b9c7aa8e78d6b7b47a6a9b8a1c9cd8d56159"
+  },
+  "source_changes": {
+    "implementation_files_changed": [],
+    "certification_artifact": "docs/v2-roadmap/certifications/G0-v1-freeze.json",
+    "derived_evidence_root": "outputs/g0-v1-regression-production",
+    "production_checkout_modified": false
+  }
+}
