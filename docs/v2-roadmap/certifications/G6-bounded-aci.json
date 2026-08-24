@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "phase": "G6",
+  "title": "Improved Bounded Agent-Computer Interface",
+  "lifecycle_state": "CERTIFICATION",
+  "feature_lifecycle_state": "SHADOW",
+  "status": "CERTIFIED",
+  "generated_at_utc": "2026-08-24T18:49:35Z",
+  "control_plane": {
+    "production_root": "/home/giando/work/laplace",
+    "production_branch": "production/v1",
+    "production_source_modified": false,
+    "v2_root": "/home/giando/work/laplace-v2",
+    "v2_branch": "feature/laplace-v2",
+    "base_commit": "1aa9056828ffcabb64c3b42907f0f568bc30be88",
+    "candidate_commit": "c8e81a42494baa16538ddd046bf1c2794b577558",
+    "worktree_status_before_certification_artifact": "clean",
+    "zetsu_mutation_note": "The repaired read-only repository-agent proof passed without per_user_worktree_quota. The bounded mutating delegation remained deterministically blocked by the stale promotion target (zetsu_agent_apply_target_not_clean); local implementation was used under the documented fallback, and the production control-plane checkout was not modified."
+  },
+  "implementation": {
+    "service": "src/research_workspace/bounded_aci.py:BoundedRepositoryACI",
+    "typed_operations": [
+      "repo_map",
+      "find_symbol",
+      "find_references",
+      "search_text",
+      "read_region",
+      "inspect_diff",
+      "edit_region",
+      "create_text_file",
+      "verify",
+      "git_state"
+    ],
+    "coordinator_integration": "ZetsuAgentCoordinator exposes the typed actions in its bounded model prompt and dispatches them through the same owner/session/worktree/verifier policy; legacy actions remain compatible during shadow evaluation.",
+    "security_boundary": "No generic shell or network operation is exposed. Git is limited to fixed read-only state/diff commands; verification executables are allowlisted and path/options are validated; mutation requires the existing apply_patch grant and a required verifier.",
+    "bounded_output": "RepoMap token budget, structured result counts, region line/character caps, search match cap, diff byte cap, git status cap and verifier tail/artifact handling are all explicit. No generation limit or chunked append/write primitive was added.",
+    "changed_paths": [
+      "src/research_workspace/bounded_aci.py",
+      "src/research_workspace/zetsu_agent.py",
+      "tests/test_bounded_aci_g6.py"
+    ]
+  },
+  "upstream_evaluation": [
+    {
+      "name": "SWE-agent",
+      "repository": "https://github.com/SWE-agent/SWE-agent",
+      "inspected_revision": "3ea751c087f32b16e039a2233dd6eefecef325d5",
+      "license": "MIT",
+      "license_path": "https://github.com/SWE-agent/SWE-agent/blob/3ea751c087f32b16e039a2233dd6eefecef325d5/LICENSE",
+      "inspected_api": "tool bundles, file viewer/editor concepts and trajectory-oriented ACI documentation",
+      "reuse_mode": "architectural reference only; no SWE-agent source, dependency, shell bundle, model or network path was copied"
+    },
+    {
+      "name": "mini-SWE-agent",
+      "repository": "https://github.com/SWE-agent/mini-swe-agent",
+      "inspected_revision": "25941c89cfbc91eb40b3f8756348c91d9977d57e",
+      "license": "MIT",
+      "license_path": "https://github.com/SWE-agent/mini-swe-agent/blob/25941c89cfbc91eb40b3f8756348c91d9977d57e/LICENSE.md",
+      "inspected_api": "minimal linear agent/tool design and independent action execution reference",
+      "reuse_mode": "architectural reference only; no mini-SWE-agent source, dependency, shell, model or network path was copied"
+    }
+  ],
+  "executed_gates": {
+    "focused_development": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest tests/test_bounded_aci_g6.py -q",
+      "returncode": 0,
+      "tests": 6
+    },
+    "frozen_phase_acceptance_and_previous_regression": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest -q tests/test_bounded_aci_g6.py tests/test_trajectory_g5.py tests/test_repository_context_g4.py tests/test_rules_g3.py tests/test_memory_g2.py tests/test_laplace_core_g1.py tests/test_zetsu_mcp.py tests/test_zetsu_agent_mcp.py tests/test_zetsu_agent_checkpoint.py tests/test_personal_corpus_api_v6.py tests/test_tiered_serving.py tests/test_auth_provenance_security.py tests/test_operator_api.py tests/test_architecture_v7.py",
+      "returncode": 0,
+      "host_socket_permission_required": true,
+      "scope": "Typed ACI traversal, bounded output, mutation/verification controls, cancellation, timeout and old/new repair parity plus G5/G4/G3/G2/G1 and selected v1 agent, corpus, serving, authorization, operator and architecture regressions"
+    },
+    "security_and_negative": {
+      "result": "PASS",
+      "commands": [
+        "PYTHONPATH=src ruff check src/research_workspace/bounded_aci.py src/research_workspace/zetsu_agent.py tests/test_bounded_aci_g6.py",
+        "PYTHONPATH=src mypy src/research_workspace/bounded_aci.py src/research_workspace/zetsu_agent.py tests/test_bounded_aci_g6.py",
+        "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m compileall -q src/research_workspace/bounded_aci.py src/research_workspace/zetsu_agent.py",
+        "PYTHONPATH=src bandit -q -lll -r src/research_workspace/bounded_aci.py src/research_workspace/zetsu_agent.py",
+        "git diff --check"
+      ],
+      "returncodes": [0, 0, 0, 0, 0],
+      "covered": [
+        "relative traversal, absolute paths, symlinks, hardlinks/mount/nested repository and .git metadata are rejected through the existing workspace validator",
+        "malformed typed arguments and unsupported verifier executables/options fail closed",
+        "generic shell/network input is absent from the tool surface",
+        "huge search/diff/read/verification output is bounded or retained as bounded tails",
+        "verification timeout/cancellation kills the process group and checks worktree mutation",
+        "mutation is policy-bound, exact-anchor, diff-checked and atomically written"
+      ],
+      "bandit_note": "Bandit returned zero high-severity findings; its manager emitted only warnings from security-comment words such as argv/shell/allowlisted."
+    }
+  },
+  "comparison": {
+    "result": "PASS",
+    "method": "The frozen old coordinator and typed ACI repair surfaces were run on identical two-repository fixtures. Both produced the same exact source bytes and one replacement; typed operations additionally returned structured bounded metadata. The full unchanged coordinator/MCP coding and repair regression suite also passed.",
+    "correctness": "PRESERVED",
+    "security": "PRESERVED",
+    "efficiency_measurements": {
+      "model_tokens": "NOT_MEASURED",
+      "model_calls": "NOT_MEASURED",
+      "files_read": "NOT_MEASURED",
+      "latency": "NOT_MEASURED",
+      "human_intervention": "NOT_MEASURED"
+    },
+    "default_enable_decision": "NO",
+    "reason": "The typed surface improves operation shape and structured evidence, but this deterministic CPU-only fixture did not establish a material production efficiency benefit. Keep the interface in SHADOW until a frozen local-model workload measures a benefit without correctness or security loss.",
+    "chunked_write_decision": "NO",
+    "chunked_write_reason": "Existing v1 traces/tests already use bounded reads, exact edits, bounded creates and durable large-result artifacts; no real truncation or awkward large-file construction evidence justified a new write primitive."
+  },
+  "metrics": {
+    "focused_test_returncode": 0,
+    "frozen_regression_returncode": 0,
+    "ruff_returncode": 0,
+    "mypy_returncode": 0,
+    "compileall_returncode": 0,
+    "bandit_high_returncode": 0,
+    "typed_result_caps": "Deterministic configured caps; not claims about model tokenization.",
+    "gpu_vram_latency_throughput": "NOT_MEASURED"
+  },
+  "limitations": [
+    "SHADOW lifecycle is intentional: legacy actions remain accepted and typed ACI has no independently measured local-model efficiency advantage yet.",
+    "Repository structural operations rebuild/use the deterministic repository-context service and are advisory; exact file reads remain required for mutation and verification.",
+    "The typed ACI is constructed from an already authorized coordinator context; it is not an independent grant or identity service.",
+    "The existing Zetsu repository-agent registry remains stale relative to the current v2 checkout; local implementation was used after the deterministic promotion-target failure recorded in prior certifications.",
+    "The socket-concurrency regression requires host socket permission because the restricted shell denies socket creation; the selected unchanged suite passed under that permission.",
+    "The full G0 production certification was not repeated, per the roadmap instruction and prior phase certifications."
+  ],
+  "rollback_target": {
+    "commit": "1aa9056828ffcabb64c3b42907f0f568bc30be88",
+    "description": "G5-certified append-only trajectories and derived checkpoints with production/v1 remaining separately immutable."
+  },
+  "certification_artifact": "docs/v2-roadmap/certifications/G6-bounded-aci.json"
+}
