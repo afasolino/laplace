@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "phase": "G2",
+  "title": "Episodic and Semantic Memory",
+  "lifecycle_state": "CERTIFICATION",
+  "feature_lifecycle_state": "ENABLED",
+  "status": "CERTIFIED",
+  "generated_at_utc": "2026-08-24T18:01:06Z",
+  "control_plane": {
+    "production_root": "/home/giando/work/laplace",
+    "production_branch": "production/v1",
+    "production_source_modified": false,
+    "v2_root": "/home/giando/work/laplace-v2",
+    "v2_branch": "feature/laplace-v2",
+    "base_commit": "ac01b17fd6a91e97c731bd69b0d65c51fc308fdc",
+    "candidate_commit": "70bb7be2a3ff203e3fc67a8e9c99358ae30c29d9",
+    "worktree_status_before_certification_artifact": "clean"
+  },
+  "implementation": {
+    "service": "src/research_workspace/memory.py:MemoryService",
+    "backend_protocol": "src/research_workspace/memory.py:MemoryBackend",
+    "backend": "src/research_workspace/memory.py:SQLiteMemoryBackend",
+    "core_integration": "src/research_workspace/laplace_core.py:LaplaceCore.memory",
+    "standalone_state_integration": "src/research_workspace/operator_api.py:create_operator_app",
+    "memory_is_distinct_from": [
+      "Personal Corpus source-grounded document retrieval",
+      "authoritative rules and policy",
+      "model/runtime memory measurements"
+    ],
+    "features": [
+      "episodic and semantic record kinds",
+      "owner/project scope",
+      "explicit user and deterministic-event writes",
+      "approved model-proposal writes",
+      "provenance and content hashes",
+      "deterministic local lexical search",
+      "immutable supersession history",
+      "contradiction-key fail-closed admission",
+      "search exclusion after deletion",
+      "SQLite restart persistence and integrity checks"
+    ],
+    "changed_paths": [
+      "src/research_workspace/memory.py",
+      "src/research_workspace/laplace_core.py",
+      "src/research_workspace/operator_api.py",
+      "tests/test_memory_g2.py"
+    ],
+    "hosted_service_dependency": false
+  },
+  "upstream_evaluation": {
+    "name": "mem0ai/mem0",
+    "repository": "https://github.com/mem0ai/mem0",
+    "inspected_revision": "b717e38785dd8bcc6542ad88212ffca33f573f10",
+    "branch_observed": "main",
+    "license": "Apache-2.0",
+    "license_path": "https://github.com/mem0ai/mem0/blob/b717e38785dd8bcc6542ad88212ffca33f573f10/LICENSE",
+    "evaluation": "Reviewed as an architectural candidate. G2 uses a smaller local SQLite adapter; no mem0 source, dependency, hosted platform, or provider integration was copied or added.",
+    "reuse_mode": "reference-only; deferred pending isolated self-hosted A/B and dependency review"
+  },
+  "executed_gates": {
+    "focused_development": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest tests/test_memory_g2.py -q",
+      "returncode": 0
+    },
+    "lint_and_types": [
+      {
+        "command": "PYTHONPATH=src ruff check src/research_workspace/memory.py src/research_workspace/laplace_core.py src/research_workspace/operator_api.py tests/test_memory_g2.py",
+        "returncode": 0
+      },
+      {
+        "command": "PYTHONPATH=src mypy src/research_workspace/memory.py src/research_workspace/laplace_core.py src/research_workspace/operator_api.py tests/test_memory_g2.py",
+        "returncode": 0
+      }
+    ],
+    "frozen_phase_acceptance_and_previous_regression": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest -q tests/test_memory_g2.py tests/test_laplace_core_g1.py tests/test_zetsu_mcp.py tests/test_zetsu_agent_mcp.py tests/test_personal_corpus_api_v6.py tests/test_tiered_serving.py tests/test_auth_provenance_security.py tests/test_operator_api.py tests/test_architecture_v7.py",
+      "returncode": 0,
+      "host_socket_permission_required": true,
+      "scope": "G2 memory isolation/persistence/contradiction/deletion/corruption plus full selected G1 shared-core and v1 regression"
+    },
+    "negative_and_corruption": {
+      "result": "PASS",
+      "covered": [
+        "missing explicit write intent",
+        "unapproved model proposal",
+        "owner and project cross-scope access",
+        "contradiction without supersession",
+        "obsolete memory excluded from search",
+        "deleted memory excluded from search",
+        "malformed provenance and corrupt durable entries"
+      ],
+      "test_file": "tests/test_memory_g2.py"
+    },
+    "deterministic_static": [
+      {
+        "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m compileall -q src/research_workspace/memory.py src/research_workspace/laplace_core.py src/research_workspace/operator_api.py",
+        "returncode": 0
+      },
+      {
+        "command": "PYTHONPATH=src bandit -q -lll -r src/research_workspace/memory.py src/research_workspace/laplace_core.py src/research_workspace/operator_api.py",
+        "returncode": 0,
+        "severity_threshold": "high"
+      },
+      {
+        "command": "git diff --check",
+        "returncode": 0
+      }
+    ]
+  },
+  "persistence_and_restart": {
+    "result": "PASS",
+    "backend": "SQLiteMemoryBackend",
+    "evidence": "tests/test_memory_g2.py:test_memory_restart_preserves_provenance_and_history",
+    "atomicity": "SQLite transaction boundaries use BEGIN IMMEDIATE for add, supersede, and delete.",
+    "recovery": "Strict record/content-hash/provenance/event decoding and PRAGMA integrity_check fail closed on corruption.",
+    "deletion": "Deletion is an audited state transition; deleted rows remain available to owner-scoped history but are excluded from search."
+  },
+  "security_and_negative_results": {
+    "status": "PASS",
+    "authorization": "Every get/search/history/update/supersede/delete operation requires owner and project scope; missing rows do not disclose other scopes.",
+    "admission": "No write path accepts absent or mismatched intent/provenance; model proposals require approval.",
+    "provenance": "Every record has source kind, source ID, actor, approval state, timestamp, metadata, and content SHA-256.",
+    "network": "No network, cloud inference, telemetry, or remote upload was added."
+  },
+  "metrics": {
+    "focused_test_returncode": 0,
+    "frozen_regression_returncode": 0,
+    "ruff_returncode": 0,
+    "mypy_returncode": 0,
+    "compileall_returncode": 0,
+    "bandit_high_returncode": 0,
+    "live_model_measurements": "NOT_RUN",
+    "gpu_vram_latency_throughput": "NOT_MEASURED",
+    "search_algorithm": "deterministic lexical token scoring; no semantic embedding quality claim"
+  },
+  "limitations": [
+    "The backend is a deterministic lexical baseline; a local vector/semantic backend requires a separately measured A/B phase.",
+    "The existing Zetsu repository-agent registry remains stale relative to the current v2 checkout; G2 implementation and tests were performed locally after the deterministic promotion-target failure recorded in G1.",
+    "The socket-concurrency regression requires host socket permission because the restricted shell denies socket creation; the unchanged test passed under that permission.",
+    "The full G0 production certification was not repeated, per the roadmap instruction and G1 certification; the selected previous-phase regression was run."
+  ],
+  "rollback_target": {
+    "commit": "ac01b17fd6a91e97c731bd69b0d65c51fc308fdc",
+    "description": "G1-certified shared core without the G2 memory service; production/v1 remains separately immutable."
+  },
+  "certification_artifact": "docs/v2-roadmap/certifications/G2-memory.json"
+}
