@@ -16,6 +16,7 @@ from .model_routing import RoutingTaskMetadata, assess_rtl_worker_eligibility
 from .memory import MemoryService
 from .context_planner import ContextPlanner
 from .hooks import HookReport, HookService, HookStage
+from .idle_consolidation import ConsolidationReport, IdleConsolidator
 from .personal_corpus import PersonalCorpusStore
 from .repository_context import (
     RepoMap,
@@ -74,6 +75,7 @@ class LaplaceCore:
         context_planner: ContextPlanner | None = None,
         skill_registry: SkillRegistry | None = None,
         hooks: HookService | None = None,
+        consolidation: IdleConsolidator | None = None,
     ) -> None:
         self.repository_root = repository_root.resolve()
         self.corpus = corpus
@@ -86,12 +88,14 @@ class LaplaceCore:
         self.context_planner = context_planner or ContextPlanner()
         self._skill_registry = skill_registry
         self._hooks = hooks
+        self._consolidation = consolidation
         self._repository_context = repository_context
         self._agent_coordinator = agent_coordinator
         self._agent_coordinator_lock = threading.Lock()
         self._repository_context_lock = threading.Lock()
         self._skill_registry_lock = threading.Lock()
         self._hooks_lock = threading.Lock()
+        self._consolidation_lock = threading.Lock()
 
     @property
     def skill_registry(self) -> SkillRegistry:
@@ -112,6 +116,17 @@ class LaplaceCore:
             if self._hooks is None:
                 self._hooks = HookService(self.repository_root / ".laplace-state" / "hooks")
             return self._hooks
+
+    @property
+    def consolidation(self) -> IdleConsolidator:
+        """Return the shared shadow-only idle consolidation service."""
+
+        with self._consolidation_lock:
+            if self._consolidation is None:
+                self._consolidation = IdleConsolidator(
+                    self.repository_root / ".laplace-state" / "consolidation"
+                )
+            return self._consolidation
 
     @property
     def repository_context(self) -> RepositoryContextService:
@@ -348,6 +363,72 @@ class LaplaceCore:
             idempotency_key=idempotency_key,
             payload=payload,
         )
+
+    def run_idle_consolidation(
+        self,
+        *,
+        owner_id: str,
+        project_id: str,
+        session_id: str,
+        cycle_id: str,
+        trajectory_events: Sequence[object] = (),
+        memories: Sequence[object] = (),
+        window_id: str = "default",
+        now_utc: str | None = None,
+    ) -> ConsolidationReport:
+        """Run one explicitly requested idle window in shadow mode.
+
+        Lifecycle hooks are advisory control points; the consolidator itself
+        remains deterministic and cannot mutate authoritative state.
+        """
+
+        self.emit_hook(
+            HookStage.IDLE_START,
+            owner_id=owner_id,
+            project_id=project_id,
+            session_id=session_id,
+            task_id=cycle_id,
+            idempotency_key=f"idle-start-{cycle_id}",
+            payload={"cycle_id": cycle_id, "window_id": window_id, "mode": "SHADOW"},
+        )
+        try:
+            report = self.consolidation.run_cycle(
+                cycle_id,
+                owner_id=owner_id,
+                project_id=project_id,
+                session_id=session_id,
+                trajectory_events=trajectory_events,
+                memories=memories,
+                window_id=window_id,
+                now_utc=now_utc,
+            )
+        except Exception:
+            self.emit_hook(
+                HookStage.IDLE_END,
+                owner_id=owner_id,
+                project_id=project_id,
+                session_id=session_id,
+                task_id=cycle_id,
+                idempotency_key=f"idle-end-{cycle_id}",
+                payload={"cycle_id": cycle_id, "window_id": window_id, "status": "FAILURE", "mode": "SHADOW"},
+            )
+            raise
+        self.emit_hook(
+            HookStage.IDLE_END,
+            owner_id=owner_id,
+            project_id=project_id,
+            session_id=session_id,
+            task_id=cycle_id,
+            idempotency_key=f"idle-end-{cycle_id}",
+            payload={
+                "cycle_id": cycle_id,
+                "window_id": window_id,
+                "status": report.cycle.status,
+                "proposal_count": len(report.proposals),
+                "mode": "SHADOW",
+            },
+        )
+        return report
 
     @staticmethod
     def deterministic_verification(
