@@ -57,6 +57,7 @@ from .personal_corpus import (
 )
 from .request_state import RequestStateError, RequestStateStore
 from .rules import RuleService, SQLiteRuleBackend
+from .trajectory import TrajectoryService
 from .agent_sandbox import AgentSandboxError, AgentToolPolicy
 from .research_models import ResearchJobRequest
 from .research_admission import ResearchAdmissionError, ResearchAdmissionStore
@@ -490,6 +491,7 @@ def create_operator_app(
     zetsu_enabled: bool = True,
     memory: MemoryService | None = None,
     rules: RuleService | None = None,
+    trajectory: TrajectoryService | None = None,
     serving_profile_operator: ServingProfileOperator | None = None,
     registered_auth: RegisteredEmailAuth | None = None,
     conversation_store: ConversationStore | None = None,
@@ -515,6 +517,7 @@ def create_operator_app(
     rules_service = rules or RuleService(
         SQLiteRuleBackend(operator.state_root / "rules/rules.sqlite3")
     )
+    trajectory_service = trajectory or TrajectoryService(operator.state_root / "trajectory")
     shared_core = (
         core
         if core is not None
@@ -525,6 +528,7 @@ def create_operator_app(
                 tiered,
                 memory=memory_service,
                 rules=rules_service,
+                trajectory=trajectory_service,
             )
             if tiered is not None
             else None

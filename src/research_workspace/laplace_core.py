@@ -23,6 +23,14 @@ from .repository_context import (
 )
 from .rules import ContextItem, ContextPacket, RuleService
 from .service_tiers import ModelLane, ServiceTierError, TieredServingService
+from .trajectory import (
+    TrajectoryEvent,
+    TrajectoryEventType,
+    TrajectoryIdentity,
+    TrajectoryProvenance,
+    TrajectoryReplay,
+    TrajectoryService,
+)
 from .user_capabilities import Capability
 from .verification_gates import VerificationGateRegistry
 from .zetsu_agent import ZetsuAgentCoordinator
@@ -59,12 +67,16 @@ class LaplaceCore:
         memory: MemoryService | None = None,
         rules: RuleService | None = None,
         repository_context: RepositoryContextService | None = None,
+        trajectory: TrajectoryService | None = None,
     ) -> None:
         self.repository_root = repository_root.resolve()
         self.corpus = corpus
         self.tiered = tiered
         self.memory = memory
         self.rules = rules
+        self.trajectory = trajectory or TrajectoryService(
+            self.repository_root / ".laplace-state" / "trajectory"
+        )
         self._repository_context = repository_context
         self._agent_coordinator = agent_coordinator
         self._agent_coordinator_lock = threading.Lock()
@@ -305,6 +317,39 @@ class LaplaceCore:
         """Find reliable structural references without replacing file reads."""
 
         return self.repository_context.find_references(name)
+
+    def append_trajectory_event(
+        self,
+        identity: TrajectoryIdentity,
+        *,
+        event_type: TrajectoryEventType,
+        idempotency_key: str,
+        payload: JsonObject,
+        state_before: JsonObject,
+        state_after: JsonObject,
+        provenance: TrajectoryProvenance,
+    ) -> TrajectoryEvent:
+        """Append an owner-bound authoritative event through standalone Core."""
+
+        return self.trajectory.append(
+            identity,
+            event_type=event_type,
+            idempotency_key=idempotency_key,
+            payload=payload,
+            state_before=state_before,
+            state_after=state_after,
+            provenance=provenance,
+        )
+
+    def replay_trajectory(self, identity: TrajectoryIdentity) -> TrajectoryReplay:
+        """Reconstruct exact task state from events, using checkpoints only as acceleration."""
+
+        return self.trajectory.replay(identity)
+
+    def checkpoint_trajectory(self, identity: TrajectoryIdentity) -> Path:
+        """Write a derived trajectory checkpoint after authoritative event append."""
+
+        return self.trajectory.checkpoint(identity)
 
     @staticmethod
     def validate_verification_command(worktree: Path, argv: Sequence[str]) -> list[str]:
