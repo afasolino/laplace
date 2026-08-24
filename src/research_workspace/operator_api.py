@@ -56,6 +56,7 @@ from .personal_corpus import (
     RetrievalSelection,
 )
 from .request_state import RequestStateError, RequestStateStore
+from .rules import RuleService, SQLiteRuleBackend
 from .agent_sandbox import AgentSandboxError, AgentToolPolicy
 from .research_models import ResearchJobRequest
 from .research_admission import ResearchAdmissionError, ResearchAdmissionStore
@@ -488,6 +489,7 @@ def create_operator_app(
     core: LaplaceCore | None = None,
     zetsu_enabled: bool = True,
     memory: MemoryService | None = None,
+    rules: RuleService | None = None,
     serving_profile_operator: ServingProfileOperator | None = None,
     registered_auth: RegisteredEmailAuth | None = None,
     conversation_store: ConversationStore | None = None,
@@ -510,11 +512,20 @@ def create_operator_app(
     memory_service = memory or MemoryService(
         SQLiteMemoryBackend(operator.state_root / "memory/memory.sqlite3")
     )
+    rules_service = rules or RuleService(
+        SQLiteRuleBackend(operator.state_root / "rules/rules.sqlite3")
+    )
     shared_core = (
         core
         if core is not None
         else (
-            LaplaceCore(operator.repository_root, corpus_store, tiered, memory=memory_service)
+            LaplaceCore(
+                operator.repository_root,
+                corpus_store,
+                tiered,
+                memory=memory_service,
+                rules=rules_service,
+            )
             if tiered is not None
             else None
         )

@@ -15,6 +15,7 @@ from typing import Literal, TypeAlias
 from .model_routing import RoutingTaskMetadata, assess_rtl_worker_eligibility
 from .memory import MemoryService
 from .personal_corpus import PersonalCorpusStore
+from .rules import ContextItem, ContextPacket, RuleService
 from .service_tiers import ModelLane, ServiceTierError, TieredServingService
 from .user_capabilities import Capability
 from .verification_gates import VerificationGateRegistry
@@ -50,11 +51,13 @@ class LaplaceCore:
         *,
         agent_coordinator: ZetsuAgentCoordinator | None = None,
         memory: MemoryService | None = None,
+        rules: RuleService | None = None,
     ) -> None:
         self.repository_root = repository_root.resolve()
         self.corpus = corpus
         self.tiered = tiered
         self.memory = memory
+        self.rules = rules
         self._agent_coordinator = agent_coordinator
         self._agent_coordinator_lock = threading.Lock()
 
@@ -236,6 +239,29 @@ class LaplaceCore:
             scope=scope,
             available_tools=available_tools,
         ).to_json()
+
+    def assemble_context(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        paths: Sequence[str] = (),
+        memory: Sequence[ContextItem] = (),
+        retrieval: Sequence[ContextItem] = (),
+        objective: str = "",
+    ) -> ContextPacket:
+        """Assemble authoritative rules before advisory memory and retrieval."""
+
+        if self.rules is None:
+            raise LaplaceCoreError("rules_unavailable")
+        return self.rules.assemble_context(
+            user_id=user_id,
+            project_id=project_id,
+            paths=paths,
+            memory=memory,
+            retrieval=retrieval,
+            objective=objective,
+        )
 
     @staticmethod
     def validate_verification_command(worktree: Path, argv: Sequence[str]) -> list[str]:
