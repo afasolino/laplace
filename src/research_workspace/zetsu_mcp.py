@@ -7,6 +7,8 @@ Zetsu cannot accidentally create a weaker parallel identity or public daemon.
 from __future__ import annotations
 
 import json
+import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, TypeAlias, cast
@@ -15,10 +17,12 @@ from .model_routing import (
     RoutingTaskMetadata,
     assess_rtl_worker_eligibility,
 )
-from .personal_corpus import PersonalCorpusStore
-from .service_tiers import ModelLane, TieredServingService
+from .agent_sandbox import AgentSandboxError
+from .personal_corpus import CorpusError, PersonalCorpusStore
+from .service_tiers import ModelLane, ServiceTierError, TieredServingService
 from .user_capabilities import Capability
 from .versioning import version_record
+from .zetsu_agent import ZetsuAgentCoordinator
 from .zetsu_context import (
     DEFAULT_MAX_CHARS,
     DEFAULT_MAX_RESULTS,
@@ -29,16 +33,16 @@ from .zetsu_context import (
 
 JsonObject: TypeAlias = dict[str, object]
 
-ZETSU_SCHEMA_VERSION = "1.1"
-ZETSU_SKILL_VERSION = "1.1.0"
+ZETSU_SCHEMA_VERSION = "1.2"
+ZETSU_SKILL_VERSION = "1.2.0"
 MCP_LATEST_PROTOCOL_VERSION = "2026-07-28"
 MCP_LEGACY_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
 MCP_SUPPORTED_PROTOCOL_VERSIONS = (MCP_LATEST_PROTOCOL_VERSION, *MCP_LEGACY_PROTOCOL_VERSIONS)
 ZETSU_INSTRUCTIONS = (
     "Use Zetsu for compact owner-authorized evidence and persistent Laplace memory. "
-    "Use Codex local repository and shell tools for the current checkout. Expand only "
-    "selected evidence IDs. Delegate only bounded tasks; CodeV is restricted to policy-"
-    "eligible RTL implementation or repair with deterministic verification."
+    "Use Codex local repository and shell directly for simple current-checkout work; expand "
+    "only selected evidence IDs. Use agent_task for coherent bounded Qwen repository work. "
+    "CodeV remains restricted to policy-eligible RTL implementation/repair with verification."
 )
 
 
@@ -68,6 +72,47 @@ def _integer(value: object, *, label: str, minimum: int, maximum: int) -> int:
     return value
 
 
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+def _session_id(value: object) -> str:
+    if not isinstance(value, str) or _SESSION_ID_RE.fullmatch(value) is None:
+        raise ZetsuError("invalid_session_id")
+    return value
+
+
+def _verification_argv(value: object) -> list[str] | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= 64
+        or any(
+            not isinstance(item, str)
+            or not item
+            or len(item) > 1_000
+            or "\x00" in item
+            for item in value
+        )
+    ):
+        raise ZetsuError("invalid_verification_argv")
+    return list(value)
+
+
+def _rough_tokens(value: object) -> int:
+    """Tokenizer-independent accounting estimate; exact model usage is reported separately."""
+
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    return max(1, (len(encoded) + 3) // 4)
+
+
+def _telemetry_requested(args: Mapping[str, object]) -> bool:
+    value = args.get("telemetry", False)
+    if not isinstance(value, bool):
+        raise ZetsuError("invalid_telemetry")
+    return value
+
+
 def _schema(properties: JsonObject, required: tuple[str, ...]) -> JsonObject:
     return {
         "type": "object",
@@ -91,6 +136,7 @@ def tool_definitions() -> tuple[JsonObject, ...]:
                     "max_results": count,
                     "max_chars": budget,
                     "corpus_id": {"type": ["string", "null"], "maxLength": 128},
+                    "telemetry": {"type": "boolean"},
                 },
                 ("query",),
             ),
@@ -109,6 +155,7 @@ def tool_definitions() -> tuple[JsonObject, ...]:
                         "items": {"type": "string", "pattern": "^chk_[a-f0-9]{32}$"},
                     },
                     "max_chars": budget,
+                    "telemetry": {"type": "boolean"},
                 },
                 ("chunk_ids",),
             ),
@@ -118,7 +165,12 @@ def tool_definitions() -> tuple[JsonObject, ...]:
             "name": "project_context",
             "description": "Compact persistent project context; expand selected chunks only.",
             "inputSchema": _schema(
-                {"query": query, "max_results": count, "max_chars": budget},
+                {
+                    "query": query,
+                    "max_results": count,
+                    "max_chars": budget,
+                    "telemetry": {"type": "boolean"},
+                },
                 ("query",),
             ),
             "annotations": {"readOnlyHint": True, "openWorldHint": False},
@@ -127,7 +179,12 @@ def tool_definitions() -> tuple[JsonObject, ...]:
             "name": "experiment_context",
             "description": "Compact prior experiment/result context with preserved provenance.",
             "inputSchema": _schema(
-                {"query": query, "max_results": count, "max_chars": budget},
+                {
+                    "query": query,
+                    "max_results": count,
+                    "max_chars": budget,
+                    "telemetry": {"type": "boolean"},
+                },
                 ("query",),
             ),
             "annotations": {"readOnlyHint": True, "openWorldHint": False},
@@ -141,17 +198,54 @@ def tool_definitions() -> tuple[JsonObject, ...]:
                     "domain": {"type": "string", "maxLength": 64},
                     "lane": {"type": "string", "enum": ["quality", "standard"]},
                     "max_chars": budget,
+                    "telemetry": {"type": "boolean"},
                 },
                 ("instruction",),
             ),
             "annotations": {"readOnlyHint": True, "openWorldHint": False},
         },
         {
+            "name": "agent_task",
+            "description": (
+                "Bounded autonomous Qwen repository task with isolated inspect/edit/verify and "
+                "rolling context compaction."
+            ),
+            "inputSchema": _schema(
+                {
+                    "repo_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "session_id": {
+                        "type": ["string", "null"],
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+                    },
+                    "instruction": {"type": "string", "minLength": 1, "maxLength": 40_000},
+                    "lane": {"type": "string", "enum": ["quality", "standard"]},
+                    "max_steps": {"type": "integer", "minimum": 1, "maximum": 32},
+                    "max_chars": budget,
+                    "verification_argv": {
+                        "type": ["array", "null"],
+                        "minItems": 1,
+                        "maxItems": 64,
+                        "items": {"type": "string", "minLength": 1, "maxLength": 1_000},
+                    },
+                    "telemetry": {"type": "boolean"},
+                },
+                ("repo_id", "instruction"),
+            ),
+            "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+        },
+        {
             "name": "rtl_task",
             "description": "Policy-bounded CodeV RTL implementation/repair in an existing worktree.",
             "inputSchema": _schema(
                 {
-                    "session_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "session_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+                    },
                     "instruction": {"type": "string", "minLength": 1, "maxLength": 40_000},
                     "task_kind": {"type": "string", "enum": ["implementation", "repair"]},
                     "rtl_scope": {
@@ -182,7 +276,14 @@ def tool_definitions() -> tuple[JsonObject, ...]:
             "name": "verify",
             "description": "Return deterministic verification evidence for an owned agent session.",
             "inputSchema": _schema(
-                {"session_id": {"type": "string", "minLength": 1, "maxLength": 128}},
+                {
+                    "session_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+                    }
+                },
                 ("session_id",),
             ),
             "annotations": {"readOnlyHint": True, "openWorldHint": False},
@@ -196,16 +297,29 @@ _TOOL_CAPABILITIES: Mapping[str, Capability] = {
     "project_context": Capability.PERSONAL_CORPUS,
     "experiment_context": Capability.PERSONAL_CORPUS,
     "delegate": Capability.CHAT,
+    "agent_task": Capability.AGENT,
     "rtl_task": Capability.AGENT,
     "verify": Capability.AGENT,
 }
 
 _TOOL_ARGUMENTS: Mapping[str, frozenset[str]] = {
-    "search": frozenset({"query", "max_results", "max_chars", "corpus_id"}),
-    "get_evidence": frozenset({"chunk_ids", "max_chars"}),
-    "project_context": frozenset({"query", "max_results", "max_chars"}),
-    "experiment_context": frozenset({"query", "max_results", "max_chars"}),
-    "delegate": frozenset({"instruction", "domain", "lane", "max_chars"}),
+    "search": frozenset({"query", "max_results", "max_chars", "corpus_id", "telemetry"}),
+    "get_evidence": frozenset({"chunk_ids", "max_chars", "telemetry"}),
+    "project_context": frozenset({"query", "max_results", "max_chars", "telemetry"}),
+    "experiment_context": frozenset({"query", "max_results", "max_chars", "telemetry"}),
+    "delegate": frozenset({"instruction", "domain", "lane", "max_chars", "telemetry"}),
+    "agent_task": frozenset(
+        {
+            "repo_id",
+            "session_id",
+            "instruction",
+            "lane",
+            "max_steps",
+            "max_chars",
+            "verification_argv",
+            "telemetry",
+        }
+    ),
     "rtl_task": frozenset(
         {
             "session_id",
@@ -255,6 +369,17 @@ class ZetsuService:
         self.repository_root = repository_root.resolve()
         self.corpus = corpus
         self.tiered = tiered
+        # Retrieval and the dedicated CodeV path do not require a Qwen-agent sandbox.
+        # Construct the coordinator only for agent_task, while retaining one shared
+        # per-session lock table even when concurrent requests arrive first.
+        self._agent_coordinator: ZetsuAgentCoordinator | None = None
+        self._agent_coordinator_lock = threading.Lock()
+
+    def _agent_service(self) -> ZetsuAgentCoordinator:
+        with self._agent_coordinator_lock:
+            if self._agent_coordinator is None:
+                self._agent_coordinator = ZetsuAgentCoordinator(self.tiered, self.corpus)
+            return self._agent_coordinator
 
     def available_tools(self, user_id: str) -> tuple[JsonObject, ...]:
         capabilities = self.tiered.effective_capabilities(user_id)
@@ -326,10 +451,30 @@ class ZetsuService:
                 max_chars=max_chars,
             )
             packet["context_kind"] = name
+            if _telemetry_requested(args):
+                packet["_telemetry"] = {
+                    "token_estimate_method": "utf8_json_bytes_div4",
+                    "retrieved_result_tokens_approx": _rough_tokens(raw),
+                    "selected_evidence_tokens_approx": _rough_tokens(packet.get("evidence", packet)),
+                    "payload_tokens_approx": _rough_tokens(packet),
+                    "retrieved_result_count": (
+                        len(raw.get("results", []))
+                        if isinstance(raw, Mapping) and isinstance(raw.get("results"), list)
+                        else None
+                    ),
+                }
             return packet
         if name == "get_evidence":
             chunk_ids = args.get("chunk_ids")
-            if not isinstance(chunk_ids, list) or not all(isinstance(item, str) for item in chunk_ids):
+            if (
+                not isinstance(chunk_ids, list)
+                or not 1 <= len(chunk_ids) <= 20
+                or not all(
+                    isinstance(item, str) and re.fullmatch(r"chk_[a-f0-9]{32}", item)
+                    for item in chunk_ids
+                )
+                or len(set(chunk_ids)) != len(chunk_ids)
+            ):
                 raise ZetsuError("invalid_chunk_ids")
             max_chars = _integer(
                 args.get("max_chars", 12_000),
@@ -338,7 +483,15 @@ class ZetsuService:
                 maximum=24_000,
             )
             raw = self.corpus.evidence(user_id, tuple(chunk_ids))
-            return compact_expanded_results(raw, max_chars=max_chars)
+            packet = compact_expanded_results(raw, max_chars=max_chars)
+            if _telemetry_requested(args):
+                packet["_telemetry"] = {
+                    "token_estimate_method": "utf8_json_bytes_div4",
+                    "selected_evidence_tokens_approx": _rough_tokens(raw),
+                    "payload_tokens_approx": _rough_tokens(packet),
+                    "selected_evidence_count": len(raw) if isinstance(raw, list) else None,
+                }
+            return packet
         if name == "delegate":
             instruction = _text(args.get("instruction"), label="instruction", maximum=40_000)
             domain = _text(args.get("domain", "general"), label="domain", maximum=64)
@@ -354,7 +507,7 @@ class ZetsuService:
                 ),
                 domain=domain,
             )
-            return _bounded_model_result(
+            packet = _bounded_model_result(
                 result,
                 max_chars=_integer(
                     args.get("max_chars", DEFAULT_MAX_CHARS),
@@ -363,8 +516,50 @@ class ZetsuService:
                     maximum=24_000,
                 ),
             )
+            if _telemetry_requested(args):
+                response = result.get("response")
+                usage = response.get("usage") if isinstance(response, Mapping) else None
+                packet["_telemetry"] = {
+                    "model_reported_usage": dict(usage) if isinstance(usage, Mapping) else None,
+                    "model_reported_usage_exact": isinstance(usage, Mapping),
+                    "payload_tokens_approx": _rough_tokens(packet),
+                    "token_estimate_method": "utf8_json_bytes_div4",
+                }
+            return packet
+        if name == "agent_task":
+            # Validate all non-effectful arguments before an agent can mutate its worktree.
+            telemetry_requested = _telemetry_requested(args)
+            repo_id = _text(args.get("repo_id"), label="repo_id", maximum=128)
+            instruction = _text(args.get("instruction"), label="instruction", maximum=40_000)
+            session_value = args.get("session_id")
+            if session_value is not None:
+                session_value = _session_id(session_value)
+            lane_value = args.get("lane", "quality")
+            if lane_value not in {"quality", "standard"}:
+                raise ZetsuError("invalid_agent_lane")
+            verification_argv = _verification_argv(args.get("verification_argv"))
+            result = self._agent_service().run(
+                user_id=user_id,
+                repo_id=repo_id,
+                instruction=instruction,
+                lane=ModelLane(str(lane_value)),
+                session_id=session_value,
+                max_steps=_integer(
+                    args.get("max_steps", 12), label="max_steps", minimum=1, maximum=32
+                ),
+                max_chars=_integer(
+                    args.get("max_chars", DEFAULT_MAX_CHARS),
+                    label="max_chars",
+                    minimum=512,
+                    maximum=24_000,
+                ),
+                verification_argv=verification_argv,
+            )
+            if not telemetry_requested:
+                result.pop("telemetry", None)
+            return result
         if name == "rtl_task":
-            session_id = _text(args.get("session_id"), label="session_id", maximum=128)
+            session_id = _session_id(args.get("session_id"))
             instruction = _text(args.get("instruction"), label="instruction", maximum=40_000)
             editable = args.get("editable_sources")
             if not isinstance(editable, list) or len(editable) != 1 or not all(
@@ -386,7 +581,7 @@ class ZetsuService:
                 worker_eligible=True,
                 editable_sources=tuple(editable),
                 module_count=_integer(
-                    args.get("module_count"), label="module_count", minimum=1, maximum=8
+                    args.get("module_count"), label="module_count", minimum=1, maximum=1
                 ),
                 synthesizable=True,
                 explicit_ports=True,
@@ -413,14 +608,22 @@ class ZetsuService:
                     maximum=24_000,
                 ),
             )
-        session_id = _text(args.get("session_id"), label="session_id", maximum=128)
+        session_id = _session_id(args.get("session_id"))
         status = self.tiered.agent_session_status(user_id=user_id, session_id=session_id)
+        verification = status.get("last_result")
+        worktree_status = status.get("worktree_status")
+        if verification is None and isinstance(worktree_status, Mapping):
+            verification = {
+                "verification_summary": worktree_status.get("verification_summary"),
+                "changed_paths": worktree_status.get("changed_paths"),
+                "diff_hash": worktree_status.get("diff_hash"),
+            }
         return {
             "status": status.get("status"),
             "session_id": session_id,
             "repo_id": status.get("repo_id"),
-            "worktree_status": status.get("worktree_status"),
-            "verification": status.get("last_result"),
+            "worktree_status": worktree_status,
+            "verification": verification,
         }
 
 
@@ -519,12 +722,12 @@ class ZetsuMcpDispatcher:
                 result.update({"resultType": "complete", "ttlMs": 300_000, "cacheScope": "private"})
             return McpDispatchResult(200, self._response(request_id, result))
         if method == "tools/call":
-            params = _object(request.get("params"), label="tool_call")
-            name = _text(params.get("name"), label="tool_name", maximum=128)
-            arguments = _object(params.get("arguments", {}), label="tool_arguments")
             try:
+                params = _object(request.get("params"), label="tool_call")
+                name = _text(params.get("name"), label="tool_name", maximum=128)
+                arguments = _object(params.get("arguments", {}), label="tool_arguments")
                 value = self.service.call(user_id, name, arguments)
-            except (ValueError, ZetsuError) as exc:
+            except (ValueError, ZetsuError, ServiceTierError, AgentSandboxError, CorpusError) as exc:
                 category = getattr(exc, "category", str(exc))
                 result = {
                     "content": [{"type": "text", "text": json.dumps({"error": category})}],

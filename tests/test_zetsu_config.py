@@ -34,12 +34,17 @@ def test_configure_is_idempotent_and_preserves_other_codex_config(
         "project_context",
         "experiment_context",
         "delegate",
+        "agent_task",
         "rtl_task",
         "verify",
     ]
     assert first == second
     assert first.configured
     assert first.skill_installed
+    installed_skill = (repo / ".agents/skills/zetsu/SKILL.md").read_text(encoding="utf-8")
+    assert "must choose `verification_argv` before delegation" in installed_skill
+    assert "direct\n`pytest`, `ruff`, or `mypy` executable" in installed_skill
+    assert "never wrap it with\n`python -m`" in installed_skill
 
 
 def test_status_reads_values_only_from_managed_section(
@@ -163,6 +168,6 @@ def test_configure_repairs_owned_v1_configuration_drift(
     )
 
     assert repaired.compatible
-    assert config.read_text(encoding="utf-8").count("MANAGED v2") == 2
+    assert config.read_text(encoding="utf-8").count("MANAGED v3") == 2
     assert "stale.example" not in config.read_text(encoding="utf-8")
-    assert "managed-by: laplace-zetsu v2" in skill.read_text(encoding="utf-8")
+    assert "managed-by: laplace-zetsu v3" in skill.read_text(encoding="utf-8")

@@ -132,22 +132,12 @@ class TierChatRequest(BaseModel):
 
     lane: Literal["quality", "standard", "economy"]
     domain: str = Field(default="general", min_length=1, max_length=80)
-    session_id: str | None = Field(
-        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
-    )
-    conversation_id: str | None = Field(
-        default=None, pattern=r"^conv-[a-f0-9]{32}$"
-    )
+    session_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+    conversation_id: str | None = Field(default=None, pattern=r"^conv-[a-f0-9]{32}$")
     messages: list[TierChatMessage] = Field(min_length=1, max_length=200)
-    request_id: str | None = Field(
-        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{7,159}$"
-    )
-    retrieval_selection: Literal[
-        "none", "personal", "shared", "both", "selected_personal"
-    ] = "none"
-    personal_corpus_id: str | None = Field(
-        default=None, pattern=r"^pc_[a-f0-9]{32}$"
-    )
+    request_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{7,159}$")
+    retrieval_selection: Literal["none", "personal", "shared", "both", "selected_personal"] = "none"
+    personal_corpus_id: str | None = Field(default=None, pattern=r"^pc_[a-f0-9]{32}$")
 
 
 class LoginRequest(BaseModel):
@@ -210,12 +200,8 @@ class AgentRunRequest(BaseModel):
     lane: Literal["quality", "standard", "economy"]
     instruction: str = Field(min_length=1, max_length=100_000)
     domain: str = Field(min_length=1, max_length=80)
-    retrieval_selection: Literal[
-        "none", "personal", "shared", "both", "selected_personal"
-    ] = "none"
-    personal_corpus_id: str | None = Field(
-        default=None, pattern=r"^pc_[a-f0-9]{32}$"
-    )
+    retrieval_selection: Literal["none", "personal", "shared", "both", "selected_personal"] = "none"
+    personal_corpus_id: str | None = Field(default=None, pattern=r"^pc_[a-f0-9]{32}$")
 
 
 class TierUserRequest(BaseModel):
@@ -262,17 +248,13 @@ class UploadCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     corpus_id: str = Field(pattern=r"^pc_[a-f0-9]{32}$")
-    idempotency_key: str = Field(
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,159}$"
-    )
+    idempotency_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,159}$")
 
 
 class IndexUploadRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    idempotency_key: str = Field(
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,159}$"
-    )
+    idempotency_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,159}$")
 
 
 class CorpusSearchRequest(BaseModel):
@@ -314,9 +296,7 @@ class ServingProfileActionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     action: Literal["start", "stop"]
-    profile_id: str | None = Field(
-        default=None, pattern=r"^P[0-9]+(?:_[a-z0-9_]+)?$"
-    )
+    profile_id: str | None = Field(default=None, pattern=r"^P[0-9]+(?:_[a-z0-9_]+)?$")
 
 
 class ClientPairRequest(BaseModel):
@@ -460,9 +440,7 @@ class OperatorApiSettings:
             raise ValueError("Operator Plane hosts must be explicit")
         loopback = self.bind_host in {"127.0.0.1", "localhost", "::1"}
         if not loopback and not self.allow_insecure_lan_http:
-            raise ValueError(
-                "non-loopback direct binding requires --allow-insecure-lan-http"
-            )
+            raise ValueError("non-loopback direct binding requires --allow-insecure-lan-http")
         if self.deployment_mode in {"local", "ssh-tunnel", "reverse-proxy"} and not loopback:
             if not self.allow_insecure_lan_http:
                 raise ValueError("production and tunnel modes require loopback binding")
@@ -522,13 +500,9 @@ def create_operator_app(
     progress_store = request_states or RequestStateStore(
         operator.state_root / "requests/request_states.sqlite3"
     )
-    client_devices = ClientDeviceStore(
-        operator.state_root / "client/client_devices.sqlite3"
-    )
+    client_devices = ClientDeviceStore(operator.state_root / "client/client_devices.sqlite3")
     zetsu_service = (
-        ZetsuService(operator.repository_root, corpus_store, tiered)
-        if tiered is not None
-        else None
+        ZetsuService(operator.repository_root, corpus_store, tiered) if tiered is not None else None
     )
     zetsu_dispatcher = ZetsuMcpDispatcher(zetsu_service) if zetsu_service is not None else None
     app = FastAPI(
@@ -577,11 +551,7 @@ def create_operator_app(
             for name in ("x-forwarded-for", "x-forwarded-host", "x-forwarded-proto")
         )
         transport_client = request.client.host if request.client is not None else ""
-        if (
-            response is None
-            and forwarded
-            and transport_client not in settings.trusted_proxies
-        ):
+        if response is None and forwarded and transport_client not in settings.trusted_proxies:
             response = JSONResponse(
                 status_code=400,
                 content={
@@ -609,9 +579,7 @@ def create_operator_app(
             and settings.deployment_mode == "reverse-proxy"
             and request.url.path in {"/api/v1/auth/login", "/api/v1/auth/activate"}
         ):
-            forwarded_host = urlsplit(
-                f"//{request.headers.get('x-forwarded-host', '')}"
-            ).hostname
+            forwarded_host = urlsplit(f"//{request.headers.get('x-forwarded-host', '')}").hostname
             if (
                 request.headers.get("x-forwarded-proto") != "https"
                 or forwarded_host not in settings.allowed_hosts
@@ -683,9 +651,7 @@ def create_operator_app(
         cookie = request.cookies.get("laplace_session")
         if cookie is not None and registered_auth is not None:
             try:
-                record = registered_auth.sessions.resolve(
-                    cookie, registered_auth.registry
-                )
+                record = registered_auth.sessions.resolve(cookie, registered_auth.registry)
             except AuthSessionError as exc:
                 raise HTTPException(status_code=401, detail=exc.category) from exc
             return AuthPrincipal(
@@ -709,14 +675,10 @@ def create_operator_app(
                 return tiered.effective_capabilities(authenticated.user_id)
             except UserCapabilityError:
                 if authenticated.auth_method == "session":
-                    raise HTTPException(
-                        status_code=401, detail="credential_capability_changed"
-                    )
+                    raise HTTPException(status_code=401, detail="credential_capability_changed")
         return default_capabilities(authenticated.capability_tier)
 
-    def _require_named(
-        authenticated: AuthPrincipal, required: Capability
-    ) -> AuthPrincipal:
+    def _require_named(authenticated: AuthPrincipal, required: Capability) -> AuthPrincipal:
         if required not in _effective_capabilities(authenticated):
             raise HTTPException(
                 status_code=403,
@@ -891,13 +853,16 @@ def create_operator_app(
             auth.validate_csrf(authenticated, supplied)
 
     @app.exception_handler(OperatorServiceError)
-    async def operator_error(
-        _request: Request, exc: OperatorServiceError
-    ) -> JSONResponse:
-        status_code = 403 if exc.category in {
-            "authorization_failure",
-            "approval_required",
-        } else 409
+    async def operator_error(_request: Request, exc: OperatorServiceError) -> JSONResponse:
+        status_code = (
+            403
+            if exc.category
+            in {
+                "authorization_failure",
+                "approval_required",
+            }
+            else 409
+        )
         return JSONResponse(
             status_code=status_code,
             content={
@@ -908,9 +873,7 @@ def create_operator_app(
         )
 
     @app.exception_handler(ResearchPlaneError)
-    async def research_error(
-        _request: Request, exc: ResearchPlaneError
-    ) -> JSONResponse:
+    async def research_error(_request: Request, exc: ResearchPlaneError) -> JSONResponse:
         return JSONResponse(
             status_code=409,
             content={
@@ -943,9 +906,7 @@ def create_operator_app(
             json.dumps(
                 {
                     "event": "POLICY_REQUEST_REJECTED",
-                    "trace_id": str(
-                        getattr(request.state, "trace_id", "unavailable")
-                    ),
+                    "trace_id": str(getattr(request.state, "trace_id", "unavailable")),
                     "method": request.method,
                     "path": request.url.path,
                     "failure_category": category,
@@ -994,9 +955,7 @@ def create_operator_app(
         )
 
     @app.exception_handler(ClientServiceError)
-    async def client_service_error(
-        _request: Request, exc: ClientServiceError
-    ) -> JSONResponse:
+    async def client_service_error(_request: Request, exc: ClientServiceError) -> JSONResponse:
         status_code = 404 if exc.category.endswith("not_found") else 409
         return JSONResponse(
             status_code=status_code,
@@ -1062,7 +1021,11 @@ def create_operator_app(
         )
 
     def _session_response(session_value: NewSession) -> JsonObject:
-        user = registered_auth.registry.require_user(session_value.record.user_id) if registered_auth else None
+        user = (
+            registered_auth.registry.require_user(session_value.record.user_id)
+            if registered_auth
+            else None
+        )
         return {
             "status": "AUTHENTICATED",
             "account": session_value.record.public_account(),
@@ -1149,10 +1112,7 @@ def create_operator_app(
                 lane: str,
             ) -> str | None:
                 parsed = urlsplit(endpoint)
-                if (
-                    parsed.scheme != "http"
-                    or parsed.hostname not in {"127.0.0.1", "localhost"}
-                ):
+                if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost"}:
                     return f"model_endpoint_non_local:{lane}"
                 writer: asyncio.StreamWriter | None = None
                 try:
@@ -1211,16 +1171,16 @@ def create_operator_app(
                         except OSError:
                             pass
                 data = raw.get("data") if isinstance(raw, dict) else None
-                served = {
-                    str(item["id"])
-                    for item in data
-                    if isinstance(item, dict) and isinstance(item.get("id"), str)
-                } if isinstance(data, list) else set()
-                return (
-                    None
-                    if model_id in served
-                    else f"model_identity_mismatch:{lane}"
+                served = (
+                    {
+                        str(item["id"])
+                        for item in data
+                        if isinstance(item, dict) and isinstance(item.get("id"), str)
+                    }
+                    if isinstance(data, list)
+                    else set()
                 )
+                return None if model_id in served else f"model_identity_mismatch:{lane}"
 
             endpoint_checks = await asyncio.gather(
                 *(
@@ -1232,9 +1192,7 @@ def create_operator_app(
                     for route in unique_routes.values()
                 )
             )
-            reasons.extend(
-                reason for reason in endpoint_checks if reason is not None
-            )
+            reasons.extend(reason for reason in endpoint_checks if reason is not None)
         for current in (
             operator.state_root,
             operator.state_root / "auth",
@@ -1285,9 +1243,7 @@ def create_operator_app(
     async def zetsu_mcp(
         request: Request,
         authenticated: AuthPrincipal = Depends(principal),
-        mcp_protocol_version: str | None = Header(
-            default=None, alias="MCP-Protocol-Version"
-        ),
+        mcp_protocol_version: str | None = Header(default=None, alias="MCP-Protocol-Version"),
     ) -> Response:
         """Authenticated stateless Streamable HTTP MCP endpoint for Zetsu."""
 
@@ -1324,11 +1280,7 @@ def create_operator_app(
         return JSONResponse(
             status_code=result.status_code,
             content=result.payload,
-            headers={
-                "MCP-Protocol-Version": (
-                    mcp_protocol_version or "2025-11-25"
-                )
-            },
+            headers={"MCP-Protocol-Version": (mcp_protocol_version or "2025-11-25")},
         )
 
     @app.post("/api/v1/client/devices/pair")
@@ -1390,9 +1342,7 @@ def create_operator_app(
         operation = client_devices.claim(authenticated.user_id, device_id)
         return {"operation": operation}
 
-    @app.post(
-        "/api/v1/client/devices/{device_id}/operations/{operation_id}/result"
-    )
+    @app.post("/api/v1/client/devices/{device_id}/operations/{operation_id}/result")
     async def complete_client_operation(
         device_id: str,
         operation_id: str,
@@ -1590,9 +1540,7 @@ def create_operator_app(
         if authenticated.auth_method == "session" and registered_auth is not None:
             if authenticated.session_identifier is None:
                 raise HTTPException(status_code=401, detail="authentication_required")
-            csrf_token = registered_auth.sessions.rotate_csrf(
-                authenticated.session_identifier
-            )
+            csrf_token = registered_auth.sessions.rotate_csrf(authenticated.session_identifier)
         else:
             csrf_token = auth.issue_csrf(authenticated)
         return {
@@ -1608,9 +1556,7 @@ def create_operator_app(
         }
 
     def sanitized_model_status(role: str) -> dict[str, object]:
-        status = operator.model_server_action(
-            "status", approval_id=None, actor_role=role
-        )
+        status = operator.model_server_action("status", approval_id=None, actor_role=role)
         if role == "admin":
             return status
         sanitized = dict(status)
@@ -1644,9 +1590,7 @@ def create_operator_app(
             **summary,
             "model_servers": model_status,
             "research_jobs": (
-                _research_summaries(research.layout.research_jobs)
-                if research is not None
-                else []
+                _research_summaries(research.layout.research_jobs) if research is not None else []
             ),
             "warnings": (
                 ["Insecure non-loopback HTTP override is active"]
@@ -1735,9 +1679,7 @@ def create_operator_app(
     ) -> dict[str, object]:
         return {
             "status": "OK",
-            "approvals": operator.approvals(
-                actor_role=authenticated.role, state=state
-            ),
+            "approvals": operator.approvals(actor_role=authenticated.role, state=state),
         }
 
     @app.post("/api/v1/approvals/{approval_id}/decision")
@@ -1781,9 +1723,7 @@ def create_operator_app(
         result["domain"] = selected_domain.domain_id
         result["domain_routing"] = {
             "eligible_model_routes": list(selected_domain.eligible_model_routes),
-            "eligible_verification_tools": list(
-                selected_domain.eligible_verification_tools
-            ),
+            "eligible_verification_tools": list(selected_domain.eligible_verification_tools),
         }
         job_id = str(result["research_job_id"])
         if research_admission is not None:
@@ -1886,14 +1826,10 @@ def create_operator_app(
             "job": _sanitize_research_payload(job.model_dump(mode="json")),
             "report_markdown": (root / "report.md").read_text(encoding="utf-8"),
             "evidence_ledger": _sanitize_research_payload(
-                json.loads(
-                    (root / "evidence_ledger.json").read_text(encoding="utf-8")
-                )
+                json.loads((root / "evidence_ledger.json").read_text(encoding="utf-8"))
             ),
             "claim_source_graph": _sanitize_research_payload(
-                json.loads(
-                    (root / "claim_source_graph.json").read_text(encoding="utf-8")
-                )
+                json.loads((root / "claim_source_graph.json").read_text(encoding="utf-8"))
             ),
         }
 
@@ -1924,9 +1860,7 @@ def create_operator_app(
             raise HTTPException(status_code=409, detail="research_job_not_complete")
         content = (research.layout.research_jobs / job_id / "report.md").read_bytes()
         source_fingerprint = hashlib.sha256(
-            (
-                research.layout.research_jobs / job_id / "claim_source_graph.json"
-            ).read_bytes()
+            (research.layout.research_jobs / job_id / "claim_source_graph.json").read_bytes()
         ).hexdigest()
         record = artifact_registry.create(
             owner_user_id=authenticated.user_id,
@@ -2282,9 +2216,7 @@ def create_operator_app(
                 "routes": [],
                 "endpoint_details_exposed": False,
             }
-        provider_type: Literal["fixture", "vllm"] = (
-            "fixture" if settings.fixture_mode else "vllm"
-        )
+        provider_type: Literal["fixture", "vllm"] = "fixture" if settings.fixture_mode else "vllm"
         public_providers: list[dict[str, object]] = []
         public_routes: list[dict[str, object]] = []
         for lane in ModelLane:
@@ -2307,11 +2239,7 @@ def create_operator_app(
                     else f"{lane.value.title()} configured local provider"
                 ),
                 provider_type=provider_type,
-                endpoint=(
-                    "fixture://in-memory"
-                    if settings.fixture_mode
-                    else endpoint_origin
-                ),
+                endpoint=("fixture://in-memory" if settings.fixture_mode else endpoint_origin),
                 lifecycle="fixture" if settings.fixture_mode else "unowned",
                 context_limit=configured.context_limit,
                 output_limit=configured.output_limit,
@@ -2382,9 +2310,7 @@ def create_operator_app(
             "operator_enabled": Capability.OPERATOR in capabilities,
             "admin_enabled": Capability.ADMIN in capabilities,
             "personal_corpus_enabled": Capability.PERSONAL_CORPUS in capabilities,
-            "shared_corpus_ingest_enabled": (
-                Capability.SHARED_CORPUS_INGEST in capabilities
-            ),
+            "shared_corpus_ingest_enabled": (Capability.SHARED_CORPUS_INGEST in capabilities),
             "repository_admin_enabled": Capability.REPOSITORY_ADMIN in capabilities,
             "model_admin_enabled": Capability.MODEL_ADMIN in capabilities,
             "model_lanes": [lane.value for lane in ModelLane],
@@ -2406,17 +2332,11 @@ def create_operator_app(
             "domain_registry": domain_registry.public(),
         }
         if Capability.AGENT in capabilities:
-            authorized = service.sandboxes.authorizations.authorized_for_user(
-                authenticated.user_id
-            )
+            authorized = service.sandboxes.authorizations.authorized_for_user(authenticated.user_id)
             if registered_auth is not None:
-                registry_user = registered_auth.registry.require_user(
-                    authenticated.user_id
-                )
+                registry_user = registered_auth.registry.require_user(authenticated.user_id)
                 allowed = set(registry_user.authorized_repo_ids)
-                authorized = [
-                    item for item in authorized if item.get("repo_id") in allowed
-                ]
+                authorized = [item for item in authorized if item.get("repo_id") in allowed]
             result["authorized_repositories"] = authorized
             result["worktree_quota"] = {
                 "per_user": service.sandboxes.per_user_quota,
@@ -2468,11 +2388,7 @@ def create_operator_app(
                 retrieval=retrieval,
             )
             retrieval_query = next(
-                (
-                    message.content
-                    for message in reversed(body.messages)
-                    if message.role == "user"
-                ),
+                (message.content for message in reversed(body.messages) if message.role == "user"),
                 "",
             )
             personal = corpus_store.search(
@@ -2480,8 +2396,7 @@ def create_operator_app(
                 retrieval_query,
                 corpus_id=(
                     body.personal_corpus_id
-                    if body.retrieval_selection
-                    == RetrievalSelection.SELECTED_PERSONAL.value
+                    if body.retrieval_selection == RetrievalSelection.SELECTED_PERSONAL.value
                     else None
                 ),
                 limit=8,
@@ -2525,11 +2440,7 @@ def create_operator_app(
             else:
                 conversation_store.require(authenticated.user_id, conversation_id)
             latest_user = next(
-                (
-                    message.content
-                    for message in reversed(body.messages)
-                    if message.role == "user"
-                ),
+                (message.content for message in reversed(body.messages) if message.role == "user"),
                 None,
             )
             if latest_user is not None:
@@ -2584,20 +2495,14 @@ def create_operator_app(
                 progress_id,
                 owner_user_id=authenticated.user_id,
                 state="VALIDATING_OUTPUT",
-                queue_position=(
-                    queue_value
-                    if isinstance(queue_value, int)
-                    else None
-                ),
+                queue_position=(queue_value if isinstance(queue_value, int) else None),
                 effective_lane=(
                     str(result["effective_lane"])
                     if result.get("effective_lane") is not None
                     else None
                 ),
                 model_name=(
-                    str(result["model_id"])
-                    if result.get("model_id") is not None
-                    else None
+                    str(result["model_id"]) if result.get("model_id") is not None else None
                 ),
                 retrieval=retrieval,
             )
@@ -2752,9 +2657,7 @@ def create_operator_app(
     ) -> JsonObject:
         return {
             "status": "CREATED",
-            "corpus": corpus_store.create_corpus(
-                authenticated.user_id, body.name
-            ),
+            "corpus": corpus_store.create_corpus(authenticated.user_id, body.name),
         }
 
     @app.get("/api/v1/personal-corpora/{corpus_id}")
@@ -2764,12 +2667,8 @@ def create_operator_app(
     ) -> JsonObject:
         return {
             "status": "OK",
-            "corpus": corpus_store.require_corpus(
-                authenticated.user_id, corpus_id
-            ),
-            "sources": corpus_store.list_sources(
-                authenticated.user_id, corpus_id
-            ),
+            "corpus": corpus_store.require_corpus(authenticated.user_id, corpus_id),
+            "sources": corpus_store.list_sources(authenticated.user_id, corpus_id),
         }
 
     @app.patch("/api/v1/personal-corpora/{corpus_id}")
@@ -2809,15 +2708,11 @@ def create_operator_app(
     @app.get("/api/v1/personal-corpus/uploads")
     async def list_folder_uploads(
         authenticated: AuthPrincipal = Depends(personal_corpus_principal),
-        state: Literal["STAGING", "CANCELLED", "INDEXED"] = Query(
-            default="STAGING"
-        ),
+        state: Literal["STAGING", "CANCELLED", "INDEXED"] = Query(default="STAGING"),
     ) -> JsonObject:
         return {
             "status": "OK",
-            "uploads": corpus_store.list_uploads(
-                authenticated.user_id, state=state
-            ),
+            "uploads": corpus_store.list_uploads(authenticated.user_id, state=state),
         }
 
     @app.get("/api/v1/personal-corpus/uploads/{upload_id}")
@@ -2859,9 +2754,7 @@ def create_operator_app(
         request: Request,
         _authenticated: AuthPrincipal = Depends(corpus_mutation_principal),
     ) -> JsonObject:
-        relative_path, content, media_type = await _upload_form(
-            request, zip_fallback=False
-        )
+        relative_path, content, media_type = await _upload_form(request, zip_fallback=False)
         return corpus_store.stage_file(
             _authenticated.user_id,
             upload_id,
@@ -2876,12 +2769,8 @@ def create_operator_app(
         request: Request,
         _authenticated: AuthPrincipal = Depends(corpus_mutation_principal),
     ) -> JsonObject:
-        _name, content, _media_type = await _upload_form(
-            request, zip_fallback=True
-        )
-        return corpus_store.stage_zip_fallback(
-            _authenticated.user_id, upload_id, content=content
-        )
+        _name, content, _media_type = await _upload_form(request, zip_fallback=True)
+        return corpus_store.stage_zip_fallback(_authenticated.user_id, upload_id, content=content)
 
     @app.post("/api/v1/personal-corpus/uploads/{upload_id}/cancel")
     async def cancel_folder_upload(
@@ -2943,21 +2832,15 @@ def create_operator_app(
             idempotency_key=body.idempotency_key,
         )
 
-    @app.delete(
-        "/api/v1/personal-corpora/{corpus_id}/sources/{source_id}"
-    )
+    @app.delete("/api/v1/personal-corpora/{corpus_id}/sources/{source_id}")
     async def delete_personal_source(
         corpus_id: str,
         source_id: str,
         authenticated: AuthPrincipal = Depends(corpus_mutation_principal),
     ) -> JsonObject:
-        return corpus_store.delete_source(
-            authenticated.user_id, corpus_id, source_id
-        )
+        return corpus_store.delete_source(authenticated.user_id, corpus_id, source_id)
 
-    @app.get(
-        "/api/v1/personal-corpora/{corpus_id}/sources/{source_id}/download"
-    )
+    @app.get("/api/v1/personal-corpora/{corpus_id}/sources/{source_id}/download")
     async def download_personal_source(
         corpus_id: str,
         source_id: str,
@@ -2983,7 +2866,7 @@ def create_operator_app(
         authenticated: AuthPrincipal = Depends(tier_mutation_principal),
     ) -> dict[str, object]:
         service = require_tiered()
-        if registered_auth is not None:
+        if registered_auth is not None and authenticated.auth_method == "session":
             user = registered_auth.registry.require_user(authenticated.user_id)
             if body.repo_id not in user.authorized_repo_ids:
                 raise HTTPException(
@@ -3062,8 +2945,7 @@ def create_operator_app(
                 body.instruction,
                 corpus_id=(
                     body.personal_corpus_id
-                    if body.retrieval_selection
-                    == RetrievalSelection.SELECTED_PERSONAL.value
+                    if body.retrieval_selection == RetrievalSelection.SELECTED_PERSONAL.value
                     else None
                 ),
                 limit=8,
@@ -3132,9 +3014,7 @@ def create_operator_app(
         worktree = result.get("worktree_status")
         if isinstance(worktree, dict):
             result["worktree_status"] = {
-                key: value
-                for key, value in worktree.items()
-                if key != "worktree_root"
+                key: value for key, value in worktree.items() if key != "worktree_root"
             }
         return result
 
@@ -3165,9 +3045,7 @@ def create_operator_app(
     ) -> JsonObject:
         return {
             "status": "OK",
-            "worktrees": require_tiered().sandboxes.list_mine(
-                authenticated.user_id
-            ),
+            "worktrees": require_tiered().sandboxes.list_mine(authenticated.user_id),
         }
 
     @app.get("/api/v1/worktrees/{session_id}")
@@ -3189,9 +3067,7 @@ def create_operator_app(
     ) -> JsonObject:
         return {
             "status": "OK",
-            "events": require_tiered().sandboxes.history(
-                session_id, user_id=authenticated.user_id
-            ),
+            "events": require_tiered().sandboxes.history(session_id, user_id=authenticated.user_id),
         }
 
     @app.post("/api/v1/worktrees/{session_id}/resume")
@@ -3211,9 +3087,7 @@ def create_operator_app(
         session_id: str,
         authenticated: AuthPrincipal = Depends(agent_mutation_principal),
     ) -> JsonObject:
-        return require_tiered().sandboxes.close_if_clean(
-            session_id, user_id=authenticated.user_id
-        )
+        return require_tiered().sandboxes.close_if_clean(session_id, user_id=authenticated.user_id)
 
     @app.post("/api/v1/worktrees/{session_id}/discard")
     async def discard_worktree(
@@ -3244,16 +3118,12 @@ def create_operator_app(
         session_id: str,
         authenticated: AuthPrincipal = Depends(agent_principal),
     ) -> Response:
-        content = require_tiered().sandboxes.patch(
-            session_id, user_id=authenticated.user_id
-        )
+        content = require_tiered().sandboxes.patch(session_id, user_id=authenticated.user_id)
         return Response(
             content,
             media_type="text/x-diff",
             headers={
-                "Content-Disposition": (
-                    f'attachment; filename="{session_id}.patch"'
-                ),
+                "Content-Disposition": (f'attachment; filename="{session_id}.patch"'),
                 "X-Content-SHA256": hashlib.sha256(content).hexdigest(),
             },
         )
@@ -3373,11 +3243,7 @@ def create_operator_app(
             registered_auth.registry.update_user(
                 user_id,
                 capabilities=values,
-                **(
-                    {"enabled": body.enabled}
-                    if body.enabled is not None
-                    else {}
-                ),
+                **({"enabled": body.enabled} if body.enabled is not None else {}),
             )
             revoked = registered_auth.sessions.revoke_user(user_id)
             registered_auth.audit.append(
@@ -3567,9 +3433,7 @@ def create_operator_app(
     ) -> dict[str, object]:
         if authenticated.role != "admin":
             raise HTTPException(status_code=403, detail="admin_role_required")
-        grant = require_tiered().sandboxes.authorizations.revoke(
-            body.user_id, body.repo_id
-        )
+        grant = require_tiered().sandboxes.authorizations.revoke(body.user_id, body.repo_id)
         if registered_auth is not None:
             user = registered_auth.registry.require_user(body.user_id)
             registered_auth.registry.update_user(

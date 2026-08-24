@@ -67,3 +67,17 @@ PYTHONPATH=src python -m research_workspace.laplace_cli \
   --configuration-mode desktop \
   --diagnostic-export /tmp/laplace-config-diagnostic.json
 ```
+
+## Zetsu and Qwen3.8 configuration
+
+`laplace zetsu configure` manages two intentionally different scopes: the MCP
+registration in `$CODEX_HOME/config.toml` (or `~/.codex/config.toml`) and the
+repository-local `.agents/skills/zetsu/SKILL.md`. It preserves unrelated Codex
+configuration and stores only the bearer environment-variable name, never its
+value.
+
+The Qwen3.8 migration target is 131,072 tokens. Published pre-quantized
+checkpoints are resolved to immutable revisions before preparation. Quality and
+Standard are switched to Qwen3.8 only after mandatory P6 certification; Economy
+remains the CodeV RTL route. P7 MTP uses exactly three speculative tokens when its
+independent certification passes. Qwen3.6 remains the rollback selector.

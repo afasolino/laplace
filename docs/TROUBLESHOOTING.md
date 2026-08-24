@@ -111,3 +111,21 @@ troubleshooting step. Its exact expected live status is
 - `sync_target_not_clean`, `sync_branch_conflict`, or
   `sync_patch_plan_mismatch`: inspect local changes and create a new plan; never
   force apply.
+
+## Zetsu agent or Qwen3.8 migration fails
+
+For a Zetsu agent failure, keep the persistent checkpoint and inspect the exact
+failure category. `zetsu_agent_checkpoint_*` indicates a resume binding/schema
+problem; do not restart the same session with different owner/repository/base
+revision/objective. Cancellation and command/step/wall limits are enforced during
+the loop. A mutating task cannot finish until deterministic verification passes
+after its latest mutation. `zetsu_agent_compaction_*` is fail-closed: diagnose
+serving/context behavior before resuming rather than discarding exact task state.
+
+For Qwen3.8 preparation, do not infer missing MTP from shard filenames. Validate
+`config.json` plus safetensor index/header tensor keys. Resolve the selected
+checkpoint to an immutable Hugging Face revision and retain the recorded artifact
+hashes. Do not work around a P6/P7 serving incompatibility by broadly upgrading
+Laplace; isolate the smallest justified serving-environment change and rerun the
+affected gate. A failed P7 disables MTP; it does not require abandoning a
+successfully certified P6.

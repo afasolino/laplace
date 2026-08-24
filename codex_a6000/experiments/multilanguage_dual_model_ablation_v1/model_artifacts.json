@@ -139,7 +139,7 @@
         "context_tokens": 16384,
         "max_output_tokens": 4096,
         "kernel": "compressed_tensors_marlin_runtime_validation_required",
-        "gpu_memory_utilization": 0.20,
+        "gpu_memory_utilization": 0.145,
         "max_num_seqs": 1,
         "extra_args": ["--enforce-eager"]
       },

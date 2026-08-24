@@ -1,10 +1,10 @@
 {
   "profile_id": "P7_qwen38_w4a16_mtp",
   "model_route": "quality",
-  "model_path": "/home/giando/work/laplace/.models/Qwen3.8-27B-W4A16-AWQ",
+  "model_path": "/home/giando/work/laplace/.models/Qwen3.8-27B-AWQ-4bit-e6b4b8b025f8",
   "served_model_name": "laplace-quality-qwen38-mtp",
   "port": 8207,
-  "max_model_len": 32768,
+  "max_model_len": 131072,
   "max_num_seqs": 2,
   "max_num_batched_tokens": 8192,
   "kv_cache_dtype": "auto",
@@ -21,14 +21,14 @@
   "offload_prefetch_step": 1,
   "kv_offloading_size": null,
   "kv_offloading_backend": "native",
-  "gpu_memory_utilization": 0.65,
+  "gpu_memory_utilization": 0.795,
   "startup_timeout": 1200,
   "request_timeout": 300,
   "extra_args": [
     "--language-model-only",
     "--reasoning-parser=qwen3",
     "--enable-auto-tool-choice",
-    "--tool-call-parser=qwen3_coder",
+    "--tool-call-parser=qwen3_xml",
     "--speculative-config={\"method\":\"mtp\",\"num_speculative_tokens\":3}"
   ]
 }

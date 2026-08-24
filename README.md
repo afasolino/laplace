@@ -183,3 +183,18 @@ The v8 review starts from certified v7 commit
 CPU/fixture gates and [LIVE_GPU_CERTIFICATION_RUNBOOK_V8.md](docs/LIVE_GPU_CERTIFICATION_RUNBOOK_V8.md)
 for the conditional live gate. SpecDec always has priority; see
 [SPECDEC_GPU_COORDINATION.md](docs/SPECDEC_GPU_COORDINATION.md).
+
+## Qwen3.8 and Zetsu production path
+
+The A6000 production migration is documented in
+[QWEN38_PRODUCTION_MIGRATION.md](docs/QWEN38_PRODUCTION_MIGRATION.md) and the
+Codex integration layer in [ZETSU.md](docs/ZETSU.md). The migration targets a
+pinned published W4A16 Qwen3.8 checkpoint and a 131,072-token P6 profile;
+Quality/Standard promotion remains contingent on live certification. CodeV keeps
+its bounded RTL/SystemVerilog Economy route, and Qwen3.6 remains the rollback.
+
+Zetsu adds compact owner-authorized retrieval, bounded Qwen delegation and
+repository-agent tasks, CodeV RTL delegation, and deterministic evidence. Codex
+continues to use its own checkout/shell/Git for ordinary local work. The managed
+MCP registration lives in the user's Codex configuration while the usage Skill is
+project-local; bearer values stay in the process environment.

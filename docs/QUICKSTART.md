@@ -134,3 +134,21 @@ PYTHONPATH=src .venv/bin/python scripts/run_release_candidate_v8_certification.p
 This command uses fixtures and isolated state. It does not start a model server.
 Run the live-GPU command only after the CPU report says
 `GO_FOR_CONTROLLED_LIVE_GPU_CERTIFICATION`.
+
+## Zetsu from a Codex project
+
+From the repository that Codex will work on, export the existing owner-bound
+bearer credential and install/refresh the managed integration:
+
+```bash
+export LAPLACE_ZETSU_TOKEN='<secret value>'
+laplace zetsu configure --endpoint https://laplace.example.org/mcp --json
+laplace zetsu status --json
+laplace zetsu test --json
+```
+
+The command preserves unrelated `$CODEX_HOME/config.toml` content, registers the
+user-level MCP endpoint, and installs the repository-local Zetsu Skill. Use Codex
+locally for ordinary checkout/shell/Git work; use Zetsu for compact retrieval,
+bounded Qwen `delegate`/`agent_task`, CodeV `rtl_task`, or deterministic evidence.
+See [ZETSU.md](ZETSU.md).

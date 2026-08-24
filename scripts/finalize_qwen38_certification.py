@@ -27,7 +27,7 @@ MANDATORY_PROFILE_GATES = (
     "tool_calling",
     "multi_turn",
     "cancellation",
-    "context_32k",
+    "context_window",
     "runtime_stability",
     "quantized_kernel",
     "gpu_headroom",

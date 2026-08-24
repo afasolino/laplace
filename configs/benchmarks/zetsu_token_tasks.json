@@ -1,0 +1,75 @@
+{
+  "schema_version": 3,
+  "runs_per_condition": 1,
+  "freeze_rule": "Before either condition, hash this file and record the same immutable base revision, machine-derived Git commit+tree repository-state SHA-256, exact prompt SHA-256, Codex model/reasoning settings, run_index=1, condition-appropriate Zetsu call count, and distinct fresh session/worktree identities for both runs.",
+  "tasks": [
+    {
+      "id": "routing",
+      "kind": "read_only",
+      "prompt": "Inspect the frozen repository and return exactly these four repository facts as four `key=path` lines, with no prose: routing, rollback, qwen38_manifest, promotion.",
+      "correctness": {
+        "type": "answer_contains_paths",
+        "artifact": "final_answer.txt",
+        "required_paths": [
+          "src/research_workspace/model_routing.py",
+          "src/research_workspace/production_model.py",
+          "configs/model_manifests/qwen38_27b_a6000.json",
+          "scripts/finalize_qwen38_certification.py"
+        ],
+        "answer_exact": "routing=src/research_workspace/model_routing.py\nrollback=src/research_workspace/production_model.py\nqwen38_manifest=configs/model_manifests/qwen38_27b_a6000.json\npromotion=scripts/finalize_qwen38_certification.py\n"
+      }
+    },
+    {
+      "id": "zetsu_architecture",
+      "kind": "read_only",
+      "prompt": "Inspect the frozen repository and return exactly these four Zetsu architecture facts as four `key=path` lines, with no prose: mcp, qwen_agent, routing, skill.",
+      "correctness": {
+        "type": "answer_contains_paths",
+        "artifact": "final_answer.txt",
+        "required_paths": [
+          "src/research_workspace/zetsu_mcp.py",
+          "src/research_workspace/zetsu_agent.py",
+          "src/research_workspace/model_routing.py",
+          ".agents/skills/zetsu/SKILL.md"
+        ],
+        "answer_exact": "mcp=src/research_workspace/zetsu_mcp.py\nqwen_agent=src/research_workspace/zetsu_agent.py\nrouting=src/research_workspace/model_routing.py\nskill=.agents/skills/zetsu/SKILL.md\n"
+      }
+    },
+    {
+      "id": "tiny_agent_change",
+      "kind": "implementation",
+      "prompt": "Implement this exact small change: add a --print-task-kinds option to scripts/benchmark_zetsu_token_efficiency.py. It must print each configured benchmark task as ID:kind in task order, one per line, and exit 0 without requiring result_root. Extend the focused tests in tests/test_zetsu_token_benchmark.py. Do not change other behavior.",
+      "correctness": {
+        "type": "commands",
+        "commands": [
+          {
+            "argv": [
+              "python",
+              "scripts/benchmark_zetsu_token_efficiency.py",
+              "--print-task-kinds"
+            ],
+            "stdout_exact": "routing:read_only\nzetsu_architecture:read_only\ntiny_agent_change:implementation\n"
+          },
+          {
+            "argv": [
+              "python",
+              "-m",
+              "pytest",
+              "tests/test_zetsu_token_benchmark.py",
+              "-q"
+            ],
+            "returncode": 0
+          }
+        ],
+        "allowed_changed_paths": [
+          "scripts/benchmark_zetsu_token_efficiency.py",
+          "tests/test_zetsu_token_benchmark.py"
+        ],
+        "required_changed_paths": [
+          "scripts/benchmark_zetsu_token_efficiency.py",
+          "tests/test_zetsu_token_benchmark.py"
+        ]
+      }
+    }
+  ]
+}

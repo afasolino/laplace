@@ -35,6 +35,7 @@ from research_workspace.serving_profiles import (
 ROOT = Path(__file__).resolve().parents[1]
 VLLM = ROOT / ".venv-vllm-cu129/bin/vllm"
 FFMPEG = ROOT / ".runtime/ffmpeg7/lib"
+OPERATOR_PYTHON = ROOT / ".venv/bin/python"
 PROFILE_IDS = ("P6_qwen38_w4a16", "P7_qwen38_w4a16_mtp")
 MANDATORY_PROFILE_GATES = (
     "model_identity",
@@ -44,7 +45,7 @@ MANDATORY_PROFILE_GATES = (
     "tool_calling",
     "multi_turn",
     "cancellation",
-    "context_32k",
+    "context_window",
     "runtime_stability",
     "quantized_kernel",
     "gpu_headroom",
@@ -59,6 +60,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--repository-root", type=Path, default=ROOT)
     parser.add_argument("--vllm", type=Path, default=VLLM)
     parser.add_argument("--ffmpeg-lib", type=Path, default=FFMPEG)
+    parser.add_argument("--operator-python", type=Path, default=OPERATOR_PYTHON)
     return parser
 
 
@@ -282,6 +284,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     root = arguments.repository_root.resolve()
     output = arguments.output_root.resolve()
+    operator_python = arguments.operator_python.absolute()
+    if not operator_python.is_file():
+        raise RuntimeError("operator_python_missing")
     output.mkdir(parents=True, exist_ok=False)
     repository_revision = _git_revision(root)
     artifact = verify_qwen38_artifact(root)
@@ -375,6 +380,50 @@ def main(argv: Sequence[str] | None = None) -> int:
         results["economy_rtl_route"] = _chat(
             codev_endpoint, codev_model, "CODEV_ECONOMY_RTL_ROUTE_PASS", rtl=True
         )
+        normal_output = output / "normal_laplace"
+        normal = subprocess.run(  # nosec B603 - fixed local certification command
+            [
+                str(operator_python),
+                str(root / "scripts/run_tiered_live_api_certification.py"),
+                "--repository-root",
+                str(root),
+                "--output-root",
+                str(normal_output),
+                "--main-endpoint",
+                quality_endpoint,
+                "--main-model",
+                quality_model,
+                "--quality-context-limit",
+                str(quality["context_limit"]),
+                "--standard-context-limit",
+                str(standard["context_limit"]),
+                "--codev-endpoint",
+                codev_endpoint,
+                "--codev-model",
+                codev_model,
+                "--users",
+                "5",
+                "--requests",
+                "5",
+            ],
+            cwd=root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=3_600,
+        )
+        normal_report = normal_output / "parallel_api_smoke.json"
+        (output / "normal_laplace.stdout.log").write_text(normal.stdout, encoding="utf-8")
+        (output / "normal_laplace.stderr.log").write_text(normal.stderr, encoding="utf-8")
+        results["normal_laplace"] = {
+            "status": "PASS" if normal.returncode == 0 else "FAIL",
+            "returncode": normal.returncode,
+            "stdout_tail": normal.stdout[-2_000:],
+            "stderr_tail": normal.stderr[-2_000:],
+            "report_path": str(normal_report),
+            "report_sha256": _sha256(normal_report) if normal_report.is_file() else None,
+        }
         results["quality_owned_pid"] = owned.pid
     except Exception as exc:  # noqa: BLE001 - terminal production evidence
         results["failure"] = {"type": type(exc).__name__, "error": str(exc)[:2_000]}
@@ -411,7 +460,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     peak_used = max(int(sample["used_mib"]) for sample in samples)
     minimum_free = int(samples[0]["total_mib"]) - peak_used
-    route_names = ("quality_route", "standard_route", "economy_rtl_route")
+    route_names = (
+        "quality_route",
+        "standard_route",
+        "economy_rtl_route",
+        "normal_laplace",
+    )
     endpoints_down = all(_endpoint_down(url) for url in target_urls)
     passed = (
         all(

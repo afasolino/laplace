@@ -276,6 +276,17 @@ class LocalOpenAIChatBackend:
                 request, timeout=self.timeout_seconds
             ) as response:
                 raw: object = json.loads(response.read())
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read(4_096).decode("utf-8", errors="replace")
+            raise ServiceTierError(
+                "local_model_request_failed",
+                {
+                    "error_type": type(exc).__name__,
+                    "http_status": exc.code,
+                    "model_id": route.model_id,
+                    "response_body": error_body,
+                },
+            ) from exc
         except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
             raise ServiceTierError(
                 "local_model_request_failed",
@@ -365,9 +376,7 @@ class ValidatedPatchAgentBackend:
         old_text: str,
         new_text: str,
     ) -> str:
-        encoded_edit_size = len(
-            (path + old_text + new_text).encode("utf-8")
-        )
+        encoded_edit_size = len((path + old_text + new_text).encode("utf-8"))
         if (
             not old_text
             or old_text == new_text

@@ -63,7 +63,26 @@ def _write_promotable_manifest(root: Path, *, mtp_status: str) -> Path:
 
 
 def test_qwen38_promotion_fails_closed_and_qwen36_rollback_works(tmp_path: Path) -> None:
-    root = Path.cwd()
+    source_root = Path.cwd()
+    root = tmp_path / "repo"
+    config = root / "configs"
+    (config / "model_manifests").mkdir(parents=True)
+    for name in (
+        "selected_serving_profiles.qwen38.json",
+        "selected_serving_profiles.qwen38-mtp.json",
+        "selected_serving_profiles.qwen36.rollback.json",
+    ):
+        shutil.copyfile(source_root / "configs" / name, config / name)
+    (config / "model_manifests/qwen38_27b_a6000.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "promotion_allowed": False,
+                "certification_status": "NOT_RUN",
+            }
+        ),
+        encoding="utf-8",
+    )
     with pytest.raises(RuntimeError, match="qwen38_promotion_not_certified"):
         select("qwen38", root, tmp_path / "active.json")
 

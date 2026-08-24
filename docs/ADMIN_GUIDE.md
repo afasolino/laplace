@@ -171,3 +171,20 @@ compute-PID query is not an empty GPU: it is
 `BLOCKED_BY_UNCERTAIN_GPU_OWNERSHIP`. Never stop SpecDec. If it appears after a
 Laplace-owned group starts, release only the exact Laplace ownership record and
 record `YIELDED_TO_SPECDEC`.
+
+## Qwen3.8 and Zetsu administration
+
+Qwen3.8 promotion is evidence-gated. Resolve and record an immutable revision of
+the preferred published pre-quantized checkpoint, run the P6 131,072-token live
+profile and co-resident production gates, then promote only through the existing
+finalizer. P7 native MTP with three speculative tokens is optional. A failed P7
+leaves MTP disabled without invalidating a successful P6. Preserve Qwen3.6 as the
+configuration rollback and the CodeV Economy route as the bounded RTL specialist.
+See [QWEN38_PRODUCTION_MIGRATION.md](QWEN38_PRODUCTION_MIGRATION.md).
+
+Zetsu configuration intentionally combines a managed user-level Codex MCP block
+with a project-local Skill. Preserve unrelated Codex settings. The bearer token is
+provided only through the configured environment variable; never place its value
+in Git, the Skill, or `config.toml`. Agent checkpoints and telemetry remain
+owner-scoped, and remote client files remain subject to explicit Laplace Client
+grants.

@@ -1,24 +1,24 @@
 {
   "schema_version": 1,
-  "selection_evidence": "outputs/tiered_serving_20260727T084923Z/selected_profiles.json",
-  "default_profile_id": "P1_fp8_kv",
-  "high_context_profile_id": "P4_priority_expert_fp8",
+  "selection_evidence": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p6-production-final-v2/production_gate.json#sha256=65ce2e25dc8d3fd602cd5731a3136e1b06e76da23fdba5a2dc0a7fafb251c6b3",
+  "default_profile_id": "P6_qwen38_w4a16",
+  "high_context_profile_id": "P6_qwen38_w4a16",
   "quality_reserved_slots": 1,
-  "standard_capacity": 4,
+  "standard_capacity": 2,
   "economy_capacity": 4,
   "routes": {
     "quality": {
-      "model_id": "laplace-quality-p1",
-      "endpoint": "http://127.0.0.1:8201",
+      "model_id": "laplace-quality-qwen38",
+      "endpoint": "http://127.0.0.1:8206",
       "priority": 0,
-      "context_limit": 32768,
+      "context_limit": 131072,
       "output_limit": 4096
     },
     "standard": {
-      "model_id": "laplace-quality-p1",
-      "endpoint": "http://127.0.0.1:8201",
+      "model_id": "laplace-quality-qwen38",
+      "endpoint": "http://127.0.0.1:8206",
       "priority": 10,
-      "context_limit": 16384,
+      "context_limit": 131072,
       "output_limit": 2048
     },
     "economy": {

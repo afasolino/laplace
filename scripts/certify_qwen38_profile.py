@@ -43,7 +43,7 @@ MANDATORY_GATES = (
     "tool_calling",
     "multi_turn",
     "cancellation",
-    "context_32k",
+    "context_window",
     "runtime_stability",
     "quantized_kernel",
     "gpu_headroom",
@@ -419,17 +419,20 @@ def _tokenize_chat(
     return value["count"], int(value.get("max_model_len", 0))
 
 
-def _context_32k(client: httpx.Client, endpoint: str, model: str) -> dict[str, object]:
+def _context_window(
+    client: httpx.Client, endpoint: str, model: str, expected_limit: int
+) -> dict[str, object]:
     first_marker = "QWEN38_FIRST_" + uuid.uuid4().hex[:12]
     last_marker = "QWEN38_LAST_" + uuid.uuid4().hex[:12]
     prefix = f"Remember the first code {first_marker}. "
     suffix = f" The last code is {last_marker}. Reply with both exact codes and no other text."
     low = 1
-    high = 40_000
+    high = expected_limit * 2
     selected_content = ""
     selected_count = 0
     model_limit = 0
-    target = 32_000
+    reserve = max(1_024, min(4_096, expected_limit // 64))
+    target = max(2_048, expected_limit - reserve)
     while low <= high:
         midpoint = (low + high) // 2
         candidate = prefix + ("neutral " * midpoint) + suffix
@@ -440,35 +443,78 @@ def _context_32k(client: httpx.Client, endpoint: str, model: str) -> dict[str, o
             low = midpoint + 1
         else:
             high = midpoint - 1
-    value = _post(
-        client,
-        endpoint,
-        "/v1/chat/completions",
-        _base_body(model, [{"role": "user", "content": selected_content}], 64),
-    )
-    output = _content(_message(value))
-    usage = _usage(value)
+    body = _base_body(model, [{"role": "user", "content": selected_content}], 64)
+    body.update({"stream": True, "stream_options": {"include_usage": True}})
+    output_parts: list[str] = []
+    usage: dict[str, object] = {}
+    event_count = 0
+    done = False
+    started = time.monotonic()
+    first_output_at: float | None = None
+    with client.stream("POST", endpoint + "/v1/chat/completions", json=body) as response:
+        response.raise_for_status()
+        for line in response.iter_lines():
+            observed_at = time.monotonic()
+            if line == "data: [DONE]":
+                done = True
+                continue
+            if not line.startswith("data: "):
+                continue
+            event_count += 1
+            event: object = json.loads(line[6:])
+            if isinstance(event, dict) and isinstance(event.get("usage"), dict):
+                usage = dict(event["usage"])
+            choices = event.get("choices") if isinstance(event, dict) else None
+            delta = choices[0].get("delta") if isinstance(choices, list) and choices else None
+            fragment = delta.get("content") if isinstance(delta, dict) else None
+            if isinstance(fragment, str) and fragment:
+                if first_output_at is None:
+                    first_output_at = observed_at
+                output_parts.append(fragment)
+    completed_at = time.monotonic()
+    output = "".join(output_parts)
     reported_prompt = usage.get("prompt_tokens")
+    completion_tokens = usage.get("completion_tokens")
+    decode_seconds = completed_at - first_output_at if first_output_at is not None else None
+    decode_throughput = (
+        (completion_tokens - 1) / decode_seconds
+        if isinstance(completion_tokens, int)
+        and completion_tokens > 1
+        and isinstance(decode_seconds, float)
+        and decode_seconds > 0
+        else None
+    )
     passed = (
-        31_900 <= selected_count <= 32_000
-        and model_limit == 32_768
+        target - 128 <= selected_count <= target
+        and model_limit == expected_limit
+        and done
         and first_marker in output
         and last_marker in output
         and isinstance(reported_prompt, int)
         and reported_prompt == selected_count
+        and isinstance(decode_throughput, float)
+        and decode_throughput > 0
     )
-    evidence = _compact_chat_evidence(value)
-    evidence.update(
-        {
-            "status": "PASS" if passed else "FAIL",
-            "tokenize_count": selected_count,
-            "reported_prompt_tokens": reported_prompt,
-            "reported_max_model_len": model_limit,
-            "first_marker_recalled": first_marker in output,
-            "last_marker_recalled": last_marker in output,
-        }
-    )
-    return evidence
+    return {
+        "status": "PASS" if passed else "FAIL",
+        "tokenize_count": selected_count,
+        "target_prompt_tokens": target,
+        "reserved_prompt_tokens": reserve,
+        "reported_prompt_tokens": reported_prompt,
+        "reported_completion_tokens": completion_tokens,
+        "reported_max_model_len": model_limit,
+        "first_marker_recalled": first_marker in output,
+        "last_marker_recalled": last_marker in output,
+        "stream_event_count": event_count,
+        "done_event": done,
+        "content_excerpt": output[:500],
+        "content_sha256": hashlib.sha256(output.encode()).hexdigest(),
+        "ttft_seconds": (first_output_at - started if first_output_at is not None else None),
+        "decode_seconds": decode_seconds,
+        "decode_throughput_tok_s": decode_throughput,
+        "request_elapsed_seconds": completed_at - started,
+        "usage": usage,
+    }
 
 
 def _identity(client: httpx.Client, endpoint: str, model: str) -> dict[str, object]:
@@ -663,8 +709,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             _run_gate(
                 gates,
-                "context_32k",
-                lambda: _context_32k(client, endpoint, profile.served_model_name),
+                "context_window",
+                lambda: _context_window(
+                    client, endpoint, profile.served_model_name, profile.max_model_len
+                ),
             )
             _run_gate(
                 gates,
@@ -713,9 +761,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.profile_id == "P7_qwen38_w4a16_mtp":
         required.append("mtp")
     endpoint_released = _endpoint_down(endpoint_for(profile))
+    try:
+        residual_gpu = observe_gpu()
+        residual_evidence: dict[str, object] = {
+            "status": "OBSERVED",
+            "used_mib": residual_gpu.used_mib,
+            "free_mib": residual_gpu.free_mib,
+            "profile_delta_mib": residual_gpu.used_mib - initial_gpu.used_mib,
+            "compute_pids": list(residual_gpu.compute_pids),
+            "captured_at_utc": residual_gpu.captured_at_utc,
+        }
+    except ServingRuntimeError as exc:
+        residual_evidence = {
+            "status": "UNAVAILABLE",
+            "category": exc.category,
+            "evidence": exc.evidence,
+        }
     passed = (
         all(gates.get(name, {}).get("status") == "PASS" for name in required)
         and release.get("status") == "RELEASED_OWNED_PROFILE"
+        and residual_evidence.get("status") == "OBSERVED"
         and endpoint_released
     )
     result = {
@@ -740,6 +805,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "resolution_sha256": resolved.resolution_sha256,
         "gates": gates,
         "release": release,
+        "residual_gpu_after_release": residual_evidence,
         "endpoint_down_after_release": endpoint_released,
         "unrelated_processes_signalled": False,
     }

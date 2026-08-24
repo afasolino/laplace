@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "policy": "prefer_existing_prequantized_checkpoint",
+  "primary": "barrydeen/Qwen3.8-27B-AWQ-4bit",
+  "fallback": "soyrsoyr/Qwen3.8-27B-W4A16-AWQ-GPTQ",
+  "local_quantization": "final_fallback_only",
+  "target_gpu": "NVIDIA RTX A6000 (Ampere SM86)",
+  "production_context_tokens": 131072,
+  "selection_rule": "Pin and certify the primary first; use fallback only for demonstrated incompatibility. Resolve immutable revisions at preparation time and never promote from a floating reference."
+}

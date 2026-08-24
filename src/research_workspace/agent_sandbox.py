@@ -8,6 +8,7 @@ import os
 import re
 import sqlite3
 import subprocess  # nosec B404
+import sys
 import threading
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -96,11 +97,7 @@ class AgentSandboxManager:
         self.authorizations = authorizations
         self._runner = runner
         self.environment_allowlist = environment_allowlist
-        if (
-            per_user_quota < 1
-            or global_quota < per_user_quota
-            or retention_days < 1
-        ):
+        if per_user_quota < 1 or global_quota < per_user_quota or retention_days < 1:
             raise ValueError("invalid worktree quotas")
         self.per_user_quota = per_user_quota
         self.global_quota = global_quota
@@ -204,9 +201,7 @@ class AgentSandboxManager:
             try:
                 policy_value: object = json.loads(str(row["tool_policy_json"]))
                 environment_value: object = json.loads(str(row["environment_json"]))
-                if not isinstance(policy_value, dict) or not isinstance(
-                    environment_value, dict
-                ):
+                if not isinstance(policy_value, dict) or not isinstance(environment_value, dict):
                     raise ValueError
                 policy = AgentToolPolicy(
                     policy_id=str(policy_value["policy_id"]),
@@ -270,9 +265,7 @@ class AgentSandboxManager:
                         (user_id, idempotency_key),
                     ).fetchone()
                 if existing is not None:
-                    return self.require_active(
-                        str(existing["session_id"]), user_id=user_id
-                    )
+                    return self.require_active(str(existing["session_id"]), user_id=user_id)
             if identifier in self._sessions:
                 raise AgentSandboxError("session_exists", {"session_id": identifier})
             self._require_quota(user_id)
@@ -510,9 +503,7 @@ class AgentSandboxManager:
             )
             self._event(connection, binding, event, state, details)
 
-    def validate_path(
-        self, session_id: str, *, user_id: str, relative_path: str
-    ) -> Path:
+    def validate_path(self, session_id: str, *, user_id: str, relative_path: str) -> Path:
         binding = self.require_active(session_id, user_id=user_id)
         try:
             return validate_workspace_path(Path(binding.worktree_root), relative_path)
@@ -606,9 +597,7 @@ class AgentSandboxManager:
             "diff_hash": diff_hash,
         }
 
-    def _diff_summary(
-        self, binding: AgentSessionBinding
-    ) -> tuple[tuple[str, ...], str | None]:
+    def _diff_summary(self, binding: AgentSessionBinding) -> tuple[tuple[str, ...], str | None]:
         root = Path(binding.worktree_root)
         names = self._runner(
             ["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all"],
@@ -647,9 +636,7 @@ class AgentSandboxManager:
                     content = candidate.read_bytes()
                 except OSError:
                     continue
-                material += (
-                    f"\nuntracked:{path}:{hashlib.sha256(content).hexdigest()}"
-                )
+                material += f"\nuntracked:{path}:{hashlib.sha256(content).hexdigest()}"
         digest = hashlib.sha256(material.encode("utf-8")).hexdigest() if material else None
         return tuple(sorted(set(paths))), digest
 
@@ -695,9 +682,7 @@ class AgentSandboxManager:
             ).fetchall()
         return [self._public_record(row, operator=True) for row in rows]
 
-    def inspect(
-        self, session_id: str, *, user_id: str, operator: bool = False
-    ) -> JsonObject:
+    def inspect(self, session_id: str, *, user_id: str, operator: bool = False) -> JsonObject:
         identifier = _session_identifier(session_id)
         with self._connect() as connection:
             if operator:
@@ -757,9 +742,7 @@ class AgentSandboxManager:
         instruction_digest: str | None = None,
     ) -> JsonObject:
         binding = self.require_active(session_id, user_id=user_id)
-        if instruction_digest is not None and not re.fullmatch(
-            r"[a-f0-9]{64}", instruction_digest
-        ):
+        if instruction_digest is not None and not re.fullmatch(r"[a-f0-9]{64}", instruction_digest):
             raise AgentSandboxError("invalid_instruction_digest")
         self._set_state(
             binding,
@@ -995,7 +978,14 @@ class AgentSandboxManager:
 
     @staticmethod
     def fixed_environment(binding: AgentSessionBinding) -> dict[str, str]:
-        base = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "TZ": "UTC"}
+        operator_bin = str(Path(sys.executable).parent)
+        base = {
+            "PATH": f"{operator_bin}:/usr/local/bin:/usr/bin:/bin",
+            "LANG": "C.UTF-8",
+            "TZ": "UTC",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTEST_ADDOPTS": "-p no:cacheprovider",
+        }
         base.update(binding.environment)
         base["LAPLACE_AGENT_SESSION"] = binding.session_id
         base["LAPLACE_REPOSITORY_ID"] = binding.repo_id

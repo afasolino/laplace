@@ -57,3 +57,11 @@ cancellation, and revoke.
 For persistence, install `deploy/systemd/laplace-client.service.example` as a
 user unit, put the token in `%h/.config/laplace/client.env` with mode 0600, then
 run `systemctl --user enable --now laplace-client`.
+
+## Zetsu boundary
+
+Zetsu does not extend the client grant implicitly. A Qwen `agent_task` can access
+only its server-authorized isolated repository worktree plus compact owner-scoped
+retrieval. It cannot acquire arbitrary filesystem or shell access to the machine
+running Codex. Work on a remote PC or local user folder continues to require this
+explicit pair/grant mechanism and its existing isolation checks.

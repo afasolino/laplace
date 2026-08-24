@@ -89,6 +89,7 @@ async def test_zetsu_mcp_requires_normal_bearer_and_runs_real_retrieval(app: obj
             "project_context",
             "experiment_context",
             "delegate",
+            "agent_task",
             "rtl_task",
             "verify",
         }

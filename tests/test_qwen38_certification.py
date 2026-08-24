@@ -64,7 +64,7 @@ def test_p6_mandatory_gates_cover_requested_live_surface() -> None:
         "tool_calling",
         "multi_turn",
         "cancellation",
-        "context_32k",
+        "context_window",
         "runtime_stability",
         "quantized_kernel",
         "gpu_headroom",

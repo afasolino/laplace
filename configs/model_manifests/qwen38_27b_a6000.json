@@ -2,15 +2,15 @@
   "schema_version": 3,
   "requested_base_model": "Qwen/Qwen3.8-27B",
   "base_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
-  "artifact_path": "/home/giando/work/laplace/.models/Qwen3.8-27B-W4A16-AWQ",
-  "artifact_revision": "local-awq:315b9b21b0a085b7e2f4a65f0c5db1f1c950aff037ad777382c8ed9bd1181808",
-  "artifact_sha256": "315b9b21b0a085b7e2f4a65f0c5db1f1c950aff037ad777382c8ed9bd1181808",
-  "artifact_size_bytes": 19473078044,
-  "artifact_manifest": ".models/Qwen3.8-27B-W4A16-AWQ/laplace_artifact_manifest.json",
-  "tokenizer_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "artifact_path": "/home/giando/work/laplace/.models/Qwen3.8-27B-AWQ-4bit-e6b4b8b025f8",
+  "artifact_revision": "hf:barrydeen/Qwen3.8-27B-AWQ-4bit@e6b4b8b025f85b3e18f13281db576e0b7d5fe314",
+  "artifact_sha256": "4d72d8123b8b292edd5de9c1a3cbb7cd351eca7eb14fdf0aa996d9fcab340bb2",
+  "artifact_size_bytes": 27764623261,
+  "artifact_manifest": ".models/Qwen3.8-27B-AWQ-4bit-e6b4b8b025f8/laplace_artifact_manifest.json",
+  "tokenizer_revision": "e6b4b8b025f85b3e18f13281db576e0b7d5fe314",
   "artifact_present": true,
-  "availability_status": "AVAILABLE_OFFICIAL_SOURCE_LOCAL_AWQ",
-  "availability_checked_at_utc": "2026-08-17T11:32:41Z",
+  "availability_status": "AVAILABLE_PREQUANTIZED_HUGGINGFACE",
+  "availability_checked_at_utc": "2026-08-24T06:57:22.826064+00:00",
   "official_sources_checked": [
     "https://huggingface.co/Qwen/Qwen3.8-27B",
     "https://huggingface.co/Qwen/Qwen3.8-27B/tree/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
@@ -28,7 +28,7 @@
     "source_dtype": "bfloat16",
     "source_weight_bytes": 55562855904,
     "native_context_tokens": 262144,
-    "production_context_tokens": 32768,
+    "production_context_tokens": 131072,
     "text_layers": 64,
     "linear_attention_layers": 48,
     "full_attention_layers": 16,
@@ -38,19 +38,47 @@
     "official_int4_checkpoint_found": false,
     "official_fp8_checkpoint_revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
     "official_fp8_selected": false,
-    "fp8_rejection_reason": "RTX A6000 compute capability 8.6 lacks native FP8 tensor-core execution; local symmetric W4A16 is the supported memory-appropriate Ampere route."
+    "fp8_rejection_reason": "RTX A6000 compute capability 8.6 lacks native FP8 tensor-core execution; prefer a pinned Ampere-compatible pre-quantized W4A16 checkpoint, with local quantization retained only as final fallback."
   },
   "source_provenance": {
-    "verified_file_count": 32,
-    "source_tree_sha256": "05a9101111a68cba02877e56283246cba67578ef2da02d6a604be530f0fbe3e9",
-    "recipe_path": "configs/quantization/qwen38_27b_w4a16_awq.json",
-    "recipe_sha256": "5c5ad69c371abb8bc82a0c90bbd9e7105602b1c564dda502ccff1a7a39e2a393",
-    "calibration_repository": "HuggingFaceH4/ultrachat_200k",
-    "calibration_revision": "8049631c405ae6576f93f445c6b8166f76f5505a",
-    "calibration_split": "train_sft",
-    "calibration_samples": 128,
-    "calibration_sequence_length": 2048,
-    "calibration_seed": 42
+    "verified_file_count": 13,
+    "source_tree_sha256": "4d72d8123b8b292edd5de9c1a3cbb7cd351eca7eb14fdf0aa996d9fcab340bb2",
+    "recipe_path": "configs/model_manifests/qwen38_prequantized_source.json",
+    "recipe_sha256": "100a0daf4f345438b82671fb1580fb9d148af0eb17bf0178b9965104295334c5",
+    "source_repository": "barrydeen/Qwen3.8-27B-AWQ-4bit",
+    "source_revision": "e6b4b8b025f85b3e18f13281db576e0b7d5fe314",
+    "checkpoint_validation": {
+      "quant_method": "compressed-tensors",
+      "storage_format": "pack-quantized",
+      "linear_quantization_groups": [
+        {
+          "targets": [
+            "Linear"
+          ],
+          "weight_bits": 4,
+          "group_size": 128,
+          "symmetric": false,
+          "strategy": "group",
+          "type": "int"
+        }
+      ],
+      "tensor_metadata_source": "index+header:model-00001-of-00003.safetensors+index+header:model-00002-of-00003.safetensors+index+header:model-00003-of-00003.safetensors",
+      "tensor_key_count": 1967,
+      "tensor_dtype_counts": {
+        "BF16": 1199,
+        "I32": 512,
+        "I64": 256
+      },
+      "protected_bf16_prefix_counts": {
+        "lm_head.": 1,
+        "model.visual.": 333,
+        "mtp.": 15
+      },
+      "protected_bf16_verified": true,
+      "mtp_configured_layers": 1,
+      "mtp_tensor_count": 15,
+      "mtp_tensors_present": true
+    }
   },
   "quantization": {
     "status": "ARTIFACT_VERIFIED",
@@ -59,13 +87,9 @@
     "weights_bits": 4,
     "activations_bits": 16,
     "group_size": 128,
-    "symmetric": true,
-    "strategy": "group",
-    "observer": "memoryless_minmax",
-    "awq_grid_points": 20,
-    "kernel_target": "compressed_tensors_marlin_w4a16_sm86",
-    "mtp_copy": "LOSSLESS_VERIFIED",
-    "mtp_shard_sha256": "1d8268aa85ace093a561e3e7b63b9d390dac1cd55a90cd55b5ec509c3c9da9fe"
+    "symmetric": false,
+    "kernel_target": "ampere_marlin_w4a16",
+    "mtp_copy": "PRESENT_UNCERTIFIED"
   },
   "runtime_observed": {
     "serving_python": "3.11.15",
@@ -82,46 +106,88 @@
     "quantization_cuda_runtime": "12.6",
     "gpu": "NVIDIA RTX A6000",
     "gpu_compute_capability": "8.6",
-    "gpu_total_mib": 49140
+    "gpu_total_mib": 49140,
+    "scope": "Historical environment observation from the prior local-AWQ preparation; it is not certification of the selected pre-quantized checkpoint."
   },
   "architecture_probe": {
-    "status": "PASSED_DUMMY_WEIGHTS",
-    "tested_before_environment_modification": true,
-    "resolved_architecture": "Qwen3_5ForConditionalGeneration",
-    "served_model_id": "laplace-qwen38-architecture-probe",
-    "models_http_status": 200,
-    "dummy_gpu_model_load_gib": 34.07,
-    "dummy_cpu_offload_gib": 16.15,
-    "observed_gpu_used_mib": 40910,
-    "observed_gpu_free_mib": 7761,
-    "scope": "Installed architecture, GDN/attention kernels, server startup, and model identity only; real artifact inference was not claimed."
+    "status": "NOT_RUN_PREQUANTIZED_ARTIFACT",
+    "scope": "Previous dummy/local-artifact probes are not certification for this checkpoint."
   },
   "serving_candidates": {
     "P6_qwen38_w4a16": {
-      "profile_sha256": "7a287a248bc3d6d14e13fa1ccb0e5e9bea2b3cd9818b2a07e0aa87407a1fd76c",
-      "max_model_len": 32768,
+      "profile_sha256": "715aa4f9ebd4b2988ad5e90c732179824e805c9f620a069e9ad3f37102a4fa11",
+      "max_model_len": 131072,
+      "gpu_memory_utilization": 0.755,
       "reasoning_parser": "qwen3",
-      "tool_call_parser": "qwen3_coder",
-      "live_status": "NOT_RUN_EXTERNAL_EXECUTION_QUOTA"
+      "tool_call_parser": "qwen3_xml",
+      "live_status": "PASSED",
+      "evidence": {
+        "profile_certification": {
+          "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p6-util0755/certification.json",
+          "sha256": "28a529019db24314732a0c6e0944161bbf3b8f505da57abe5febcab85e68e819"
+        },
+        "production_gate": {
+          "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p6-production-final-v2/production_gate.json",
+          "sha256": "65ce2e25dc8d3fd602cd5731a3136e1b06e76da23fdba5a2dc0a7fafb251c6b3"
+        }
+      }
     },
     "P7_qwen38_w4a16_mtp": {
-      "profile_sha256": "648699a4d5aad57e833a2b5dfc45524b39ffe47fb536792882851856ab415e60",
+      "profile_sha256": "c96c0471359700da8630426e5b36d9a51feac3d618198791438d38f3a1e65a7c",
+      "max_model_len": 131072,
+      "gpu_memory_utilization": 0.795,
       "requested_speculative_tokens": 3,
-      "live_status": "NOT_RUN_EXTERNAL_EXECUTION_QUOTA"
+      "live_status": "FAILED",
+      "evidence": {
+        "profile_certification": {
+          "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p7-mtp-util0795/certification.json",
+          "sha256": "bff5a11399dfbcc170eabf275e4526a348428dfbbf7f75ae4933284e91f99e64"
+        },
+        "production_gate": {
+          "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p7-production-codev/production_gate.json",
+          "sha256": "719969d2e366d9180805be1c5c8652910d7d9f751bf016da3354fad9cb8d668d"
+        }
+      }
     }
   },
   "mtp": {
     "requested_speculative_tokens": 3,
-    "asset_status": "LOSSLESS_VERIFIED",
-    "runtime_status": "NOT_RUN_EXTERNAL_EXECUTION_QUOTA",
+    "asset_status": "PRESENT_UNCERTIFIED",
+    "runtime_status": "FAILED",
     "status": "NOT_CERTIFIED"
   },
-  "external_blocker": {
-    "category": "EXTERNAL_EXECUTION_QUOTA_EXHAUSTED",
-    "observed_at_utc": "2026-08-17T11:32:41Z",
-    "evidence": "The platform rejected the first post-build GPU-visible command because the external-execution usage limit was reached and reported retry availability at Aug 24, 2026 9:24 AM.",
-    "confirmation": "A later required escalated rerun of a localhost-socket regression was rejected by the same usage limit, so neither GPU-visible certification nor sandbox-external test execution is currently authorized."
+  "certification_status": "PASSED",
+  "promotion_allowed": true,
+  "artifact_policy": {
+    "selected_repository": "barrydeen/Qwen3.8-27B-AWQ-4bit",
+    "selected_revision": "e6b4b8b025f85b3e18f13281db576e0b7d5fe314",
+    "selection": "primary",
+    "fallback_justification": null,
+    "local_quantization_role": "final_fallback_only",
+    "prepared_at_utc": "2026-08-24T06:57:22.826064+00:00"
   },
-  "certification_status": "BLOCKED_EXTERNAL_EXECUTION_QUOTA",
-  "promotion_allowed": false
+  "certified_at_utc": "2026-08-24T09:08:04.577913+00:00",
+  "certified_repository_revision": "5726b68d54e11023dd7610cb0271be0f69b792ec",
+  "certification_evidence": {
+    "P6": {
+      "profile_certification": {
+        "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p6-util0755/certification.json",
+        "sha256": "28a529019db24314732a0c6e0944161bbf3b8f505da57abe5febcab85e68e819"
+      },
+      "production_gate": {
+        "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p6-production-final-v2/production_gate.json",
+        "sha256": "65ce2e25dc8d3fd602cd5731a3136e1b06e76da23fdba5a2dc0a7fafb251c6b3"
+      }
+    },
+    "P7": {
+      "profile_certification": {
+        "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p7-mtp-util0795/certification.json",
+        "sha256": "bff5a11399dfbcc170eabf275e4526a348428dfbbf7f75ae4933284e91f99e64"
+      },
+      "production_gate": {
+        "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p7-production-codev/production_gate.json",
+        "sha256": "719969d2e366d9180805be1c5c8652910d7d9f751bf016da3354fad9cb8d668d"
+      }
+    }
+  }
 }

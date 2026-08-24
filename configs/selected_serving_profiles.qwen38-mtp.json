@@ -11,14 +11,14 @@
       "model_id": "laplace-quality-qwen38-mtp",
       "endpoint": "http://127.0.0.1:8207",
       "priority": 0,
-      "context_limit": 32768,
+      "context_limit": 131072,
       "output_limit": 4096
     },
     "standard": {
       "model_id": "laplace-quality-qwen38-mtp",
       "endpoint": "http://127.0.0.1:8207",
       "priority": 10,
-      "context_limit": 16384,
+      "context_limit": 131072,
       "output_limit": 2048
     },
     "economy": {

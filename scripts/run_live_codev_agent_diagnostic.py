@@ -92,8 +92,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         check=False,
         timeout=30,
     )
-    if stable_status.returncode != 0 or stable_status.stdout.strip():
-        raise RuntimeError("stable checkout is not clean")
+    diff_check = subprocess.run(  # nosec B603 B607 - fixed read-only Git query
+        ["git", "diff", "--check"],
+        cwd=STABLE,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    result["source_checkout"] = {
+        "status_returncode": stable_status.returncode,
+        "dirty": bool(stable_status.stdout.strip()),
+        "status_sha256": hashlib.sha256(stable_status.stdout.encode()).hexdigest(),
+        "diff_check_returncode": diff_check.returncode,
+        "diff_check_output": (diff_check.stdout + diff_check.stderr)[-2_000:],
+    }
+    if stable_status.returncode != 0 or diff_check.returncode != 0:
+        raise RuntimeError("source checkout Git validation failed")
 
     codev = OwnedCodeV(output)
     codev_started = False
@@ -103,9 +118,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         codev_started = True
         result["codev_ready"] = codev.wait_ready()
         result["ready_gpu"] = asdict(observe_gpu())
-        with tempfile.TemporaryDirectory(
-            prefix="laplace-live-codev-agent-"
-        ) as temporary:
+        with tempfile.TemporaryDirectory(prefix="laplace-live-codev-agent-") as temporary:
             temporary_root = Path(temporary)
             repository = temporary_root / "authorized-repository"
             revision = _git_fixture(repository)
@@ -124,9 +137,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "live-systemverilog-fixture",
                 base_revision=revision,
             )
-            recording = RecordingChatBackend(
-                LocalOpenAIChatBackend(timeout_seconds=300)
-            )
+            recording = RecordingChatBackend(LocalOpenAIChatBackend(timeout_seconds=300))
             service = TieredServingService(
                 users=users,
                 sandboxes=sandboxes,
@@ -198,9 +209,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "effective_model_exact": agent_result.get("model_id") == CODEV_ID,
                     "expected_path_modified": "rtl/example.sv" in diff,
                     "expected_rtl_change": "assign y = ~a;" in diff,
-                    "verification_passed": (
-                        agent_response.get("verification_status") == "PASSED"
-                    ),
+                    "verification_passed": (agent_response.get("verification_status") == "PASSED"),
                 }
                 result["checks"] = checks
                 if all(checks.values()):
@@ -216,9 +225,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "bytes": len(encoded),
                 }
     finally:
-        result["codev_release"] = (
-            codev.stop() if codev_started else {"status": "NOT_STARTED"}
-        )
+        result["codev_release"] = codev.stop() if codev_started else {"status": "NOT_STARTED"}
         result["final_gpu"] = _wait_gpu_release(maximum_used_mib=4_000)
         _write_json(output / "diagnostic_results.json", result)
     print(json.dumps(result, indent=2, sort_keys=True))

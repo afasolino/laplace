@@ -23,6 +23,18 @@ import httpx
 import uvicorn
 
 from research_workspace.agent_sandbox import AgentSandboxManager, AgentSessionBinding
+from research_workspace.auth_registry import (
+    RegisteredUser,
+    RegisteredUserRegistry,
+    hash_secret,
+    write_registry,
+)
+from research_workspace.auth_sessions import (
+    AuthAuditLog,
+    RegisteredEmailAuth,
+    SessionStore,
+)
+from research_workspace.conversations import ConversationStore
 from research_workspace.operator_api import (
     AuthCredential,
     OperatorApiSettings,
@@ -72,7 +84,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--repository-root", type=Path, default=root)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--main-endpoint", default="http://127.0.0.1:8102")
+    parser.add_argument("--main-model", default="laplace-qwen3.6-35b-a3b-w4a16")
+    parser.add_argument("--quality-context-limit", type=int, default=32_768)
+    parser.add_argument("--standard-context-limit", type=int, default=16_384)
     parser.add_argument("--codev-endpoint", default="http://127.0.0.1:8103")
+    parser.add_argument("--codev-model", default="laplace-codev-r1-rl-qwen-7b-w4a16")
     parser.add_argument("--users", type=int, default=12)
     parser.add_argument("--requests", type=int, default=60)
     parser.add_argument("--skip-gui", action="store_true")
@@ -107,11 +123,11 @@ def _probe_model(endpoint: str, expected: str) -> dict[str, object]:
     except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
         return {"status": "UNAVAILABLE", "error": type(exc).__name__}
     data = raw.get("data") if isinstance(raw, dict) else None
-    identities = [
-        item["id"]
-        for item in data
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    ] if isinstance(data, list) else []
+    identities = (
+        [item["id"] for item in data if isinstance(item, dict) and isinstance(item.get("id"), str)]
+        if isinstance(data, list)
+        else []
+    )
     return {
         "status": "HEALTHY_EXACT_MODEL" if expected in identities else "MISMATCH",
         "expected": expected,
@@ -144,9 +160,7 @@ def _git_repository(path: Path, marker: str) -> str:
             env=environment,
         )
         if completed.returncode != 0:
-            raise RuntimeError(
-                f"fixture_repository_failed:{command[1]}:{completed.stderr[-1000:]}"
-            )
+            raise RuntimeError(f"fixture_repository_failed:{command[1]}:{completed.stderr[-1000:]}")
     revision = subprocess.run(  # nosec B603 B607 - fixed Git query
         ["git", "-C", str(path), "rev-parse", "HEAD"],
         capture_output=True,
@@ -169,7 +183,7 @@ def _session(client: httpx.Client, token: str) -> tuple[dict[str, str], dict[str
     return headers, value
 
 
-def _gui_smoke(base_url: str, token: str) -> dict[str, object]:
+def _gui_smoke(base_url: str, email: str, password: str) -> dict[str, object]:
     from playwright.sync_api import sync_playwright
 
     console_errors: list[str] = []
@@ -183,27 +197,23 @@ def _gui_smoke(base_url: str, token: str) -> dict[str, object]:
             ),
         )
         page.goto(base_url, wait_until="networkidle")
-        page.get_by_label("Access token").fill(token)
-        page.get_by_role("button", name="Authenticate").click()
-        page.locator("#tier-chat-form").wait_for()
-        page.locator("#tier-chat-form textarea[name=message]").fill(
-            "Return exactly the token PASS."
-        )
-        page.get_by_role("button", name="Send local chat").click()
-        page.locator("#tier-chat-response").get_by_text(
-            '"status": "SUCCESS"', exact=False
-        ).wait_for(timeout=120_000)
+        page.get_by_label("Email address").first.fill(email)
+        page.locator("#login-password").fill(password)
+        page.get_by_role("button", name="Sign in", exact=True).last.click()
+        page.locator("#auth-dialog").wait_for(state="hidden")
+        page.locator("#chat-form").wait_for()
+        page.locator("#chat-message").fill("Return exactly the token PASS.")
+        page.get_by_role("button", name="Send", exact=True).click()
+        assistant = page.locator("#message-list .message-card.assistant").last
+        assistant.get_by_text("PASS", exact=True).wait_for(timeout=120_000)
         overflow = page.evaluate(
-            "() => document.documentElement.scrollWidth > "
-            "document.documentElement.clientWidth"
+            "() => document.documentElement.scrollWidth > document.documentElement.clientWidth"
         )
-        response_text = page.locator("#tier-chat-response").inner_text()
+        response_text = assistant.inner_text()
         browser.close()
     return {
         "status": (
-            "PASS"
-            if not console_errors and not overflow and '"status": "SUCCESS"' in response_text
-            else "FAIL"
+            "PASS" if not console_errors and not overflow and "PASS" in response_text else "FAIL"
         ),
         "console_errors": console_errors,
         "horizontal_overflow": overflow,
@@ -219,16 +229,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.users < 5 or arguments.requests < 5 or arguments.requests % 5:
         raise SystemExit("users must be >=5 and requests must be a positive multiple of five")
 
-    main_model = "laplace-qwen3.6-35b-a3b-w4a16"
-    codev_model = "laplace-codev-r1-rl-qwen-7b-w4a16"
+    main_model = arguments.main_model
+    codev_model = arguments.codev_model
     endpoint_evidence = {
         "main": _probe_model(arguments.main_endpoint, main_model),
         "codev": _probe_model(arguments.codev_endpoint, codev_model),
     }
-    if any(
-        item.get("status") != "HEALTHY_EXACT_MODEL"
-        for item in endpoint_evidence.values()
-    ):
+    if any(item.get("status") != "HEALTHY_EXACT_MODEL" for item in endpoint_evidence.values()):
         (output_root / "endpoint_preflight.json").write_text(
             json.dumps(endpoint_evidence, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -258,10 +265,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             repository_by_user[user_id] = repo_id
 
     operator_token = f"laplace-live-operator-{secrets.token_urlsafe(32)}"
-    credentials[operator_token] = AuthCredential(
-        "admin", "live-operator", CapabilityTier.OPERATOR
-    )
+    credentials[operator_token] = AuthCredential("admin", "live-operator", CapabilityTier.OPERATOR)
     users.set_user("live-operator", CapabilityTier.OPERATOR)
+    browser_email = "live-operator@localhost.invalid"
+    browser_password = secrets.token_urlsafe(32)
+    registry_path = state / "auth/registered_users.yaml"
+    write_registry(
+        registry_path,
+        [
+            RegisteredUser(
+                email=browser_email,
+                user_id="live-operator",
+                display_name="Live Operator",
+                enabled=True,
+                capability_tier=CapabilityTier.OPERATOR,
+                role="admin",
+                default_lane="quality",
+                authorized_repo_ids=(),
+                password_hash=hash_secret(browser_password, password_policy=True),
+                must_change_password=False,
+            )
+        ],
+    )
+    registered_auth = RegisteredEmailAuth(
+        RegisteredUserRegistry(registry_path),
+        SessionStore(state / "auth/sessions.sqlite3"),
+        AuthAuditLog(state / "auth/authentication_audit.jsonl"),
+    )
     policy = LanePolicy(
         routes={
             ModelLane.QUALITY: ModelRoute(
@@ -269,7 +299,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 main_model,
                 arguments.main_endpoint,
                 0,
-                context_limit=32_768,
+                context_limit=arguments.quality_context_limit,
                 output_limit=256,
             ),
             ModelLane.STANDARD: ModelRoute(
@@ -277,7 +307,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 main_model,
                 arguments.main_endpoint,
                 10,
-                context_limit=16_384,
+                context_limit=arguments.standard_context_limit,
                 output_limit=256,
             ),
             ModelLane.ECONOMY: ModelRoute(
@@ -314,6 +344,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             bearer_api_enabled=True,
         ),
         tiered=tiered,
+        registered_auth=registered_auth,
+        conversation_store=ConversationStore(state / "conversations.sqlite3"),
     )
     server = uvicorn.Server(
         uvicorn.Config(
@@ -340,8 +372,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         with httpx.Client(base_url=base_url, timeout=360) as client:
             headers_by_user = {
-                user_id: _session(client, token)[0]
-                for user_id, token in token_by_user.items()
+                user_id: _session(client, token)[0] for user_id, token in token_by_user.items()
             }
             user_ids = sorted(token_by_user)
             workload = list(tier_mix(arguments.requests))
@@ -356,8 +387,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else f"Reply with exactly `PASS {marker}`."
                 )
                 started = time.perf_counter()
-                response = client.post(
-                    "/api/v1/chat",
+                response = httpx.post(
+                    base_url + "/api/v1/chat",
                     headers=headers_by_user[user_id],
                     json={
                         "lane": lane.value,
@@ -365,6 +396,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "session_id": f"mixed-{index:03d}",
                         "messages": [{"role": "user", "content": prompt}],
                     },
+                    timeout=360,
                 )
                 elapsed_ms = (time.perf_counter() - started) * 1_000
                 value: object = response.json()
@@ -382,25 +414,28 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             def poll_queue() -> None:
                 first_user = user_ids[0]
-                while not stop_poll.is_set():
-                    response = client.get(
-                        "/api/v1/tier/capabilities",
-                        headers={
-                            "Authorization": f"Bearer {token_by_user[first_user]}"
-                        },
-                    )
-                    if response.status_code == 200:
-                        value = response.json()
-                        if isinstance(value, dict) and isinstance(value.get("queue"), dict):
-                            queue_snapshots.append(value["queue"])
-                    stop_poll.wait(0.02)
+                with httpx.Client(base_url=base_url, timeout=30) as poll_client:
+                    while not stop_poll.is_set():
+                        try:
+                            response = poll_client.get(
+                                "/api/v1/tier/capabilities",
+                                headers={"Authorization": f"Bearer {token_by_user[first_user]}"},
+                            )
+                        except httpx.TransportError:
+                            if stop_poll.wait(0.02):
+                                break
+                            continue
+                        if response.status_code == 200:
+                            value = response.json()
+                            if isinstance(value, dict) and isinstance(value.get("queue"), dict):
+                                queue_snapshots.append(value["queue"])
+                        stop_poll.wait(0.02)
 
             poller = threading.Thread(target=poll_queue, daemon=True)
             poller.start()
             with ThreadPoolExecutor(max_workers=arguments.users) as executor:
                 futures = [
-                    executor.submit(invoke, index, lane)
-                    for index, lane in enumerate(workload)
+                    executor.submit(invoke, index, lane) for index, lane in enumerate(workload)
                 ]
                 for future in as_completed(futures):
                     results.append(future.result())
@@ -421,9 +456,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 status = client.get(
                     f"/api/v1/agent/sessions/{session_id}/status",
-                    headers={
-                        "Authorization": f"Bearer {token_by_user[user_id]}"
-                    },
+                    headers={"Authorization": f"Bearer {token_by_user[user_id]}"},
                 )
                 lifecycle.append(
                     {
@@ -431,8 +464,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "session_id": session_id,
                         "create_status": created.status_code,
                         "status_status": status.status_code,
-                        "worktree_root": (
-                            created.json().get("binding", {}).get("worktree_root")
+                        "repo_id": (
+                            created.json().get("binding", {}).get("repo_id")
+                            if isinstance(created.json(), dict)
+                            else None
+                        ),
+                        "worktree_status": (
+                            created.json().get("binding", {}).get("worktree_status")
                             if isinstance(created.json(), dict)
                             else None
                         ),
@@ -452,15 +490,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"/api/v1/agent/sessions/{session_id}/status",
                     headers={"Authorization": f"Bearer {token_by_user[user_id]}"},
                 )
-                current = next(
-                    item for item in lifecycle if item["session_id"] == session_id
-                )
+                current = next(item for item in lifecycle if item["session_id"] == session_id)
                 current["cancel_status"] = cancelled.status_code
                 current["final_status"] = final_status.json().get("status")
             first_basic = next(
-                user_id
-                for user_id in user_ids
-                if users.get(user_id).tier is CapabilityTier.BASIC
+                user_id for user_id in user_ids if users.get(user_id).tier is CapabilityTier.BASIC
             )
             basic_agent = client.post(
                 "/api/v1/agent/sessions",
@@ -469,42 +503,49 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
             lane_quality: dict[str, dict[str, object]] = {}
-            cases = load_quality_manifest(
-                root / "configs/serving_quality_manifest.json"
-            )
+            cases = load_quality_manifest(root / "configs/serving_quality_manifest.json")
             for lane in ModelLane:
                 scored = []
                 for case in cases:
+                    api_domain = (
+                        case.domain
+                        if case.domain in {"general", "python", "json", "systemverilog"}
+                        else "general"
+                    )
                     response = client.post(
                         "/api/v1/chat",
                         headers=headers_by_user[user_ids[0]],
                         json={
                             "lane": lane.value,
-                            "domain": case.domain,
+                            "domain": api_domain,
                             "session_id": f"quality-{lane.value}-{case.case_id}",
                             "messages": [{"role": "user", "content": case.prompt}],
                         },
                     )
                     payload: object = response.json()
-                    response_body = (
-                        payload.get("response") if isinstance(payload, dict) else None
-                    )
+                    response_body = payload.get("response") if isinstance(payload, dict) else None
                     content = (
-                        response_body.get("content")
-                        if isinstance(response_body, dict)
-                        else ""
+                        response_body.get("content") if isinstance(response_body, dict) else ""
                     )
-                    scored.append(
-                        asdict(
-                            score_quality_output(
-                                lane.value,
-                                case,
-                                content if isinstance(content, str) else "",
-                            )
+                    case_score = asdict(
+                        score_quality_output(
+                            lane.value,
+                            case,
+                            content if isinstance(content, str) else "",
                         )
                     )
+                    case_score["http_status"] = response.status_code
+                    case_score["api_domain"] = api_domain
+                    case_score["api_success"] = (
+                        response.status_code == 200
+                        and isinstance(payload, dict)
+                        and payload.get("status") == "SUCCESS"
+                    )
+                    scored.append(case_score)
                 score = sum(float(item["score"]) for item in scored) / len(scored)
-                hard = all(bool(item["passed_hard_gates"]) for item in scored)
+                hard = all(
+                    bool(item["passed_hard_gates"]) and bool(item["api_success"]) for item in scored
+                )
                 lane_quality[lane.value] = {
                     "score": score,
                     "passed_hard_gates": hard,
@@ -512,7 +553,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
 
             if not arguments.skip_gui:
-                gui_result = _gui_smoke(base_url, token_by_user[first_basic])
+                gui_result = _gui_smoke(base_url, browser_email, browser_password)
 
         own_markers = {str(item["marker"]) for item in results}
         successes = [
@@ -538,10 +579,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if isinstance(item["response"], dict)
         )
         observed_waiting = max(
-            (
-                _list_length(snapshot.get("waiting"))
-                for snapshot in queue_snapshots
-            ),
+            (_list_length(snapshot.get("waiting")) for snapshot in queue_snapshots),
             default=0,
         )
         quality_baseline = _required_float(
@@ -562,10 +600,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             and bool(lane_quality[lane]["passed_hard_gates"])
             for lane, floor in floors.items()
         }
-        worktree_roots = [
-            str(item["worktree_root"])
-            for item in lifecycle
-            if isinstance(item.get("worktree_root"), str)
+        worktree_repositories = [
+            str(item["repo_id"]) for item in lifecycle if isinstance(item.get("repo_id"), str)
         ]
         audit_lines = [
             json.loads(line)
@@ -588,8 +624,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         request_audits = [item for item in audit_lines if item.get("mode") == "chat"]
         pass_conditions = {
             "endpoint_identity": all(
-                item.get("status") == "HEALTHY_EXACT_MODEL"
-                for item in endpoint_evidence.values()
+                item.get("status") == "HEALTHY_EXACT_MODEL" for item in endpoint_evidence.values()
             ),
             "mixed_requests": len(successes) == arguments.requests,
             "exact_mix": Counter(item["lane"] for item in results)
@@ -601,13 +636,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "codev_systemverilog_route_present": route_counts[codev_model] > 0,
             "queue_visible": observed_waiting > 0,
             "no_cross_user_context_leakage": not leakage,
-            "isolated_worktrees": len(worktree_roots) == len(set(worktree_roots))
-            == len(lifecycle),
+            "isolated_worktrees": (
+                len(worktree_repositories) == len(set(worktree_repositories)) == len(lifecycle)
+                and all(item.get("worktree_status") == "ACTIVE_ISOLATED" for item in lifecycle)
+            ),
             "cross_user_session_denied": cross_user.status_code == 403,
             "basic_agent_denied": basic_agent.status_code == 403,
             "cancellation_and_final_visibility": all(
-                item.get("cancel_status") == 200
-                and item.get("final_status") == "CANCELLED"
+                item.get("cancel_status") == 200 and item.get("final_status") == "CANCELLED"
                 for item in lifecycle
             ),
             "quality_floors": all(quality_floor_pass.values()),

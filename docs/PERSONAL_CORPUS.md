@@ -56,3 +56,13 @@ Default limits are 2,000 files per batch, 64 MiB per file, 512 MiB expanded batc
 Stop the owning service or take a SQLite-consistent snapshot. Back up `personal_corpora/registry.sqlite3`, `owners/`, `provenance.jsonl`, and `owner_hmac.key` together to encrypted access-controlled storage. The HMAC key is required to preserve owner-directory identity. Never place the backup in Git.
 
 Restore the complete set into a mode-`0700` external state root, preserve file modes, start on loopback, run health/readiness, list corpora as fixture owners, and verify a search citation and hash before restoring remote access. On crash, quarantined staging is not retrieved; the owner can resume an intact staging session or cancel it. Never delete SQLite WAL/SHM files while the service is running.
+
+## Zetsu agent retrieval
+
+A Zetsu Qwen `agent_task` may request compact personal-corpus context through the
+same owner-authorized search/provenance interfaces used by Laplace. The agent
+receives bounded excerpts and evidence identifiers only; the corpus is never
+mounted into its worktree and the agent receives no unrestricted corpus or
+filesystem access. Evidence identifiers are retained in the persistent task state
+so a resumed task can preserve provenance without embedding the corpus in its
+semantic summary.

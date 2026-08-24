@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 from .zetsu_mcp import ZETSU_SCHEMA_VERSION, ZETSU_SKILL_VERSION
 
-ZETSU_CONFIG_VERSION = 2
+ZETSU_CONFIG_VERSION = 3
 DEFAULT_ENDPOINT = "http://127.0.0.1:8765/mcp"
 DEFAULT_TOKEN_ENV = "LAPLACE_ZETSU_TOKEN"
 DEFAULT_TOOLS = (
@@ -23,17 +23,18 @@ DEFAULT_TOOLS = (
     "project_context",
     "experiment_context",
     "delegate",
+    "agent_task",
     "rtl_task",
     "verify",
 )
-_BEGIN = "# BEGIN LAPLACE ZETSU MANAGED v2"
-_END = "# END LAPLACE ZETSU MANAGED v2"
-_SKILL_MARKER = "<!-- managed-by: laplace-zetsu v2 -->"
+_BEGIN = "# BEGIN LAPLACE ZETSU MANAGED v3"
+_END = "# END LAPLACE ZETSU MANAGED v3"
+_SKILL_MARKER = "<!-- managed-by: laplace-zetsu v3 -->"
 _MANAGED_PATTERN = re.compile(
-    r"(?ms)^\s*# BEGIN LAPLACE ZETSU MANAGED v[12]\n"
-    r".*?^\s*# END LAPLACE ZETSU MANAGED v[12]\s*\n?"
+    r"(?ms)^\s*# BEGIN LAPLACE ZETSU MANAGED v[123]\n"
+    r".*?^\s*# END LAPLACE ZETSU MANAGED v[123]\s*\n?"
 )
-_SKILL_PATTERN = re.compile(r"<!-- managed-by: laplace-zetsu v[12] -->")
+_SKILL_PATTERN = re.compile(r"<!-- managed-by: laplace-zetsu v[123] -->")
 
 
 class ZetsuConfigError(RuntimeError):
@@ -79,7 +80,7 @@ def _managed_block(endpoint: str, token_env_var: str) -> str:
             f"enabled_tools = [{tools}]",
             'default_tools_approval_mode = "writes"',
             "startup_timeout_sec = 15",
-            "tool_timeout_sec = 180",
+            "tool_timeout_sec = 1900",
             _END,
         )
     )
@@ -88,23 +89,22 @@ def _managed_block(endpoint: str, token_env_var: str) -> str:
 def _skill_text() -> str:
     return f"""---
 name: zetsu
-description: Use Laplace for compact project context, evidence, delegation, RTL specialization, and verification.
+description: Use Laplace for compact knowledge, verified Qwen agent delegation, RTL specialization, and evidence.
 ---
 
 {_SKILL_MARKER}
 # Zetsu
 
-Use Zetsu when information is outside the current checkout: literature, uploaded sources,
-project history, prior experiments/results, or governed Laplace evidence. Use Codex's local
-filesystem, shell, Git, builds, and tests directly for the current checkout.
-
-Start with `project_context`, `experiment_context`, or `search` using a compact budget. Expand
-only the evidence IDs needed with `get_evidence`. Prefer bounded `delegate` for self-contained
-work that does not need Codex's full local context. Use `rtl_task` only for eligible bounded RTL
-implementation/repair; architectural decisions remain with the main agent. Use `verify` for the
-existing Laplace verification workflows.
-
-Never request repository dumps or complete papers when compact evidence is sufficient.
+Use Codex local filesystem, shell, Git, builds and tests directly for simple work in the current checkout.
+Use `search`, `project_context` or `experiment_context` for indexed, historical, literature or distributed
+project knowledge, then expand only needed IDs with `get_evidence`. Use `delegate` for bounded reasoning.
+Use `agent_task` for a coherent self-contained repository task when local Qwen can inspect/edit/verify it
+more cheaply than repeated Codex orchestration; consume its compact result and verification evidence.
+For a mutating `agent_task`, Codex must choose `verification_argv` before delegation and use a direct
+`pytest`, `ruff`, or `mypy` executable accepted by the Zetsu verifier policy; never wrap it with
+`python -m`. Keep the same caller-selected verifier on resume. Use `rtl_task` only for policy-eligible
+bounded RTL work handled by CodeV. Use `verify` for existing Laplace verification evidence. Never request
+whole repositories, papers or logs when compact evidence suffices.
 """
 
 
@@ -168,7 +168,7 @@ def configure(
     endpoint: str = DEFAULT_ENDPOINT,
     token_env_var: str = DEFAULT_TOKEN_ENV,
 ) -> ZetsuStatus:
-    """Idempotently configure project-scoped Codex MCP and the Zetsu skill."""
+    """Configure the managed user Codex MCP block plus this repository's local Skill."""
 
     repo = repository.resolve()
     if not repo.is_dir():
@@ -233,8 +233,8 @@ def remove(repository: Path) -> ZetsuStatus:
 
 def _managed_section(text: str) -> str | None:
     pattern = re.compile(
-        r"(?ms)^\s*# BEGIN LAPLACE ZETSU MANAGED v[12]\n"
-        r"(.*?)^\s*# END LAPLACE ZETSU MANAGED v[12]"
+        r"(?ms)^\s*# BEGIN LAPLACE ZETSU MANAGED v[123]\n"
+        r"(.*?)^\s*# END LAPLACE ZETSU MANAGED v[123]"
     )
     match = pattern.search(text)
     return match.group(1) if match else None
@@ -261,12 +261,14 @@ def status(repository: Path) -> ZetsuStatus:
         and skill_path.exists()
         and _SKILL_MARKER in skill_path.read_text(encoding="utf-8")
     )
-    config_match = re.search(r"BEGIN LAPLACE ZETSU MANAGED v([12])", text)
+    config_match = re.search(r"BEGIN LAPLACE ZETSU MANAGED v([123])", text)
     detected_config_version = int(config_match.group(1)) if config_match else None
     current_config = detected_config_version == ZETSU_CONFIG_VERSION
     skill_text = skill_path.read_text(encoding="utf-8") if skill_path.exists() else ""
     if _SKILL_MARKER in skill_text:
         detected_skill_version: str | None = ZETSU_SKILL_VERSION
+    elif "managed-by: laplace-zetsu v2" in skill_text:
+        detected_skill_version = "legacy-v2"
     elif "managed-by: laplace-zetsu v1" in skill_text:
         detected_skill_version = "legacy-v1"
     else:

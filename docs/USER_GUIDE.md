@@ -202,3 +202,18 @@ branch, HEAD, tracked changes, excluded untracked files, and exact approval befo
 export or apply. Incoming apply requires the expected branch and a clean target.
 A normal folder is never treated as a repository; upload it through Personal
 corpus so file validation, quarantine, ownership, indexing, and citations apply.
+
+## Zetsu and Codex
+
+For Codex-driven work, Zetsu exposes the same authenticated Laplace boundaries
+through MCP. A fresh repository is onboarded by running `laplace zetsu configure`
+from that repository after the bearer token is present in the Codex process
+environment. The managed project Skill tells Codex when to work locally, retrieve
+compact evidence, delegate bounded reasoning to Qwen, start a Qwen repository
+`agent_task`, or use CodeV `rtl_task` for eligible RTL/SystemVerilog work.
+
+Qwen repository-agent sessions use a server-authorized isolated worktree and
+owner-scoped retrieval. They have no generic shell/network access and require
+post-mutation deterministic verification before successful completion. Remote
+user folders remain governed by the explicit Laplace Client pair/grant flow. See
+[ZETSU.md](ZETSU.md) and [LAPLACE_CLIENT.md](LAPLACE_CLIENT.md).

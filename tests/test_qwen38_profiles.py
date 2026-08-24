@@ -16,14 +16,16 @@ def test_qwen38_profiles_are_loopback_ampere_oriented_and_distinct() -> None:
 
     for profile in (base, mtp):
         assert int(profile["port"]) >= 1024
-        assert profile["max_model_len"] == 32768
+        assert profile["max_model_len"] == 131072
         assert profile["cpu_offload_gb"] == 0
         assert "Qwen3.8-27B" in str(profile["model_path"])
         assert profile["kv_cache_dtype"] == "auto"
         args = profile["extra_args"]
         assert "--reasoning-parser=qwen3" in args
         assert "--enable-auto-tool-choice" in args
-        assert "--tool-call-parser=qwen3_coder" in args
+        assert "--tool-call-parser=qwen3_xml" in args
+    assert base["gpu_memory_utilization"] == 0.755
+    assert mtp["gpu_memory_utilization"] == 0.795
 
     assert base["port"] != mtp["port"]
     assert not any(str(arg).startswith("--speculative-config") for arg in base["extra_args"])
