@@ -23,6 +23,7 @@ from .service_tiers import ModelLane, ServiceTierError, TieredServingService
 from .user_capabilities import Capability
 from .versioning import version_record
 from .zetsu_agent import ZetsuAgentCoordinator
+from .zetsu_results import ZetsuResultError
 from .zetsu_context import (
     DEFAULT_MAX_CHARS,
     DEFAULT_MAX_RESULTS,
@@ -33,8 +34,8 @@ from .zetsu_context import (
 
 JsonObject: TypeAlias = dict[str, object]
 
-ZETSU_SCHEMA_VERSION = "1.3"
-ZETSU_SKILL_VERSION = "1.3.0"
+ZETSU_SCHEMA_VERSION = "1.5"
+ZETSU_SKILL_VERSION = "1.5.0"
 MCP_LATEST_PROTOCOL_VERSION = "2026-07-28"
 MCP_LEGACY_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
 MCP_SUPPORTED_PROTOCOL_VERSIONS = (MCP_LATEST_PROTOCOL_VERSION, *MCP_LEGACY_PROTOCOL_VERSIONS)
@@ -229,9 +230,50 @@ def tool_definitions() -> tuple[JsonObject, ...]:
                         "items": {"type": "string", "minLength": 1, "maxLength": 1_000},
                     },
                     "apply_to_repository": {"type": "boolean"},
+                    "wait_timeout_seconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 3_600,
+                    },
                     "telemetry": {"type": "boolean"},
                 },
                 ("repo_id", "instruction"),
+            ),
+            "annotations": {
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "openWorldHint": False,
+            },
+        },
+        {
+            "name": "agent_task_status",
+            "description": "Read the owner-authorized queue/execution state of an agent task.",
+            "inputSchema": _schema(
+                {
+                    "session_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+                    }
+                },
+                ("session_id",),
+            ),
+            "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        },
+        {
+            "name": "cancel_agent_task",
+            "description": "Cancel an owner-authorized agent task while it is queued.",
+            "inputSchema": _schema(
+                {
+                    "session_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+                    }
+                },
+                ("session_id",),
             ),
             "annotations": {
                 "readOnlyHint": False,
@@ -298,6 +340,28 @@ def tool_definitions() -> tuple[JsonObject, ...]:
             ),
             "annotations": {"readOnlyHint": True, "openWorldHint": False},
         },
+        {
+            "name": "get_result",
+            "description": "Read an exact durable task artifact in bounded byte pages.",
+            "inputSchema": _schema(
+                {
+                    "result_id": {"type": "string", "pattern": "^res_[a-f0-9]{32}$"},
+                    "session_id": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+                    },
+                    "repo_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "artifact": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9_.-]{0,127}$",
+                    },
+                    "offset": {"type": "integer", "minimum": 0},
+                    "max_bytes": {"type": "integer", "minimum": 1, "maximum": 65536},
+                },
+                ("result_id", "session_id", "repo_id", "artifact"),
+            ),
+            "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        },
     )
 
 
@@ -308,8 +372,11 @@ _TOOL_CAPABILITIES: Mapping[str, Capability] = {
     "experiment_context": Capability.PERSONAL_CORPUS,
     "delegate": Capability.CHAT,
     "agent_task": Capability.AGENT,
+    "agent_task_status": Capability.AGENT,
+    "cancel_agent_task": Capability.AGENT,
     "rtl_task": Capability.AGENT,
     "verify": Capability.AGENT,
+    "get_result": Capability.AGENT,
 }
 
 _TOOL_ARGUMENTS: Mapping[str, frozenset[str]] = {
@@ -328,9 +395,12 @@ _TOOL_ARGUMENTS: Mapping[str, frozenset[str]] = {
             "max_chars",
             "verification_argv",
             "apply_to_repository",
+            "wait_timeout_seconds",
             "telemetry",
         }
     ),
+    "agent_task_status": frozenset({"session_id"}),
+    "cancel_agent_task": frozenset({"session_id"}),
     "rtl_task": frozenset(
         {
             "session_id",
@@ -343,6 +413,9 @@ _TOOL_ARGUMENTS: Mapping[str, frozenset[str]] = {
         }
     ),
     "verify": frozenset({"session_id", "include_patch", "max_chars"}),
+    "get_result": frozenset(
+        {"result_id", "session_id", "repo_id", "artifact", "offset", "max_bytes"}
+    ),
 }
 
 
@@ -388,6 +461,10 @@ def _compact_agent_result(result: Mapping[str, object]) -> JsonObject:
         "handoff": handoff_ref,
         "promotion": result.get("promotion"),
         "elapsed_seconds": result.get("elapsed_seconds"),
+        "result_id": result.get("result_id"),
+        "delivery_status": result.get("delivery_status"),
+        "result_artifacts": result.get("result_artifacts"),
+        "worktree_release": result.get("worktree_release"),
     }
     if isinstance(result.get("telemetry"), Mapping):
         compact["telemetry"] = dict(cast(Mapping[str, object], result["telemetry"]))
@@ -468,9 +545,18 @@ class ZetsuService:
             },
             "codev": {
                 "model_id": economy.model_id,
-                "available": "codev" in economy.model_id.casefold(),
+                "available": (
+                    self.tiered.lane_policy.codev_enabled
+                    and "codev" in economy.model_id.casefold()
+                ),
+                "state": (
+                    "required"
+                    if self.tiered.lane_policy.codev_enabled
+                    else "intentionally_disabled"
+                ),
                 "policy": "bounded_policy_eligible_rtl_only",
             },
+            "agent_scheduler": self._agent_service().scheduler_status(user_id=user_id),
         }
 
     def call(self, user_id: str, name: str, arguments: Mapping[str, object]) -> JsonObject:
@@ -586,6 +672,16 @@ class ZetsuService:
                     "token_estimate_method": "utf8_json_bytes_div4",
                 }
             return packet
+        if name == "agent_task_status":
+            return self._agent_service().task_status(
+                user_id=user_id,
+                session_id=_session_id(args.get("session_id")),
+            )
+        if name == "cancel_agent_task":
+            return self._agent_service().cancel_queued(
+                user_id=user_id,
+                session_id=_session_id(args.get("session_id")),
+            )
         if name == "agent_task":
             # Validate all non-effectful arguments before an agent can mutate its worktree.
             telemetry_requested = _telemetry_requested(args)
@@ -615,6 +711,12 @@ class ZetsuService:
                 ),
                 verification_argv=verification_argv,
                 apply_to_repository=_boolean(args, "apply_to_repository"),
+                wait_timeout_seconds=_integer(
+                    args.get("wait_timeout_seconds", 1_800),
+                    label="wait_timeout_seconds",
+                    minimum=1,
+                    maximum=3_600,
+                ),
             )
             if not telemetry_requested:
                 result.pop("telemetry", None)
@@ -669,6 +771,23 @@ class ZetsuService:
                     label="max_chars",
                     minimum=512,
                     maximum=24_000,
+                ),
+            )
+        if name == "get_result":
+            return self._agent_service().results.page(
+                user_id=user_id,
+                repo_id=_text(args.get("repo_id"), label="repo_id", maximum=128),
+                session_id=_session_id(args.get("session_id")),
+                result_id=_text(args.get("result_id"), label="result_id", maximum=36),
+                artifact=_text(args.get("artifact"), label="artifact", maximum=128),
+                offset=_integer(
+                    args.get("offset", 0), label="offset", minimum=0, maximum=2**63 - 1
+                ),
+                max_bytes=_integer(
+                    args.get("max_bytes", 24_000),
+                    label="max_bytes",
+                    minimum=1,
+                    maximum=65_536,
                 ),
             )
         session_id = _session_id(args.get("session_id"))
@@ -807,6 +926,7 @@ class ZetsuMcpDispatcher:
                 ServiceTierError,
                 AgentSandboxError,
                 CorpusError,
+                ZetsuResultError,
             ) as exc:
                 category = getattr(exc, "category", str(exc))
                 result = {

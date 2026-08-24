@@ -77,6 +77,7 @@ class LanePolicy:
     quality_reserved_slots: int = 2
     standard_capacity: int = 6
     economy_capacity: int = 12
+    codev_enabled: bool = True
 
     def __post_init__(self) -> None:
         if set(self.routes) != set(ModelLane):
@@ -691,6 +692,11 @@ class TieredServingService:
         return assignment.capabilities
 
     def _route(self, lane: ModelLane, *, domain: str) -> ModelRoute:
+        if lane is ModelLane.ECONOMY and domain == "systemverilog" and not self.lane_policy.codev_enabled:
+            raise ServiceTierError(
+                "codev_route_unavailable",
+                {"reason": "intentionally_disabled_by_runtime_topology"},
+            )
         if lane is ModelLane.ECONOMY and domain != "systemverilog":
             standard = self.lane_policy.routes[ModelLane.STANDARD]
             economy = self.lane_policy.routes[ModelLane.ECONOMY]
@@ -822,11 +828,20 @@ class TieredServingService:
         )
         if not result.passed:
             usage = response.get("usage")
+            finish_reason = response.get("finish_reason")
+            content = response.get("content")
             raise ServiceTierError(
-                "response_validation_failed",
+                (
+                    "model_output_limit_reached"
+                    if result.gate_id == "no_silent_truncation"
+                    and finish_reason in {"length", "max_tokens"}
+                    else "response_validation_failed"
+                ),
                 {
                     "gate_id": result.gate_id,
                     "reason": result.reason,
+                    "finish_reason": finish_reason,
+                    "partial_content": content if isinstance(content, str) else None,
                     "model_reported_usage": dict(usage) if isinstance(usage, Mapping) else None,
                 },
             )

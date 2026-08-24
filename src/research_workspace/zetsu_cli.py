@@ -14,6 +14,11 @@ from pathlib import Path
 from typing import Mapping, Sequence, cast
 from urllib.parse import urlsplit, urlunsplit
 
+from .agent_sandbox import AgentSandboxError, AgentSandboxManager
+from .repository_authorization import (
+    RepositoryAuthorizationError,
+    RepositoryAuthorizationStore,
+)
 from .zetsu_config import DEFAULT_ENDPOINT, DEFAULT_TOKEN_ENV, ZetsuConfigError
 from .zetsu_config import configure as configure_zetsu
 from .zetsu_config import remove as remove_zetsu
@@ -64,10 +69,19 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument("--vllm", type=Path)
     start.add_argument("--ffmpeg-lib", type=Path)
     start.add_argument("--dry-run", action="store_true")
+    start.add_argument("--nocodev", action="store_true")
     start.add_argument("--json", action="store_true")
     stop = sub.add_parser("stop")
     stop.add_argument("--state-root", type=Path, default=default_state_root())
     stop.add_argument("--json", action="store_true")
+    worktrees = sub.add_parser("worktrees")
+    worktrees.add_argument("--state-root", type=Path, default=default_state_root())
+    worktrees.add_argument("--json", action="store_true")
+    gc = sub.add_parser("gc")
+    gc.add_argument("--state-root", type=Path, default=default_state_root())
+    gc.add_argument("--dry-run", action="store_true")
+    gc.add_argument("--limit", type=int, default=64)
+    gc.add_argument("--json", action="store_true")
     codex = sub.add_parser("codex")
     codex.add_argument("--repo", type=Path, default=Path.cwd())
     codex.add_argument("--state-root", type=Path, default=default_state_root())
@@ -81,6 +95,18 @@ def _emit(payload: Mapping[str, object], *, as_json: bool) -> None:
         return
     for key, value in payload.items():
         print(f"{key}: {value}")
+
+
+def _worktree_manager(state_root: Path) -> AgentSandboxManager:
+    state = state_root.resolve()
+    authorizations = RepositoryAuthorizationStore(
+        state / "tiered_serving/repository_authorizations.sqlite3"
+    )
+    return AgentSandboxManager(
+        state / "tiered_serving/worktrees",
+        authorizations,
+        recover_cleanup=False,
+    )
 
 
 def _decode_response(body: bytes, content_type: str) -> dict[str, object]:
@@ -284,6 +310,7 @@ def _laplace_readiness(endpoint: str, timeout: float) -> dict[str, object]:
         if item.endswith(":quality") or item.endswith(":standard")
     ]
     codev_failures = [item for item in reason_values if item.endswith(":economy")]
+    codev_state = raw.get("codev")
     model_endpoints_required = (
         raw.get("model_endpoints_required") is True and raw.get("fixture_mode") is not True
     )
@@ -291,7 +318,11 @@ def _laplace_readiness(endpoint: str, timeout: float) -> dict[str, object]:
         **cast(dict[str, object], raw),
         "qwen_ready": model_endpoints_required and not qwen_failures,
         "qwen_failures": qwen_failures,
-        "codev_ready": model_endpoints_required and not codev_failures,
+        "codev_ready": (
+            codev_state == "healthy"
+            or codev_state == "intentionally_disabled"
+        ),
+        "codev_state": codev_state,
         "codev_failures": codev_failures,
     }
 
@@ -488,14 +519,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             else:
                 configured = before
-            runtime = start_local_runtime(
-                repository,
-                args.state_root,
-                timeout=args.timeout,
-                dry_run=args.dry_run,
-                vllm=args.vllm,
-                ffmpeg_lib=args.ffmpeg_lib,
-            )
+            if args.nocodev:
+                runtime = start_local_runtime(
+                    repository,
+                    args.state_root,
+                    timeout=args.timeout,
+                    dry_run=args.dry_run,
+                    vllm=args.vllm,
+                    ffmpeg_lib=args.ffmpeg_lib,
+                    codev_enabled=False,
+                )
+            else:
+                runtime = start_local_runtime(
+                    repository,
+                    args.state_root,
+                    timeout=args.timeout,
+                    dry_run=args.dry_run,
+                    vllm=args.vllm,
+                    ffmpeg_lib=args.ffmpeg_lib,
+                )
             if args.dry_run:
                 payload = {
                     "ok": True,
@@ -535,6 +577,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "action": "stop",
                 "runtime": runtime,
             }
+        elif args.command == "worktrees":
+            manager = _worktree_manager(args.state_root)
+            records = manager.operator_inventory()
+            payload = {
+                "ok": True,
+                "action": "worktrees",
+                "count": len(records),
+                "worktrees": records,
+            }
+        elif args.command == "gc":
+            manager = _worktree_manager(args.state_root)
+            report = manager.collect_garbage(dry_run=args.dry_run, limit=args.limit)
+            payload = {
+                "ok": not any(
+                    item.get("action") == "FAILED"
+                    for item in cast(list[dict[str, object]], report["items"])
+                ),
+                "action": "gc",
+                **report,
+            }
         elif args.command == "configure":
             value = configure_zetsu(
                 repository,
@@ -564,7 +626,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         _emit(payload, as_json=args.json)
         return 0 if bool(payload["ok"]) else 2
-    except (ZetsuConfigError, ValueError) as exc:
+    except (
+        AgentSandboxError,
+        RepositoryAuthorizationError,
+        ZetsuConfigError,
+        ValueError,
+    ) as exc:
         payload = {"ok": False, "error": str(exc)}
         _emit(payload, as_json=getattr(args, "json", False))
         return 2

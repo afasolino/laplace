@@ -90,8 +90,11 @@ async def test_zetsu_mcp_requires_normal_bearer_and_runs_real_retrieval(app: obj
             "experiment_context",
             "delegate",
             "agent_task",
+            "agent_task_status",
+            "cancel_agent_task",
             "rtl_task",
             "verify",
+            "get_result",
         }
         searched = await client.post(
             "/mcp",

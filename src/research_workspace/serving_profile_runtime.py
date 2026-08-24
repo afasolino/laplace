@@ -207,6 +207,9 @@ class ServingProfileRuntime:
                 "TZ",
                 "VLLM_CACHE_ROOT",
                 "VLLM_CONFIG_ROOT",
+                "LAPLACE_ZETSU_RUNTIME_ID",
+                "LAPLACE_ZETSU_STATE_ROOT",
+                "LAPLACE_ZETSU_REPOSITORY",
             }
         }
         if self.ffmpeg_library_path is not None:

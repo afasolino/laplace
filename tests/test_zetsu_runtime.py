@@ -9,6 +9,7 @@ import pytest
 from research_workspace import zetsu_runtime
 from research_workspace.zetsu_config import ZetsuConfigError
 from research_workspace.zetsu_runtime import (
+    ProcessIdentity,
     bearer_token_file,
     build_service_specs,
     load_local_plus_token,
@@ -97,6 +98,18 @@ def test_runtime_dry_run_materializes_all_commands_without_starting(tmp_path: Pa
     assert "research_workspace.operator_server" in " ".join(commands["operator"])
 
 
+def test_runtime_dry_run_nocodev_has_qwen_operator_topology(tmp_path: Path) -> None:
+    result = start_local_runtime(ROOT, tmp_path, dry_run=True, codev_enabled=False)
+    assert result["status"] == "DRY_RUN"
+    assert result["topology"] == "nocodev"
+    assert result["codev"] == "intentionally_disabled"
+    assert result["service_order"] == ["qwen", "operator"]
+    commands = result["commands"]
+    assert isinstance(commands, dict)
+    assert "codev" not in commands
+    assert "--codev-disabled" in commands["operator"]
+
+
 def test_runtime_interrupt_rolls_back_only_new_supervisors(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -105,12 +118,19 @@ def test_runtime_interrupt_rolls_back_only_new_supervisors(
             self.pid = pid
 
     next_pid = iter((101, 102))
-    stopped: list[tuple[int, tuple[str, ...]]] = []
+    rollback_records: list[dict[str, object]] = []
 
     _write_plus_token(tmp_path)
 
     monkeypatch.setattr(zetsu_runtime, "_probe", lambda _: False)
+    monkeypatch.setattr(zetsu_runtime, "_validate_paths", lambda *_, **__: None)
+    monkeypatch.setattr(zetsu_runtime, "_boot_id", lambda: "boot-a")
     monkeypatch.setattr(zetsu_runtime, "_spawn", lambda _: Process(next(next_pid)))
+    monkeypatch.setattr(
+        zetsu_runtime,
+        "_process_identity",
+        lambda pid: zetsu_runtime.ProcessIdentity(pid, pid * 10, pid, pid, f"sha-{pid}"),
+    )
 
     def wait_ready(spec, process, *, deadline):  # noqa: ANN001
         del process, deadline
@@ -118,49 +138,92 @@ def test_runtime_interrupt_rolls_back_only_new_supervisors(
             raise KeyboardInterrupt
 
     monkeypatch.setattr(zetsu_runtime, "_wait_ready", wait_ready)
-    monkeypatch.setattr(
-        zetsu_runtime,
-        "_stop_started",
-        lambda process, markers: stopped.append((process.pid, markers)) or True,
-    )
+    def terminate(record, **_kwargs):  # noqa: ANN001
+        rollback_records.append(dict(record))
+        return {"survivors": [], "initial_owned_pids": [101, 102]}
+
+    monkeypatch.setattr(zetsu_runtime, "_terminate_runtime_record", terminate)
 
     with pytest.raises(KeyboardInterrupt):
         start_local_runtime(ROOT, tmp_path)
 
-    assert [item[0] for item in stopped] == [102, 101]
+    assert len(rollback_records) == 1
+    services = rollback_records[0]["services"]
+    assert isinstance(services, dict)
+    assert list(services) == ["codev", "qwen"]
 
 
-def test_runtime_replaces_only_recorded_incompatible_operator(
+def test_runtime_refuses_unowned_compatible_or_incompatible_endpoint(
     tmp_path: Path, monkeypatch
 ) -> None:
     _write_plus_token(tmp_path)
     probes: list[str] = []
-    zetsu_probes = 0
-    replacements: list[tuple[str, Path, Path]] = []
 
     def probe(spec) -> bool:  # noqa: ANN001
         probes.append(spec.name)
         return True
 
-    def probe_zetsu(token: str) -> None:
-        nonlocal zetsu_probes
-        assert token == "secret-plus"
-        zetsu_probes += 1
-        if zetsu_probes == 1:
-            raise ZetsuConfigError("operator_zetsu_http_404")
-
-    def replace(spec, *, repository: Path, state_root: Path) -> int:  # noqa: ANN001
-        replacements.append((spec.name, repository, state_root))
-        return 591372
-
     monkeypatch.setattr(zetsu_runtime, "_probe", probe)
-    monkeypatch.setattr(zetsu_runtime, "_probe_zetsu", probe_zetsu)
-    monkeypatch.setattr(zetsu_runtime, "_replace_incompatible_owned_operator", replace)
+    monkeypatch.setattr(zetsu_runtime, "_validate_paths", lambda *_, **__: None)
 
-    result = start_local_runtime(ROOT, tmp_path)
+    with pytest.raises(ZetsuConfigError, match="codev_endpoint_in_use_by_unowned_process"):
+        start_local_runtime(ROOT, tmp_path)
 
+    assert probes == ["codev"]
+
+
+def test_runtime_transitions_from_full_to_nocodev_with_owned_recovery(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _write_plus_token(tmp_path)
+    old_identity = ProcessIdentity(7001, 88, 7001, 7001, "old")
+    old_record = {
+        "schema_version": 2,
+        "runtime_id": "old-runtime",
+        "boot_id": "boot-a",
+        "repository": str(ROOT.resolve()),
+        "state_root": str(tmp_path.resolve()),
+        "topology": "full",
+        "codev": "required",
+        "services": {"operator": {"process": zetsu_runtime.asdict(old_identity)}},
+    }
+    zetsu_runtime._atomic_json(tmp_path / "run/zetsu_services.json", old_record)
+    terminated: list[str] = []
+    spawned: list[str] = []
+
+    class Process:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+    next_pid = iter((8001, 8002))
+    monkeypatch.setattr(zetsu_runtime, "_validate_paths", lambda *_, **__: None)
+    monkeypatch.setattr(zetsu_runtime, "_boot_id", lambda: "boot-a")
+    monkeypatch.setattr(zetsu_runtime, "_probe", lambda _spec: False)
+    monkeypatch.setattr(zetsu_runtime, "_probe_zetsu", lambda _token: None)
+    monkeypatch.setattr(zetsu_runtime, "_wait_ready", lambda *_args, **_kwargs: None)
+
+    def owned(record):  # noqa: ANN001
+        return {7001: old_identity} if record.get("runtime_id") == "old-runtime" else {}
+
+    def terminate(record, **_kwargs):  # noqa: ANN001
+        terminated.append(str(record["runtime_id"]))
+        return {"survivors": [], "initial_owned_pids": [7001]}
+
+    def spawn(spec):  # noqa: ANN001
+        spawned.append(spec.name)
+        return Process(next(next_pid))
+
+    monkeypatch.setattr(zetsu_runtime, "_runtime_owned_processes", owned)
+    monkeypatch.setattr(zetsu_runtime, "_terminate_runtime_record", terminate)
+    monkeypatch.setattr(zetsu_runtime, "_spawn", spawn)
+    monkeypatch.setattr(
+        zetsu_runtime,
+        "_process_identity",
+        lambda pid: ProcessIdentity(pid, pid, pid, pid, f"sha-{pid}"),
+    )
+
+    result = start_local_runtime(ROOT, tmp_path, codev_enabled=False)
     assert result["status"] == "READY"
-    assert result["replaced_incompatible_operator_pid"] == 591372
-    assert replacements == [("operator", ROOT.resolve(), tmp_path.resolve())]
-    assert probes == ["operator", "codev", "qwen", "operator"]
-    assert zetsu_probes == 2
+    assert result["topology"] == "nocodev"
+    assert terminated == ["old-runtime"]
+    assert spawned == ["qwen", "operator"]

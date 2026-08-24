@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import signal
 import subprocess
@@ -10,7 +11,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Mapping
 
@@ -25,7 +26,15 @@ class ServiceSpec:
     log_path: Path
     probe_url: str
     expected_model: str | None
-    ownership_markers: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ProcessIdentity:
+    pid: int
+    proc_start_ticks: int
+    process_group_id: int
+    session_id: int
+    command_sha256: str
 
 
 def default_state_root() -> Path:
@@ -98,21 +107,22 @@ def build_service_specs(
     python: Path,
     vllm: Path,
     ffmpeg_lib: Path,
+    codev_enabled: bool = True,
 ) -> tuple[ServiceSpec, ...]:
-    """Build the immutable CodeV -> Qwen -> Operator startup order."""
+    """Build the requested immutable runtime topology."""
 
     repo = repository.resolve()
     state = state_root.resolve()
     quality_model, economy_model = _load_routes(repo)
     common_environment = {
         "PYTHONPATH": str(repo / "src"),
+        "LAPLACE_CONTROL_PLANE_PYTHON": str(python),
         "LAPLACE_VLLM_EXECUTABLE": str(vllm),
         "LAPLACE_FFMPEG_LIBRARY_PATH": str(ffmpeg_lib),
     }
     logs = state / "logs"
     token_path = bearer_token_file(state)
-    return (
-        ServiceSpec(
+    codev = ServiceSpec(
             name="codev",
             argv=(
                 str(python),
@@ -124,9 +134,8 @@ def build_service_specs(
             log_path=logs / "zetsu-codev.log",
             probe_url="http://127.0.0.1:8103/v1/models",
             expected_model=economy_model,
-            ownership_markers=("run_codev_service.py", str(repo)),
-        ),
-        ServiceSpec(
+        )
+    qwen = ServiceSpec(
             name="qwen",
             argv=(
                 str(python),
@@ -144,35 +153,36 @@ def build_service_specs(
             log_path=logs / "zetsu-qwen.log",
             probe_url="http://127.0.0.1:8207/v1/models",
             expected_model=quality_model,
-            ownership_markers=("run_selected_quality_service.py", str(repo)),
-        ),
-        ServiceSpec(
+        )
+    operator_argv = [
+        str(python),
+        "-m",
+        "research_workspace.operator_server",
+        "--repository-root",
+        str(repo),
+        "--state-root",
+        str(state),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8765",
+        "--deployment-mode",
+        "local",
+        "--enable-bearer-api",
+        "--bearer-token-file",
+        str(token_path),
+    ]
+    if not codev_enabled:
+        operator_argv.append("--codev-disabled")
+    operator = ServiceSpec(
             name="operator",
-            argv=(
-                str(python),
-                "-m",
-                "research_workspace.operator_server",
-                "--repository-root",
-                str(repo),
-                "--state-root",
-                str(state),
-                "--host",
-                "127.0.0.1",
-                "--port",
-                "8765",
-                "--deployment-mode",
-                "local",
-                "--enable-bearer-api",
-                "--bearer-token-file",
-                str(token_path),
-            ),
+            argv=tuple(operator_argv),
             environment=common_environment,
             log_path=logs / "zetsu-operator.log",
             probe_url="http://127.0.0.1:8765/api/v1/health",
             expected_model=None,
-            ownership_markers=("research_workspace.operator_server", str(repo)),
-        ),
-    )
+        )
+    return (codev, qwen, operator) if codev_enabled else (qwen, operator)
 
 
 def _atomic_json(path: Path, value: object) -> None:
@@ -291,103 +301,155 @@ def _wait_ready(
     raise ZetsuConfigError(f"{spec.name}_startup_timeout")
 
 
-def _process_matches(pid: int, markers: tuple[str, ...]) -> bool:
+def _boot_id() -> str:
     try:
-        command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(
-            "utf-8", errors="replace"
+        value = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    except OSError as exc:
+        raise ZetsuConfigError("proc_boot_identity_unavailable") from exc
+    if not value:
+        raise ZetsuConfigError("proc_boot_identity_unavailable")
+    return value
+
+
+def _process_identity(pid: int) -> ProcessIdentity:
+    try:
+        raw_stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        closing = raw_stat.rfind(")")
+        fields = raw_stat[closing + 2 :].split()
+        command = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError as exc:
+        raise ZetsuConfigError("process_identity_unavailable") from exc
+    if closing < 1 or len(fields) < 20:
+        raise ZetsuConfigError("process_identity_invalid")
+    try:
+        return ProcessIdentity(
+            pid=pid,
+            proc_start_ticks=int(fields[19]),
+            process_group_id=int(fields[2]),
+            session_id=int(fields[3]),
+            command_sha256=hashlib.sha256(command).hexdigest(),
         )
-    except OSError:
-        return False
-    return all(marker in command for marker in markers)
+    except ValueError as exc:
+        raise ZetsuConfigError("process_identity_invalid") from exc
 
 
-def _stop_owned(pid: int, markers: tuple[str, ...], *, timeout: float = 45.0) -> bool:
-    if not _process_matches(pid, markers):
-        return False
+def _process_environment(pid: int) -> dict[str, str]:
     try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return True
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not Path(f"/proc/{pid}").exists():
-            return True
-        time.sleep(0.25)
-    return False
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return {}
+    result: dict[str, str] = {}
+    for item in raw.split(b"\0"):
+        key, separator, value = item.partition(b"=")
+        if separator:
+            result[key.decode("utf-8", errors="replace")] = value.decode(
+                "utf-8", errors="replace"
+            )
+    return result
 
 
-def _stop_started(
-    process: subprocess.Popen[bytes],
-    markers: tuple[str, ...],
-    *,
-    timeout: float = 150.0,
+def _runtime_owned_processes(record: Mapping[str, object]) -> dict[int, ProcessIdentity]:
+    runtime_id = record.get("runtime_id")
+    state_root = record.get("state_root")
+    repository = record.get("repository")
+    boot_id = record.get("boot_id")
+    if not all(isinstance(item, str) and item for item in (runtime_id, state_root, repository)):
+        raise ZetsuConfigError("zetsu_runtime_record_invalid")
+    if boot_id != _boot_id():
+        return {}
+    owned: dict[int, ProcessIdentity] = {}
+    try:
+        candidates = tuple(Path("/proc").iterdir())
+    except OSError as exc:
+        raise ZetsuConfigError("proc_inventory_unavailable") from exc
+    for candidate in candidates:
+        if not candidate.name.isdigit():
+            continue
+        pid = int(candidate.name)
+        environment = _process_environment(pid)
+        if (
+            environment.get("LAPLACE_ZETSU_RUNTIME_ID") != runtime_id
+            or environment.get("LAPLACE_ZETSU_STATE_ROOT") != state_root
+            or environment.get("LAPLACE_ZETSU_REPOSITORY") != repository
+        ):
+            continue
+        try:
+            owned[pid] = _process_identity(pid)
+        except ZetsuConfigError:
+            continue
+    return owned
+
+
+def _identity_still_owned(
+    record: Mapping[str, object], identity: ProcessIdentity
 ) -> bool:
-    """Stop and reap a supervisor spawned by this invocation."""
+    current = _runtime_owned_processes(record).get(identity.pid)
+    return current == identity
 
-    if not _process_matches(process.pid, markers):
-        return False
-    process.terminate()
-    try:
-        process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        # Every spawned supervisor owns a fresh session. Escalating to that exact
-        # process group also prevents a model worker from becoming orphaned.
+
+def _signal_owned(
+    record: Mapping[str, object], identities: Mapping[int, ProcessIdentity], signum: int
+) -> list[int]:
+    signalled: list[int] = []
+    for pid, identity in sorted(identities.items(), reverse=True):
+        if not _identity_still_owned(record, identity):
+            continue
         try:
-            os.killpg(process.pid, signal.SIGTERM)
+            os.kill(pid, signum)
+            signalled.append(pid)
         except ProcessLookupError:
-            pass
-        try:
-            process.wait(timeout=15.0)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait(timeout=15.0)
-    return process.poll() is not None
+            continue
+        except PermissionError as exc:
+            raise ZetsuConfigError(f"owned_process_signal_denied:{pid}") from exc
+    return signalled
 
 
-def _recorded_legacy_operator_pid(state_root: Path) -> int | None:
-    path = state_root / "run/operator_server.pid"
-    try:
-        value = path.read_text(encoding="ascii").strip()
-    except OSError:
-        return None
-    return int(value) if value.isdigit() else None
+def _wait_for_owned_exit(record: Mapping[str, object], *, timeout: float) -> dict[int, ProcessIdentity]:
+    deadline = time.monotonic() + timeout
+    remaining = _runtime_owned_processes(record)
+    while remaining and time.monotonic() < deadline:
+        time.sleep(0.10)
+        remaining = _runtime_owned_processes(record)
+    return remaining
 
 
-def _replace_incompatible_owned_operator(
-    spec: ServiceSpec,
+def _terminate_runtime_record(
+    record: Mapping[str, object],
     *,
-    repository: Path,
-    state_root: Path,
-) -> int:
-    """Stop a legacy Operator only when its private PID record and argv agree."""
+    graceful_timeout: float = 45.0,
+    escalation_timeout: float = 15.0,
+) -> dict[str, object]:
+    """Terminate every process carrying this exact unguessable runtime identity."""
 
-    pid = _recorded_legacy_operator_pid(state_root)
-    markers = (
-        "research_workspace.operator_server",
-        "--repository-root",
-        str(repository),
-        "--state-root",
-        str(state_root),
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "8765",
+    initial = _runtime_owned_processes(record)
+    services = record.get("services")
+    supervisor_pids = {
+        int(item["process"]["pid"])
+        for item in services.values()
+        if isinstance(services, dict)
+        and isinstance(item, dict)
+        and isinstance(item.get("process"), dict)
+        and isinstance(item["process"].get("pid"), int)
+    } if isinstance(services, dict) else set()
+    supervisors = {pid: identity for pid, identity in initial.items() if pid in supervisor_pids}
+    signalled_term = _signal_owned(record, supervisors, signal.SIGTERM)
+    remaining = _wait_for_owned_exit(
+        record,
+        timeout=min(15.0, graceful_timeout),
     )
-    if pid is None or not _process_matches(pid, markers):
-        raise ZetsuConfigError(
-            "operator_endpoint_incompatible:port_8765_not_owned_by_this_runtime"
-        )
-    if not _stop_owned(pid, markers, timeout=75.0):
-        raise ZetsuConfigError("operator_incompatible_owned_process_stop_failed")
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        if not _probe(spec):
-            return pid
-        time.sleep(0.25)
-    raise ZetsuConfigError("operator_incompatible_endpoint_remained_after_stop")
+    if remaining:
+        signalled_term.extend(_signal_owned(record, remaining, signal.SIGTERM))
+        remaining = _wait_for_owned_exit(record, timeout=graceful_timeout)
+    signalled_kill: list[int] = []
+    if remaining:
+        signalled_kill = _signal_owned(record, remaining, signal.SIGKILL)
+        remaining = _wait_for_owned_exit(record, timeout=escalation_timeout)
+    return {
+        "initial_owned_pids": sorted(initial),
+        "sigterm_pids": sorted(set(signalled_term)),
+        "sigkill_pids": sorted(set(signalled_kill)),
+        "survivors": [asdict(item) for item in remaining.values()],
+    }
 
 
 def _validate_paths(specs: tuple[ServiceSpec, ...], *, vllm: Path, ffmpeg: Path) -> None:
@@ -412,8 +474,9 @@ def start_local_runtime(
     python: Path | None = None,
     vllm: Path | None = None,
     ffmpeg_lib: Path | None = None,
+    codev_enabled: bool = True,
 ) -> dict[str, object]:
-    """Start the complete local stack and roll back only newly-owned supervisors."""
+    """Start the selected local stack with inherited process-tree ownership."""
 
     repo = repository.resolve()
     state = state_root.resolve()
@@ -428,8 +491,8 @@ def start_local_runtime(
         python=selected_python,
         vllm=selected_vllm,
         ffmpeg_lib=selected_ffmpeg,
+        codev_enabled=codev_enabled,
     )
-    _validate_paths(specs, vllm=selected_vllm, ffmpeg=selected_ffmpeg)
     if dry_run:
         return {
             "status": "DRY_RUN",
@@ -437,43 +500,111 @@ def start_local_runtime(
             "commands": {item.name: list(item.argv) for item in specs},
             "vllm": str(selected_vllm),
             "token_file": str(bearer_token_file(state)),
+            "topology": "full" if codev_enabled else "nocodev",
+            "codev": "required" if codev_enabled else "intentionally_disabled",
         }
+    _validate_paths(specs, vllm=selected_vllm, ffmpeg=selected_ffmpeg)
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(state, 0o700)
     record_path = state / "run/zetsu_services.json"
 
     token = load_local_plus_token(state)
-    operator_spec = specs[-1]
-    replaced_operator_pid: int | None = None
-    if _probe(operator_spec):
+    requested_topology = "full" if codev_enabled else "nocodev"
+    if record_path.is_file():
         try:
-            _probe_zetsu(token)
-        except ZetsuConfigError:
-            replaced_operator_pid = _replace_incompatible_owned_operator(
-                operator_spec,
-                repository=repo,
-                state_root=state,
-            )
+            existing: object = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ZetsuConfigError("zetsu_runtime_record_invalid") from exc
+        if not isinstance(existing, dict):
+            raise ZetsuConfigError("zetsu_runtime_record_invalid")
+        if existing.get("schema_version") != 2:
+            # A dormant v1 record can be replaced because no process is signalled.
+            # Any responding endpoint remains protected as potentially unowned.
+            if any(_probe(spec) for spec in specs):
+                raise ZetsuConfigError(
+                    "zetsu_runtime_legacy_record_with_live_endpoint_requires_operator_review"
+                )
+        else:
+            existing_owned = _runtime_owned_processes(existing)
+            same_topology = existing.get("topology") == requested_topology
+            existing_services = existing.get("services")
+            root_identities_valid = False
+            if isinstance(existing_services, dict) and existing_services:
+                roots: list[ProcessIdentity] = []
+                try:
+                    for item in existing_services.values():
+                        if not isinstance(item, dict) or not isinstance(item.get("process"), dict):
+                            raise ValueError
+                        roots.append(ProcessIdentity(**item["process"]))
+                except (TypeError, ValueError):
+                    roots = []
+                root_identities_valid = bool(roots) and all(
+                    existing_owned.get(identity.pid) == identity for identity in roots
+                )
+            if same_topology and root_identities_valid and all(_probe(spec) for spec in specs):
+                _probe_zetsu(token)
+                return {
+                    "status": "READY",
+                    "runtime_state": "ALREADY_RUNNING",
+                    "topology": requested_topology,
+                    "codev": "healthy" if codev_enabled else "intentionally_disabled",
+                    "service_order": [item.name for item in specs],
+                    "services": existing_services,
+                    "state_root": str(state),
+                    "token_file": str(bearer_token_file(state)),
+                    "token_env_var": DEFAULT_TOKEN_ENV,
+                    "token_loaded_for_command": True,
+                    "vllm": str(selected_vllm),
+                }
+            if existing_owned:
+                recovered = _terminate_runtime_record(existing)
+                if recovered["survivors"]:
+                    _atomic_json(record_path, {**existing, "failed_recovery": recovered})
+                    raise ZetsuConfigError("owned_runtime_recovery_failed")
+
+    for spec in specs:
+        if _probe(spec):
+            raise ZetsuConfigError(f"{spec.name}_endpoint_in_use_by_unowned_process")
+
+    runtime_id = uuid.uuid4().hex + uuid.uuid4().hex
+    ownership_environment = {
+        "LAPLACE_ZETSU_RUNTIME_ID": runtime_id,
+        "LAPLACE_ZETSU_STATE_ROOT": str(state),
+        "LAPLACE_ZETSU_REPOSITORY": str(repo),
+        "LAPLACE_SERVER_OWNER_TOKEN": runtime_id,
+    }
+    specs = tuple(
+        replace(spec, environment={**spec.environment, **ownership_environment})
+        for spec in specs
+    )
 
     started: list[tuple[ServiceSpec, subprocess.Popen[bytes]]] = []
     service_results: dict[str, object] = {}
     records: dict[str, object] = {}
+    runtime_record: dict[str, object] = {
+        "schema_version": 2,
+        "runtime_id": runtime_id,
+        "boot_id": _boot_id(),
+        "repository": str(repo),
+        "state_root": str(state),
+        "topology": requested_topology,
+        "codev": "required" if codev_enabled else "intentionally_disabled",
+        "created_at_utc": time.time(),
+        "services": records,
+    }
+    _atomic_json(record_path, runtime_record)
     try:
         for spec in specs:
-            if _probe(spec):
-                service_results[spec.name] = {
-                    "status": "READY_EXISTING",
-                    "endpoint": spec.probe_url,
-                }
-                continue
             process = _spawn(spec)
             started.append((spec, process))
+            identity = _process_identity(process.pid)
             records[spec.name] = {
-                "pid": process.pid,
-                "markers": list(spec.ownership_markers),
+                "process": asdict(identity),
                 "log": str(spec.log_path),
+                "probe_url": spec.probe_url,
+                "expected_model": spec.expected_model,
             }
-            _atomic_json(record_path, {"schema_version": 1, "services": records})
+            _atomic_json(record_path, runtime_record)
             _wait_ready(spec, process, deadline=time.monotonic() + timeout)
             service_results[spec.name] = {
                 "status": "STARTED_READY",
@@ -482,9 +613,17 @@ def start_local_runtime(
                 "log": str(spec.log_path),
             }
         _probe_zetsu(token)
+        runtime_record["owned_processes_at_ready"] = [
+            asdict(item) for item in _runtime_owned_processes(runtime_record).values()
+        ]
+        runtime_record["ready_at_utc"] = time.time()
+        _atomic_json(record_path, runtime_record)
         os.environ.setdefault(DEFAULT_TOKEN_ENV, token)
         return {
             "status": "READY",
+            "runtime_state": "STARTED",
+            "topology": requested_topology,
+            "codev": "healthy" if codev_enabled else "intentionally_disabled",
             "service_order": [item.name for item in specs],
             "services": service_results,
             "state_root": str(state),
@@ -492,22 +631,20 @@ def start_local_runtime(
             "token_env_var": DEFAULT_TOKEN_ENV,
             "token_loaded_for_command": True,
             "vllm": str(selected_vllm),
-            "replaced_incompatible_operator_pid": replaced_operator_pid,
         }
     except BaseException:
-        rollback: dict[str, bool] = {}
-        for spec, process in reversed(started):
-            rollback[spec.name] = _stop_started(process, spec.ownership_markers)
-        if rollback:
-            _atomic_json(
-                record_path,
-                {"schema_version": 1, "services": records, "failed_start_rollback": rollback},
-            )
+        rollback = _terminate_runtime_record(
+            runtime_record,
+            graceful_timeout=15.0,
+            escalation_timeout=10.0,
+        )
+        runtime_record["failed_start_rollback"] = rollback
+        _atomic_json(record_path, runtime_record)
         raise
 
 
 def stop_local_runtime(state_root: Path) -> dict[str, object]:
-    """Stop only supervisors whose recorded PID still matches its exact command."""
+    """Stop the complete exact-identity process tree and report any survivor."""
 
     state = state_root.resolve()
     record_path = state / "run/zetsu_services.json"
@@ -517,19 +654,37 @@ def stop_local_runtime(state_root: Path) -> dict[str, object]:
         return {"status": "NOT_RUNNING", "services": {}}
     except (OSError, json.JSONDecodeError) as exc:
         raise ZetsuConfigError("zetsu_runtime_record_invalid") from exc
-    services = raw.get("services") if isinstance(raw, dict) else None
-    if not isinstance(services, dict):
+    if not isinstance(raw, dict):
         raise ZetsuConfigError("zetsu_runtime_record_invalid")
-    results: dict[str, object] = {}
-    for name in ("operator", "qwen", "codev"):
-        item = services.get(name)
-        pid = item.get("pid") if isinstance(item, dict) else None
-        markers = item.get("markers") if isinstance(item, dict) else None
-        if not isinstance(pid, int) or not isinstance(markers, list) or any(
-            not isinstance(marker, str) for marker in markers
-        ):
-            results[name] = "NOT_OWNED"
-            continue
-        results[name] = "STOPPED" if _stop_owned(pid, tuple(markers)) else "NOT_OWNED"
-    _atomic_json(record_path, {"schema_version": 1, "services": {}, "last_stop": results})
-    return {"status": "STOPPED", "services": results}
+    if raw.get("schema_version") != 2:
+        return {
+            "status": "FAILED",
+            "failure": "legacy_runtime_record_lacks_pid_reuse_safe_identity",
+            "services": raw.get("services"),
+        }
+    if raw.get("state_root") != str(state):
+        raise ZetsuConfigError("zetsu_runtime_state_root_identity_mismatch")
+    diagnostics = _terminate_runtime_record(raw)
+    if diagnostics["survivors"]:
+        updated = {**raw, "last_stop": diagnostics, "stop_status": "FAILED"}
+        _atomic_json(record_path, updated)
+        return {
+            "status": "FAILED",
+            "failure": "owned_processes_survived_stop",
+            "topology": raw.get("topology"),
+            "diagnostics": diagnostics,
+        }
+    stopped = {
+        **raw,
+        "services": {},
+        "owned_processes_at_ready": [],
+        "last_stop": diagnostics,
+        "stop_status": "STOPPED",
+    }
+    _atomic_json(record_path, stopped)
+    return {
+        "status": "STOPPED",
+        "topology": raw.get("topology"),
+        "codev": raw.get("codev"),
+        "diagnostics": diagnostics,
+    }

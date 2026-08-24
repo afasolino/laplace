@@ -424,6 +424,7 @@ class OperatorApiSettings:
     bearer_api_enabled: bool = False
     pwa_enabled: bool = True
     fixture_mode: bool = False
+    codev_enabled: bool = True
     maximum_request_bytes: int = 70_000_000
 
     def __post_init__(self) -> None:
@@ -1104,6 +1105,7 @@ def create_operator_app(
             unique_routes = {
                 (route.endpoint, route.model_id): route
                 for route in tiered.lane_policy.routes.values()
+                if tiered.lane_policy.codev_enabled or route.lane is not ModelLane.ECONOMY
             }
 
             async def endpoint_failure(
@@ -1219,6 +1221,16 @@ def create_operator_app(
                 "reasons": reasons,
                 "fixture_mode": settings.fixture_mode,
                 "model_endpoints_required": tiered is not None,
+                "codev": (
+                    "intentionally_disabled"
+                    if tiered is not None and not tiered.lane_policy.codev_enabled
+                    else (
+                        "required_but_failed"
+                        if tiered is not None
+                        and any(reason.endswith(":economy") for reason in reasons)
+                        else "healthy"
+                    )
+                ),
                 "personal_corpus": corpus_health,
             },
         )

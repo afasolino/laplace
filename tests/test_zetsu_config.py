@@ -33,11 +33,14 @@ def test_configure_is_idempotent_and_preserves_other_codex_config(
         "get_evidence",
         "project_context",
         "experiment_context",
-        "delegate",
-        "agent_task",
-        "rtl_task",
-        "verify",
-    ]
+            "delegate",
+            "agent_task",
+            "agent_task_status",
+            "cancel_agent_task",
+            "rtl_task",
+            "verify",
+            "get_result",
+        ]
     assert first == second
     assert first.configured
     assert first.skill_installed

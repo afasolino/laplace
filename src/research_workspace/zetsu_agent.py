@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -32,6 +33,13 @@ from .personal_corpus import CorpusError, PersonalCorpusStore
 from .repository_authorization import RepositoryAuthorizationError, validate_workspace_path
 from .service_tiers import ModelLane, ServiceTierError, TieredServingService
 from .zetsu_context import compact_personal_results
+from .zetsu_results import ZetsuResultError, ZetsuResultStore
+from .zetsu_scheduler import (
+    AgentAdmission,
+    AgentSchedulerError,
+    AgentTaskScheduler,
+    capacity_policy,
+)
 
 JsonObject = dict[str, object]
 
@@ -46,6 +54,7 @@ _MAX_GIT_STATUS_BYTES = 4 * 1024 * 1024
 _MAX_CHECKPOINT_BYTES = 2 * 1024 * 1024
 _MAX_VERIFY_CAPTURE_BYTES = 32 * 1024
 _CHECKPOINT_SCHEMA = 3
+_MAX_OUTPUT_CAP_CONTINUATIONS = 4
 
 
 def _rough_tokens(value: str) -> int:
@@ -197,6 +206,7 @@ class AgentExecutionState:
     target_initial_status_sha256: str = ""
     target_applied_status_sha256: str = ""
     applied_patch_sha256: str = ""
+    output_cap_continuations: int = 0
     telemetry: AgentTelemetry = field(default_factory=AgentTelemetry)
 
 
@@ -272,11 +282,29 @@ class ZetsuAgentCoordinator:
         corpus: PersonalCorpusStore | None = None,
         *,
         checkpoint_store: AgentCheckpointStore | None = None,
+        result_store: ZetsuResultStore | None = None,
+        scheduler: AgentTaskScheduler | None = None,
     ) -> None:
         self.tiered = tiered
         self.corpus = corpus
         self.checkpoints = checkpoint_store or AgentCheckpointStore(
             tiered.sandboxes.sandbox_root / "zetsu_agent_checkpoints"
+        )
+        self.results = result_store or ZetsuResultStore(
+            tiered.sandboxes.sandbox_root / "zetsu_agent_results"
+        )
+        scheduler_capable = all(
+            hasattr(tiered.sandboxes, name)
+            for name in ("reconcile", "capacity_snapshot", "per_user_quota")
+        )
+        self.scheduler = scheduler or (
+            AgentTaskScheduler(
+                tiered.sandboxes.sandbox_root / "zetsu_agent_scheduler.sqlite3",
+                tiered.sandboxes,
+                capacity_policy(codev_enabled=tiered.lane_policy.codev_enabled),
+            )
+            if scheduler_capable
+            else None
         )
         self._session_locks_guard = threading.Lock()
         self._session_locks: dict[str, threading.Lock] = {}
@@ -307,6 +335,8 @@ class ZetsuAgentCoordinator:
             '{"action":"finish","result":"concise verified result"}. '
             "Batch related reads and known edits. Inspect only enough to edit once, run the exact "
             "caller verifier, and stop immediately when it passes with no unresolved failure. "
+            "Use small exact edits for large files; never emit an entire large file when bounded "
+            "read/edit operations can complete it safely. "
             "Do not narrate. "
             "Use only the supplied worktree and compact retrieval interface. Never request shell, "
             "network, Git mutation, .git access, unrestricted corpus access, or paths outside the worktree. "
@@ -892,6 +922,9 @@ class ZetsuAgentCoordinator:
         if status.get("status") == "CANCELLED":
             raise ServiceTierError("agent_session_cancelled")
         self.tiered.sandboxes.require_active(ctx.session_id, user_id=ctx.user_id)
+        heartbeat = getattr(self.tiered.sandboxes, "heartbeat_task", None)
+        if callable(heartbeat):
+            heartbeat(ctx.session_id, user_id=ctx.user_id)
 
     def _consume_tool_budget(self, ctx: AgentRunContext, state: AgentExecutionState) -> None:
         if state.command_count >= ctx.binding.tool_policy.max_commands:
@@ -980,6 +1013,11 @@ class ZetsuAgentCoordinator:
                 self._stop_process_tree(process)
                 returncode = process.returncode
             finally:
+                verification_number = len(state.validation_history) + 1
+                stdout_artifact = f"verify-{verification_number:03d}.stdout"
+                stderr_artifact = f"verify-{verification_number:03d}.stderr"
+                self.results.stage_stream(ctx.session_id, stdout_artifact, stdout_file)
+                self.results.stage_stream(ctx.session_id, stderr_artifact, stderr_file)
                 stdout = self._read_file_tail(stdout_file)
                 stderr = self._read_file_tail(stderr_file)
 
@@ -1022,6 +1060,8 @@ class ZetsuAgentCoordinator:
             "changed_paths_after": after_changed,
             "stdout_tail": stdout[-8_000:],
             "stderr_tail": stderr[-8_000:],
+            "stdout_artifact": stdout_artifact,
+            "stderr_artifact": stderr_artifact,
             "timestamp_utc": datetime.now(UTC).isoformat(),
         }
         state.validation_history.append(record)
@@ -1084,6 +1124,7 @@ class ZetsuAgentCoordinator:
             "mutation_epoch": state.mutation_epoch,
             "last_verified_epoch": state.last_verified_epoch,
             "command_count": state.command_count,
+            "output_cap_continuations": state.output_cap_continuations,
         }
         return json.dumps(exact, sort_keys=True, ensure_ascii=False)
 
@@ -1190,6 +1231,7 @@ class ZetsuAgentCoordinator:
             "mutation_epoch": state.mutation_epoch,
             "last_verified_epoch": state.last_verified_epoch,
             "command_count": state.command_count,
+            "output_cap_continuations": state.output_cap_continuations,
             "consumed_wall_seconds": round(consumed, 6),
             "apply_to_repository": ctx.apply_to_repository,
             "target_initial_head": state.target_initial_head,
@@ -1338,6 +1380,13 @@ class ZetsuAgentCoordinator:
         ):
             raise ServiceTierError("zetsu_agent_checkpoint_state_invalid")
         command_count = integer("command_count")
+        output_cap_continuations_raw = raw.get("output_cap_continuations", 0)
+        if (
+            isinstance(output_cap_continuations_raw, bool)
+            or not isinstance(output_cap_continuations_raw, int)
+            or not 0 <= output_cap_continuations_raw <= _MAX_OUTPUT_CAP_CONTINUATIONS
+        ):
+            raise ServiceTierError("zetsu_agent_checkpoint_state_invalid")
         consumed_wall_seconds = number("consumed_wall_seconds")
         target_initial_head = optional_string("target_initial_head", maximum=128)
         target_initial_status_sha256 = optional_string("target_initial_status_sha256", maximum=64)
@@ -1390,6 +1439,7 @@ class ZetsuAgentCoordinator:
             mutation_epoch=mutation_epoch,
             last_verified_epoch=last_verified_raw,
             command_count=command_count,
+            output_cap_continuations=output_cap_continuations_raw,
             consumed_wall_seconds=consumed_wall_seconds,
             target_initial_head=target_initial_head,
             target_initial_status_sha256=target_initial_status_sha256,
@@ -1444,10 +1494,51 @@ class ZetsuAgentCoordinator:
         gate = exc.evidence.get("gate_id")
         reason = exc.evidence.get("reason")
         state.recent_observations.append(
-            f"STEP {step} MODEL_RESPONSE_REJECTED gate={gate} reason={reason}; return one valid JSON action"
+            f"STEP {step} MODEL_RESPONSE_REJECTED gate={gate} reason={reason}; "
+            "return one valid JSON action"
         )
         state.recent_observations = state.recent_observations[-_MAX_RECENT_OBSERVATIONS:]
         state.next_state = "retry_valid_json_action"
+        return True
+
+    def _record_model_failure(
+        self,
+        ctx: AgentRunContext,
+        state: AgentExecutionState,
+        step: int,
+        exc: ServiceTierError,
+    ) -> bool:
+        output_cap = exc.category == "model_output_limit_reached" or (
+            exc.category == "response_validation_failed"
+            and exc.evidence.get("gate_id") == "no_silent_truncation"
+        )
+        if not output_cap:
+            return self._record_recoverable_model_failure(state, step, exc)
+        usage = exc.evidence.get("model_reported_usage")
+        state.telemetry.add_usage(
+            {"response": {"usage": dict(usage) if isinstance(usage, Mapping) else None}}
+        )
+        state.telemetry.agent_steps += 1
+        if state.output_cap_continuations >= _MAX_OUTPUT_CAP_CONTINUATIONS:
+            return False
+        state.output_cap_continuations += 1
+        partial = exc.evidence.get("partial_content")
+        if isinstance(partial, str):
+            self.results.stage_stream(
+                ctx.session_id,
+                f"output-cap-{state.output_cap_continuations:03d}.partial",
+                io.BytesIO(partial.encode("utf-8")),
+            )
+        state.recent_observations.append(
+            (
+                f"STEP {step} MODEL_OUTPUT_CAP continuation="
+                f"{state.output_cap_continuations}/{_MAX_OUTPUT_CAP_CONTINUATIONS}; "
+                "the partial action was not executed, so decompose the same remaining operation "
+                "into a smaller bounded action without repeating confirmed mutations"
+            )
+        )
+        state.recent_observations = state.recent_observations[-_MAX_RECENT_OBSERVATIONS:]
+        state.next_state = "continue_after_output_cap"
         return True
 
     def _record_failure_best_effort(
@@ -1460,10 +1551,78 @@ class ZetsuAgentCoordinator:
                 command_count=state.command_count,
                 verification_summary=f"FAILED:{category}",
                 failed=True,
+                terminal=True,
             )
         except Exception:
             # Preserve the original failure/cancellation category.
             pass
+
+    def _finalize_terminal_failure_best_effort(
+        self, ctx: AgentRunContext, state: AgentExecutionState, category: str
+    ) -> None:
+        """Persist diagnostics first, then release only when exact evidence is complete."""
+
+        try:
+            head, status_sha256, changed = self._worktree_state(ctx.worktree)
+            state.worktree_head = head
+            state.worktree_status_sha256 = status_sha256
+            state.changed_paths = changed
+            checkpoint = self._checkpoint(ctx, state)
+            handoff = self._handoff_patch(
+                ctx.worktree,
+                ctx.session_id,
+                changed,
+                max_chars=ctx.max_chars,
+            )
+            failure: JsonObject = {
+                "status": "FAILED",
+                "session_id": ctx.session_id,
+                "repo_id": ctx.repo_id,
+                "category": category,
+                "changed_paths": changed,
+                "validation_history": state.validation_history,
+                "unresolved_failures": state.unresolved_failures,
+                "checkpoint_path": str(checkpoint),
+                "handoff": handoff,
+                "telemetry": state.telemetry.as_dict(),
+            }
+            artifacts: dict[str, Path | bytes | str] = {
+                "result.json": json.dumps(
+                    failure, indent=2, sort_keys=True, ensure_ascii=False
+                )
+                + "\n",
+                "checkpoint.json": checkpoint,
+            }
+            patch_path = handoff.get("patch_path")
+            if isinstance(patch_path, str):
+                artifacts["handoff.patch"] = Path(patch_path)
+            artifacts.update(self.results.staging_artifacts(ctx.session_id))
+            delivery = self.results.persist(
+                user_id=ctx.user_id,
+                repo_id=ctx.repo_id,
+                session_id=ctx.session_id,
+                status="FAILED",
+                summary=f"FAILED:{category}",
+                artifacts=artifacts,
+            )
+            self.tiered.sandboxes.record_result(
+                ctx.session_id,
+                user_id=ctx.user_id,
+                command_count=state.command_count,
+                verification_summary=f"FAILED:{category}",
+                failed=True,
+                terminal=True,
+            )
+            cleanup = getattr(self.tiered.sandboxes, "authorize_terminal_cleanup", None)
+            if callable(cleanup):
+                cleanup(
+                    ctx.session_id,
+                    user_id=ctx.user_id,
+                    result_id=str(delivery["result_id"]),
+                )
+            self.results.clear_staging(ctx.session_id)
+        except Exception:
+            self._record_failure_best_effort(ctx, state, category)
 
     def run(
         self,
@@ -1478,53 +1637,115 @@ class ZetsuAgentCoordinator:
         compaction_ratio: float = 0.80,
         verification_argv: Sequence[str] | None = None,
         apply_to_repository: bool = False,
+        wait_timeout_seconds: float = 1_800.0,
     ) -> JsonObject:
-        if session_id is None:
-            return self._run_unlocked(
-                user_id=user_id,
-                repo_id=repo_id,
-                instruction=instruction,
-                lane=lane,
-                session_id=None,
-                max_steps=max_steps,
-                max_chars=max_chars,
-                compaction_ratio=compaction_ratio,
-                verification_argv=verification_argv,
-                apply_to_repository=apply_to_repository,
-            )
-        lock = self._session_lock(session_id)
+        self._validate_run_request(
+            instruction=instruction,
+            lane=lane,
+            max_steps=max_steps,
+            max_chars=max_chars,
+            compaction_ratio=compaction_ratio,
+            verification_argv=verification_argv,
+            apply_to_repository=apply_to_repository,
+        )
+        effective_session = session_id or f"zetsu-{uuid.uuid4().hex}"
+        has_session = getattr(self.tiered.sandboxes, "has_session", None)
+        creating = session_id is None or (
+            callable(has_session) and not has_session(effective_session, user_id=user_id)
+        )
+        lock = self._session_lock(effective_session)
         if not lock.acquire(blocking=False):
             raise ServiceTierError("zetsu_agent_session_busy")
+        admission: AgentAdmission | None = None
         try:
-            return self._run_unlocked(
+            digest = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
+            if self.scheduler is not None:
+                try:
+                    admission = self.scheduler.wait_for_admission(
+                        user_id=user_id,
+                        repo_id=repo_id,
+                        session_id=effective_session,
+                        instruction_digest=digest,
+                        wait_timeout_seconds=wait_timeout_seconds,
+                    )
+                except AgentSchedulerError as exc:
+                    raise ServiceTierError(exc.category, exc.evidence) from exc
+            result = self._run_unlocked(
                 user_id=user_id,
                 repo_id=repo_id,
                 instruction=instruction,
                 lane=lane,
-                session_id=session_id,
+                session_id=effective_session,
+                creating=creating,
                 max_steps=max_steps,
                 max_chars=max_chars,
                 compaction_ratio=compaction_ratio,
                 verification_argv=verification_argv,
                 apply_to_repository=apply_to_repository,
             )
+            if admission is not None and self.scheduler is not None:
+                terminal = "SUCCEEDED" if result.get("status") == "SUCCESS" else "FAILED"
+                result_id = result.get("result_id")
+                self.scheduler.finish(
+                    admission,
+                    state=terminal,
+                    result_id=str(result_id) if isinstance(result_id, str) else None,
+                    failure_category=(
+                        None if terminal == "SUCCEEDED" else str(result.get("status"))
+                    ),
+                )
+                result["scheduler"] = {
+                    "state": terminal,
+                    "ticket_id": admission.ticket_id,
+                    "queue_position_at_arrival": admission.queue_position_at_arrival,
+                    "queue_wait_seconds": admission.queue_wait_seconds,
+                }
+            return result
+        except (KeyboardInterrupt, SystemExit):
+            if admission is not None and self.scheduler is not None:
+                self.scheduler.finish(
+                    admission,
+                    state="RESUMABLE",
+                    failure_category="process_interrupted",
+                )
+            raise
+        except Exception as exc:
+            if admission is not None and self.scheduler is not None:
+                category = getattr(exc, "category", type(exc).__name__)
+                scheduler_state = "FAILED"
+                reconcile_exit = getattr(
+                    self.tiered.sandboxes, "reconcile_executor_exit", None
+                )
+                if callable(reconcile_exit):
+                    try:
+                        reconcile_exit(effective_session, user_id=user_id)
+                        lifecycle = self.tiered.sandboxes.status(
+                            effective_session, user_id=user_id
+                        )
+                        if lifecycle.get("lifecycle_state") == "INTERRUPTED_RESUMABLE":
+                            scheduler_state = "RESUMABLE"
+                    except Exception:
+                        pass
+                self.scheduler.finish(
+                    admission,
+                    state=scheduler_state,
+                    failure_category=str(category),
+                )
+            raise
         finally:
             lock.release()
 
-    def _run_unlocked(
-        self,
+    @staticmethod
+    def _validate_run_request(
         *,
-        user_id: str,
-        repo_id: str,
         instruction: str,
-        lane: ModelLane = ModelLane.QUALITY,
-        session_id: str | None = None,
-        max_steps: int = 12,
-        max_chars: int = 8_000,
-        compaction_ratio: float = 0.80,
-        verification_argv: Sequence[str] | None = None,
-        apply_to_repository: bool = False,
-    ) -> JsonObject:
+        lane: ModelLane,
+        max_steps: int,
+        max_chars: int,
+        compaction_ratio: float,
+        verification_argv: Sequence[str] | None,
+        apply_to_repository: bool,
+    ) -> None:
         if lane not in {ModelLane.QUALITY, ModelLane.STANDARD}:
             raise ServiceTierError("zetsu_agent_lane_invalid")
         if not instruction.strip() or len(instruction) > 40_000:
@@ -1538,8 +1759,54 @@ class ZetsuAgentCoordinator:
         if apply_to_repository and verification_argv is None:
             raise ServiceTierError("zetsu_agent_apply_requires_verifier")
 
+    def scheduler_status(self, *, user_id: str) -> JsonObject:
+        if self.scheduler is None:
+            return {"status": "UNAVAILABLE"}
+        return self.scheduler.snapshot(user_id=user_id)
+
+    def task_status(self, *, user_id: str, session_id: str) -> JsonObject:
+        if self.scheduler is None:
+            raise ServiceTierError("agent_scheduler_unavailable")
+        try:
+            return self.scheduler.task_status(user_id=user_id, session_id=session_id)
+        except AgentSchedulerError as exc:
+            raise ServiceTierError(exc.category, exc.evidence) from exc
+
+    def cancel_queued(self, *, user_id: str, session_id: str) -> JsonObject:
+        if self.scheduler is None:
+            raise ServiceTierError("agent_scheduler_unavailable")
+        try:
+            return self.scheduler.cancel(user_id=user_id, session_id=session_id)
+        except AgentSchedulerError as exc:
+            raise ServiceTierError(exc.category, exc.evidence) from exc
+
+    def _run_unlocked(
+        self,
+        *,
+        user_id: str,
+        repo_id: str,
+        instruction: str,
+        lane: ModelLane = ModelLane.QUALITY,
+        session_id: str | None = None,
+        creating: bool | None = None,
+        max_steps: int = 12,
+        max_chars: int = 8_000,
+        compaction_ratio: float = 0.80,
+        verification_argv: Sequence[str] | None = None,
+        apply_to_repository: bool = False,
+    ) -> JsonObject:
+        self._validate_run_request(
+            instruction=instruction,
+            lane=lane,
+            max_steps=max_steps,
+            max_chars=max_chars,
+            compaction_ratio=compaction_ratio,
+            verification_argv=verification_argv,
+            apply_to_repository=apply_to_repository,
+        )
+
         effective_session = session_id or f"zetsu-{uuid.uuid4().hex}"
-        creating = session_id is None
+        creating = session_id is None if creating is None else creating
         digest = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
         if creating:
             self.tiered.create_agent_session(
@@ -1640,6 +1907,7 @@ class ZetsuAgentCoordinator:
             lane=lane.value,
             sanitized_model_name=route.model_id,
             instruction_digest=digest,
+            remaining_wall_seconds=remaining_wall,
         )
         threshold = int(route.context_limit * compaction_ratio)
         status = "SUCCESS" if resume_verified_finish else "INCOMPLETE"
@@ -1671,9 +1939,18 @@ class ZetsuAgentCoordinator:
                         messages=messages,
                     )
                 except ServiceTierError as exc:
-                    if self._record_recoverable_model_failure(state, step, exc):
+                    if self._record_model_failure(ctx, state, step, exc):
                         self._checkpoint(ctx, state)
                         continue
+                    if (
+                        exc.category == "model_output_limit_reached"
+                        and state.output_cap_continuations
+                        >= _MAX_OUTPUT_CAP_CONTINUATIONS
+                    ):
+                        raise ServiceTierError(
+                            "output_cap_continuation_budget_exhausted",
+                            {"continuations": state.output_cap_continuations},
+                        ) from exc
                     raise
                 state.telemetry.add_usage(result)
                 state.telemetry.agent_steps += 1
@@ -1755,25 +2032,50 @@ class ZetsuAgentCoordinator:
                     self._checkpoint(ctx, state)
                     break
             if status != "SUCCESS":
-                failure_category = "max_steps_exhausted"
+                failure_category = (
+                    "output_cap_continuation_budget_exhausted"
+                    if state.output_cap_continuations
+                    else "max_steps_exhausted"
+                )
+        except (KeyboardInterrupt, SystemExit):
+            try:
+                self._checkpoint(ctx, state)
+                interrupted = getattr(self.tiered.sandboxes, "record_interrupted", None)
+                if callable(interrupted):
+                    interrupted(
+                        ctx.session_id,
+                        user_id=ctx.user_id,
+                        reason="process_interrupted",
+                    )
+            except Exception:
+                pass
+            raise
         except (AgentSandboxError, CorpusError) as exc:
             failure_category = getattr(exc, "category", type(exc).__name__)
             try:
                 self._checkpoint(ctx, state)
             except Exception:
                 pass
-            self._record_failure_best_effort(ctx, state, str(failure_category))
+            self._finalize_terminal_failure_best_effort(
+                ctx, state, str(failure_category)
+            )
             evidence = getattr(exc, "evidence", None)
             raise ServiceTierError(
                 str(failure_category), evidence if isinstance(evidence, dict) else None
             ) from exc
+        except ZetsuResultError as exc:
+            failure_category = exc.category
+            self._finalize_terminal_failure_best_effort(ctx, state, exc.category)
+            raise ServiceTierError(exc.category) from exc
         except (ServiceTierError, subprocess.TimeoutExpired) as exc:
             failure_category = getattr(exc, "category", "zetsu_agent_timeout")
             try:
                 self._checkpoint(ctx, state)
             except Exception:
                 pass
-            self._record_failure_best_effort(ctx, state, str(failure_category))
+            self._finalize_terminal_failure_best_effort(
+                ctx, state, str(failure_category)
+            )
             raise
         finally:
             elapsed = time.monotonic() - run_started
@@ -1785,9 +2087,10 @@ class ZetsuAgentCoordinator:
         state.changed_paths = changed
         if not final_result:
             final_result = "Maximum bounded agent steps reached before verified finish."
-        truncated = len(final_result) > max_chars
+        authoritative_content = final_result
+        truncated = len(authoritative_content) > max_chars
         if truncated:
-            final_result = final_result[: max_chars - 1].rstrip() + "…"
+            final_result = authoritative_content[: max_chars - 1].rstrip() + "…"
         handoff = self._handoff_patch(
             worktree,
             effective_session,
@@ -1805,20 +2108,13 @@ class ZetsuAgentCoordinator:
             if status == "SUCCESS"
             else f"FAILED:{failure_category or 'incomplete'}"
         )
-        self.tiered.sandboxes.record_result(
-            effective_session,
-            user_id=user_id,
-            command_count=state.command_count,
-            verification_summary=verification_summary,
-            failed=status != "SUCCESS",
-        )
-        return {
+        authoritative: JsonObject = {
             "status": status,
             "session_id": effective_session,
             "repo_id": repo_id,
             "model_id": route.model_id,
             "effective_lane": lane.value,
-            "content": final_result,
+            "content": authoritative_content,
             "changed_paths": changed,
             "verification": state.validation_history[-1] if state.validation_history else None,
             "validation_history": state.validation_history,
@@ -1831,4 +2127,51 @@ class ZetsuAgentCoordinator:
             "max_chars": max_chars,
             "elapsed_seconds": round(time.monotonic() - run_started, 3),
             "telemetry": state.telemetry.as_dict(),
+        }
+        artifacts: dict[str, Path | bytes | str] = {
+            "result.json": json.dumps(
+                authoritative, indent=2, sort_keys=True, ensure_ascii=False
+            )
+            + "\n",
+            "checkpoint.json": self.checkpoints.path(effective_session),
+        }
+        patch_path = handoff.get("patch_path")
+        if isinstance(patch_path, str):
+            artifacts["handoff.patch"] = Path(patch_path)
+        artifacts.update(self.results.staging_artifacts(effective_session))
+        try:
+            delivery = self.results.persist(
+                user_id=user_id,
+                repo_id=repo_id,
+                session_id=effective_session,
+                status=status,
+                summary=final_result,
+                artifacts=artifacts,
+            )
+        except ZetsuResultError as exc:
+            self._record_failure_best_effort(ctx, state, exc.category)
+            raise ServiceTierError(exc.category) from exc
+        self.tiered.sandboxes.record_result(
+            effective_session,
+            user_id=user_id,
+            command_count=state.command_count,
+            verification_summary=verification_summary,
+            failed=status != "SUCCESS",
+            terminal=True,
+        )
+        result_id = str(delivery["result_id"])
+        cleanup = getattr(self.tiered.sandboxes, "authorize_terminal_cleanup", None)
+        worktree_release = (
+            cleanup(effective_session, user_id=user_id, result_id=result_id)
+            if callable(cleanup)
+            else {"action": "NOT_SUPPORTED_BY_SANDBOX_ADAPTER"}
+        )
+        self.results.clear_staging(effective_session)
+        return {
+            **authoritative,
+            "content": final_result,
+            "result_id": result_id,
+            "result_artifacts": delivery["artifacts"],
+            "delivery_status": "PAGED" if truncated else "BOUNDED",
+            "worktree_release": worktree_release,
         }

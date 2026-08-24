@@ -11,6 +11,7 @@ from research_workspace.zetsu_mcp import (
     ZetsuService,
     tool_definitions,
 )
+from research_workspace.zetsu_results import ZetsuResultError, ZetsuResultStore
 
 
 class _Agent:
@@ -120,12 +121,57 @@ def test_malformed_tools_call_returns_structured_tool_error() -> None:
 
 def test_rtl_and_verify_session_schemas_match_runtime_identifier_rules() -> None:
     definitions = {item["name"]: item for item in tool_definitions()}
-    for name in ("rtl_task", "verify"):
+    for name in ("rtl_task", "verify", "get_result"):
         session = definitions[name]["inputSchema"]["properties"]["session_id"]
         assert session["pattern"] == "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
     rtl = definitions["rtl_task"]["inputSchema"]
     assert rtl["properties"]["module_count"]["maximum"] == 1
     assert rtl["properties"]["editable_sources"]["maxItems"] == 1
+
+
+def test_get_result_pages_exact_content_with_owner_repo_session_isolation(
+    tmp_path: Path,
+) -> None:
+    store = ZetsuResultStore(tmp_path / "results")
+    delivery = store.persist(
+        user_id="user-a",
+        repo_id="repo",
+        session_id="session-a",
+        status="SUCCESS",
+        summary="large",
+        artifacts={"result.json": b"0123456789" * 200},
+    )
+    agent = _Agent()
+    agent.results = store  # type: ignore[attr-defined]
+    service = _service(agent)
+    service.available_tools = lambda _user_id: tuple(  # type: ignore[method-assign]
+        item for item in tool_definitions() if item["name"] == "get_result"
+    )
+    page = service.call(
+        "user-a",
+        "get_result",
+        {
+            "result_id": delivery["result_id"],
+            "repo_id": "repo",
+            "session_id": "session-a",
+            "artifact": "result.json",
+            "offset": 17,
+            "max_bytes": 513,
+        },
+    )
+    assert page["status"] == "SUCCESS"
+    assert page["offset"] == 17
+    with pytest.raises(ZetsuResultError, match="zetsu_result_not_found"):
+        service.call(
+            "user-b",
+            "get_result",
+            {
+                "result_id": delivery["result_id"],
+                "repo_id": "repo",
+                "session_id": "session-a",
+                "artifact": "result.json",
+            },
+        )
 
 
 def test_get_evidence_rejects_unhashable_chunk_values_without_typeerror() -> None:
