@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "phase": "G9",
+  "title": "Typed Lifecycle Hooks",
+  "lifecycle_state": "CERTIFICATION",
+  "feature_lifecycle_state": "SHADOW",
+  "status": "CERTIFIED",
+  "generated_at_utc": "2026-08-24T19:21:31Z",
+  "control_plane": {
+    "production_root": "/home/giando/work/laplace",
+    "production_branch": "production/v1",
+    "production_source_modified": false,
+    "v2_root": "/home/giando/work/laplace-v2",
+    "v2_branch": "feature/laplace-v2",
+    "base_commit": "96fb17cd1c5ae7b34eeae6e3231aeee06aa56c8e",
+    "candidate_commit": "84f67ba0d22c567e245c87296d632137c9dec214",
+    "worktree_status_before_certification_artifact": "modified only by G9 implementation and this artifact",
+    "zetsu_mutation_note": "The repaired read-only repository-agent proof passed without per_user_worktree_quota. The bounded mutating delegation remained deterministically blocked by the stale promotion target (zetsu_agent_apply_target_not_clean); local implementation was used under the documented fallback, and the production control-plane checkout was not modified."
+  },
+  "implementation": {
+    "service": "src/research_workspace/hooks.py:HookService",
+    "core_integration": "LaplaceCore exposes one shared HookService and an owner-bound emit_hook adapter; the lifecycle surface is available without Zetsu.",
+    "typed_stages": [
+      "TASK_START",
+      "TASK_RESUME",
+      "TASK_CANCEL",
+      "PRE_RETRIEVAL",
+      "POST_RETRIEVAL",
+      "PRE_MEMORY_WRITE",
+      "POST_MEMORY_WRITE",
+      "PRE_MUTATION",
+      "POST_MUTATION",
+      "PRE_VERIFY",
+      "POST_VERIFY",
+      "TASK_COMPLETE",
+      "TASK_FAILURE",
+      "IDLE_START",
+      "IDLE_END"
+    ],
+    "semantics": [
+      "Callbacks are registered Python callables with a typed HookContext and HookResult; no file discovery, plugin import, shell, subprocess or network hook path exists.",
+      "Matching callbacks execute sequentially in priority, registration-order and name order.",
+      "Events persist payload hash, stage and full owner/project/session/task identity under an idempotency key; duplicate replay returns without re-execution.",
+      "Security-sensitive PRE hooks fail closed on explicit block, exception, timeout or cancellation; the TASK_CANCEL cleanup stage still runs when its cancellation signal is already set.",
+      "POST hooks are constrained to observability-only policy: exceptions and timeouts are recorded and the operation continues; POST cancel results cannot block the operation.",
+      "Disabled hooks are skipped, scope filtering is owner/project-bound, and atomic state persistence supports restart/resume replay."
+    ],
+    "changed_paths": [
+      "src/research_workspace/hooks.py",
+      "src/research_workspace/laplace_core.py",
+      "tests/test_hooks_g9.py",
+      "docs/v2-roadmap/certifications/G9-hooks.json"
+    ]
+  },
+  "upstream_evaluation": [
+    {
+      "name": "cline/cline",
+      "repository": "https://github.com/cline/cline",
+      "inspected_revision": "09ee9026393e681a4834d8acbf4d9d5fdfa8664a",
+      "license": "Apache-2.0",
+      "license_path": "https://github.com/cline/cline/blob/09ee9026393e681a4834d8acbf4d9d5fdfa8664a/LICENSE",
+      "inspected_material": ".clinerules/hooks/README.md and Cline hooks documentation: task lifecycle, pre/post blocking semantics, JSON results, and global/workspace scope.",
+      "reuse_mode": "boundary reference only; Cline's executable shell hook model was explicitly not copied. Laplace uses typed in-process callbacks and deterministic sequential ordering instead of arbitrary scripts or concurrent Promise.all hooks."
+    }
+  ],
+  "executed_gates": {
+    "focused_development": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest -q tests/test_hooks_g9.py",
+      "returncode": 0,
+      "tests": 8,
+      "covered": "Typed stage inventory, deterministic ordering, disabled hooks, duplicate/replayed events, timeout, exception, cancellation, TASK_CANCEL cleanup, post observability policy, restart/resume, idempotency conflict, blocking and Core integration."
+    },
+    "frozen_phase_acceptance_and_previous_regression": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest -q tests/test_hooks_g9.py tests/test_skills_g8.py tests/test_context_planner_g7.py tests/test_bounded_aci_g6.py tests/test_trajectory_g5.py tests/test_repository_context_g4.py tests/test_rules_g3.py tests/test_memory_g2.py tests/test_laplace_core_g1.py tests/test_zetsu_mcp.py tests/test_zetsu_agent_mcp.py tests/test_zetsu_agent_checkpoint.py tests/test_personal_corpus_api_v6.py tests/test_tiered_serving.py tests/test_auth_provenance_security.py tests/test_operator_api.py tests/test_architecture_v7.py",
+      "returncode": 0,
+      "host_socket_permission_required": true,
+      "covered": "G9 acceptance plus G8, G7, G6, G5, G4, G3, G2, G1 and selected v1 security/API/serving/checkpoint/architecture regressions."
+    },
+    "security_and_negative": {
+      "result": "PASS",
+      "commands": [
+        "PYTHONPATH=src ruff check src/research_workspace/hooks.py src/research_workspace/laplace_core.py tests/test_hooks_g9.py",
+        "PYTHONPATH=src mypy src/research_workspace/hooks.py src/research_workspace/laplace_core.py tests/test_hooks_g9.py",
+        "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m compileall -q src/research_workspace/hooks.py src/research_workspace/laplace_core.py tests/test_hooks_g9.py",
+        "PYTHONPATH=src bandit -q -lll -r src/research_workspace/hooks.py src/research_workspace/laplace_core.py",
+        "git diff --check"
+      ],
+      "returncodes": [0, 0, 0, 0, 0],
+      "covered": [
+        "invalid hook state, malformed identity/payload, invalid timeout/policy/scope, duplicate names and post security policy fail closed",
+        "security PRE exception, timeout, explicit block and cancellation fail closed",
+        "observability POST failure and POST cancel cannot change operation success",
+        "replayed events cannot cross owner, project, session, task or event identity",
+        "no shell, network, telemetry, dynamic evaluation, arbitrary external hook or implicit privilege escalation was added"
+      ],
+      "bandit_note": "Bandit returned zero high-severity findings; the hook engine has no subprocess, shell or dynamic code execution path."
+    }
+  },
+  "ordering_and_failure_policy": {
+    "ordering": "priority ascending, then registration ordinal, then hook name",
+    "pre_security": "HookFailurePolicy.FAIL_CLOSED for security-critical PRE stages; explicit block, exception, timeout and cancellation stop the operation.",
+    "post_observability": "HookFailurePolicy.OBSERVE only; post exceptions/timeouts are attached to HookReport and do not block; post cancel is ignored for control flow.",
+    "cancellation": "A cancellation signal stops cancellable stages before the next callback and is persisted; TASK_CANCEL hooks are allowed to run cleanup despite the signal.",
+    "idempotency": "The first result is atomically persisted by idempotency_key. A same-identity replay returns replayed=true without invoking callbacks; payload, stage or identity conflicts fail closed."
+  },
+  "comparison": {
+    "result": "PASS",
+    "method": "The G9 frozen tests compare enabled/disabled paths, first dispatch/replay, security PRE failure, observability POST failure, cancellation and owner/project-scoped registrations. Correctness and security are preserved; no production model or hook performance claim was made.",
+    "correctness": "NO_LOSS",
+    "security": "NO_LOSS",
+    "model_or_hardware_efficiency": "NOT_MEASURED",
+    "default_enable_decision": "NO",
+    "reason": "No hooks are registered by default and the typed service is shadowed until lifecycle callers opt in with explicit internal callbacks."
+  },
+  "metrics": {
+    "focused_test_returncode": 0,
+    "frozen_regression_returncode": 0,
+    "ruff_returncode": 0,
+    "mypy_returncode": 0,
+    "compileall_returncode": 0,
+    "bandit_high_returncode": 0,
+    "gpu_vram_latency_throughput": "NOT_MEASURED"
+  },
+  "limitations": [
+    "Existing retrieval, memory, mutation and verification call sites are not automatically instrumented; Core exposes the hook service for subsequent controlled integration.",
+    "A timed callback running in its own Python thread cannot be forcibly killed; the future is cancelled, the operation fails closed where required, and the bounded callback thread is allowed to unwind.",
+    "No model-token, latency, throughput or GPU measurement was performed for this lifecycle plumbing phase.",
+    "The full G0 certification was not repeated, per the roadmap instruction and prior phase certifications.",
+    "The socket-concurrency regression requires host socket permission because the restricted shell denies socket creation; the selected unchanged suite passed under that permission."
+  ],
+  "rollback_target": {
+    "commit": "96fb17cd1c5ae7b34eeae6e3231aeee06aa56c8e",
+    "description": "G8-certified shadow SkillRegistry with G7-G1 capabilities; production/v1 remains separately immutable."
+  },
+  "certification_artifact": "docs/v2-roadmap/certifications/G9-hooks.json"
+}
