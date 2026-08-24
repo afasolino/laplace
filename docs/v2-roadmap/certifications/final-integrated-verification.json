@@ -8,7 +8,7 @@
   "candidate": {
     "repository": "/home/giando/work/laplace-v2",
     "branch": "feature/laplace-v2",
-    "head_commit": "a77db93737e24c2b3ccd8285f0a5095b72551e29",
+    "head_commit": "455eb8d02066223bf43ef37b32945d8776ea471b",
     "worktree": "clean",
     "production_checkout": "/home/giando/work/laplace",
     "production_branch": "production/v1",
@@ -26,7 +26,7 @@
     {"phase": "G8", "status": "CERTIFIED", "certification_commit": "96fb17cd1c5ae7b34eeae6e3231aeee06aa56c8e", "certification": "docs/v2-roadmap/certifications/G8-skills.json"},
     {"phase": "G9", "status": "CERTIFIED", "certification_commit": "8d768eda39e46f31ed8b80a8ea214d6f8c95ef07", "certification": "docs/v2-roadmap/certifications/G9-hooks.json"},
     {"phase": "G10", "status": "CERTIFIED", "certification_commit": "b88d03dedc3c286554ad93bd963b3a0289645ce6", "certification": "docs/v2-roadmap/certifications/G10-idle-consolidation.json"},
-    {"phase": "G11", "status": "CERTIFIED", "qualification": "RTL A/B separately blocked by absent candidate artifact and certified vLLM toolchain; no replacement promoted.", "implementation_commit": "36ddc6db6cc642e60cdefccc23bb40710638ba6c", "certification_commit": "a77db93737e24c2b3ccd8285f0a5095b72551e29", "certification": "docs/v2-roadmap/certifications/G11-subagents-models-scheduling.json"}
+    {"phase": "G11", "status": "CERTIFIED", "qualification": "RTL A/B separately blocked by absent candidate artifact and certified vLLM toolchain; no replacement promoted.", "implementation_commit": "36ddc6db6cc642e60cdefccc23bb40710638ba6c", "certification_commit": "a77db93737e24c2b3ccd8285f0a5095b72551e29", "artifact_correction_commit": "455eb8d02066223bf43ef37b32945d8776ea471b", "certification": "docs/v2-roadmap/certifications/G11-subagents-models-scheduling.json"}
   ],
   "upstream_reuse_inventory": [
     {"name": "barrydeen/Qwen3.8-27B-AWQ-4bit", "revision": "e6b4b8b025f85b3e18f13281db576e0b7d5fe314", "license": "Apache-2.0", "reuse_mode": "Certified local serving artifact reference; no source copied."},
