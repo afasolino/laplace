@@ -1,0 +1,143 @@
+{
+  "schema_version": 1,
+  "phase": "G3",
+  "title": "Project Rules and Context Hierarchy",
+  "lifecycle_state": "CERTIFICATION",
+  "feature_lifecycle_state": "ENABLED",
+  "status": "CERTIFIED",
+  "generated_at_utc": "2026-08-24T18:36:00Z",
+  "control_plane": {
+    "production_root": "/home/giando/work/laplace",
+    "production_branch": "production/v1",
+    "production_source_modified": false,
+    "v2_root": "/home/giando/work/laplace-v2",
+    "v2_branch": "feature/laplace-v2",
+    "base_commit": "692c3565861d56d4f12aefcef6937bb7e1eac21e",
+    "candidate_commit": "738d24378506cb47b4b43216d6c2982f251dee74",
+    "worktree_status_before_certification_artifact": "clean",
+    "zetsu_mutation_note": "The previously recorded promotion-target stale-head defect remained deterministic; the read-only path was healthy and local Codex implementation was used under the documented fallback rule."
+  },
+  "implementation": {
+    "service": "src/research_workspace/rules.py:RuleService",
+    "backend_protocol": "src/research_workspace/rules.py:RuleBackend",
+    "backend": "src/research_workspace/rules.py:SQLiteRuleBackend",
+    "rule_representation": "Typed key/value assertions with global, user, project and path scopes, explicit provenance, approval and content hashes.",
+    "precedence": [
+      "global",
+      "user",
+      "project",
+      "path-specific"
+    ],
+    "conflict_policy": "A more specific scope deterministically supersedes a less specific scope; incompatible equal-precedence winners fail closed.",
+    "path_conditions": "Relative POSIX globs with bounded *, **, ?, character classes and brace alternatives; absolute, parent-traversal and malformed patterns are rejected.",
+    "context_assembly": "ContextAssembler and ContextPacket put non-overrideable authoritative rules first, then user objective, learned memory as advisory, and retrieved evidence as evidence-only data.",
+    "core_integration": "LaplaceCore.assemble_context is available without Zetsu; Operator API creates a private persistent rules store and injects it into the shared core.",
+    "changed_paths": [
+      "src/research_workspace/rules.py",
+      "src/research_workspace/laplace_core.py",
+      "src/research_workspace/operator_api.py",
+      "tests/test_rules_g3.py"
+    ],
+    "rules_distinct_from": [
+      "approved episodic/semantic learned memory",
+      "Personal Corpus source-grounded retrieval",
+      "model output and retrieved document instructions"
+    ]
+  },
+  "upstream_evaluation": {
+    "name": "cline/cline",
+    "repository": "https://github.com/cline/cline",
+    "inspected_revision": "09ee9026393e681a4834d8acbf4d9d5fdfa8664a",
+    "branch_observed": "main",
+    "license": "Apache-2.0",
+    "license_path": "https://github.com/cline/cline/blob/09ee9026393e681a4834d8acbf4d9d5fdfa8664a/LICENSE",
+    "reference_used": [
+      "global and workspace rule locations",
+      "conditional path globs",
+      "inspectable rule files and lifecycle toggles"
+    ],
+    "reuse_mode": "reference-only; no Cline source, dependency, runtime, or remote service was copied or added",
+    "local_modifications": "Laplace uses strict typed records, owner/project authorization, local SQLite persistence, fail-closed malformed input and conflict handling, and explicit trust-boundary context assembly."
+  },
+  "executed_gates": {
+    "focused_development": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest tests/test_rules_g3.py -q",
+      "returncode": 0,
+      "tests": 5
+    },
+    "lint_and_types": [
+      {
+        "command": "PYTHONPATH=src ruff check src/research_workspace/rules.py src/research_workspace/laplace_core.py src/research_workspace/operator_api.py tests/test_rules_g3.py",
+        "returncode": 0
+      },
+      {
+        "command": "PYTHONPATH=src mypy src/research_workspace/rules.py src/research_workspace/laplace_core.py src/research_workspace/operator_api.py tests/test_rules_g3.py",
+        "returncode": 0
+      },
+      {
+        "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m compileall -q src/research_workspace/rules.py src/research_workspace/laplace_core.py src/research_workspace/operator_api.py",
+        "returncode": 0
+      }
+    ],
+    "frozen_phase_acceptance_and_previous_regression": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest -q tests/test_rules_g3.py tests/test_memory_g2.py tests/test_laplace_core_g1.py tests/test_zetsu_mcp.py tests/test_zetsu_agent_mcp.py tests/test_personal_corpus_api_v6.py tests/test_tiered_serving.py tests/test_auth_provenance_security.py tests/test_operator_api.py tests/test_architecture_v7.py",
+      "returncode": 0,
+      "host_socket_permission_required": true,
+      "scope": "G3 precedence/conflict/path/switching/context tests plus G2/G1 and selected v1 authorization, corpus, serving, operator and architecture regressions"
+    },
+    "security_and_negative": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src bandit -q -lll -r src/research_workspace/rules.py src/research_workspace/laplace_core.py src/research_workspace/operator_api.py && git diff --check",
+      "returncode": 0,
+      "covered": [
+        "global rules cannot use user provenance",
+        "global rules require the system actor",
+        "cross-owner rule writes and reads are rejected or excluded",
+        "project switching excludes unrelated project/path rules",
+        "absolute, traversal, malformed and ambiguous paths are rejected",
+        "unapproved rules are rejected",
+        "equal-authority contradictory rules fail closed",
+        "memory and retrieved evidence are advisory and cannot override rules"
+      ]
+    }
+  },
+  "persistence_and_restart": {
+    "result": "PASS",
+    "backend": "SQLiteRuleBackend",
+    "evidence": "tests/test_rules_g3.py:test_rules_restart_and_disable_preserve_scope_and_inspectability",
+    "atomicity": "SQLite BEGIN IMMEDIATE protects rule creation and disable transitions; rule events preserve mutation evidence.",
+    "permissions": "State directory is created mode 0700 and database mode 0600.",
+    "integrity": "PRAGMA integrity_check and strict rule/provenance/content-hash decoding fail closed."
+  },
+  "security_and_negative_results": {
+    "status": "PASS",
+    "authorization": "User/project/path rules are owner-scoped; global rules are system-policy scoped; context resolution validates user, project and relative paths.",
+    "trust_boundary": "Rules are authoritative; memory and retrieval are retained as separately labeled advisory sections and never merged into the rule set.",
+    "network": "No network, cloud inference, telemetry, remote upload or external rule service was added."
+  },
+  "metrics": {
+    "focused_test_returncode": 0,
+    "frozen_regression_returncode": 0,
+    "ruff_returncode": 0,
+    "mypy_returncode": 0,
+    "compileall_returncode": 0,
+    "bandit_high_returncode": 0,
+    "context_repeatability": "PASS; canonical ordering and assembly SHA-256 are stable for equivalent inputs.",
+    "live_model_measurements": "NOT_RUN",
+    "gpu_vram_latency_throughput": "NOT_MEASURED"
+  },
+  "limitations": [
+    "The phase accepts typed rules; parsing arbitrary Markdown/YAML rule files is intentionally deferred so malformed free-form authority cannot be admitted implicitly.",
+    "Path matching is a bounded local glob subset and does not claim complete Cline parser compatibility.",
+    "The existing Zetsu repository-agent registry remains stale relative to the current v2 checkout; local implementation was used after the deterministic promotion-target failure recorded in G1.",
+    "The socket-concurrency regression requires host socket permission because the restricted shell denies socket creation; the unchanged selected suite passed under that permission.",
+    "The full G0 production certification was not repeated, per the roadmap instruction and prior phase certifications."
+  ],
+  "rollback_target": {
+    "commit": "692c3565861d56d4f12aefcef6937bb7e1eac21e",
+    "description": "G2-certified local memory with G1 shared core and production/v1 remaining separately immutable."
+  },
+  "certification_artifact": "docs/v2-roadmap/certifications/G3-rules.json"
+}
