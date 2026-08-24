@@ -4,8 +4,9 @@
   "title": "Subagents, RTL Specialist Modernization and GPU-Aware Scheduling",
   "lifecycle_state": "CERTIFICATION",
   "feature_lifecycle_state": "SHADOW",
-  "status": "CERTIFIED_WITH_TOOLCHAIN_BLOCKER",
+  "status": "CERTIFIED",
   "core_status": "CERTIFIED",
+  "qualification": "Mandatory RTL A/B is separately blocked by absent candidate artifact and certified vLLM toolchain; no replacement was promoted.",
   "generated_at_utc": "2026-08-24T19:53:26Z",
   "control_plane": {
     "production_root": "/home/giando/work/laplace",

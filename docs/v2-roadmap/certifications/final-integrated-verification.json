@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "phase": "FINAL_INTEGRATED_VERIFICATION",
+  "title": "Laplace v2 final integrated verification campaign",
+  "lifecycle_state": "CERTIFICATION",
+  "generated_at_utc": "2026-08-24T20:00:42Z",
+  "verdict": "RESEARCH_READY",
+  "candidate": {
+    "repository": "/home/giando/work/laplace-v2",
+    "branch": "feature/laplace-v2",
+    "head_commit": "a77db93737e24c2b3ccd8285f0a5095b72551e29",
+    "worktree": "clean",
+    "production_checkout": "/home/giando/work/laplace",
+    "production_branch": "production/v1",
+    "production_source_modified": false
+  },
+  "phase_results": [
+    {"phase": "G0", "status": "CERTIFIED", "certification_commit": "eeb29f2ce67f4d58f90dbdccd625ead94da13405", "certification": "docs/v2-roadmap/certifications/G0-v1-freeze.json", "note": "Previously certified; not rerun."},
+    {"phase": "G1", "status": "CERTIFIED", "certification_commit": "ac01b17fd6a91e97c731bd69b0d65c51fc308fdc", "certification": "docs/v2-roadmap/certifications/G1-shared-core.json"},
+    {"phase": "G2", "status": "CERTIFIED", "certification_commit": "692c3565861d56d4f12aefcef6937bb7e1eac21e", "certification": "docs/v2-roadmap/certifications/G2-memory.json"},
+    {"phase": "G3", "status": "CERTIFIED", "certification_commit": "7cc8b7e37897fb4434f7acbee810add409c6f423", "certification": "docs/v2-roadmap/certifications/G3-rules.json"},
+    {"phase": "G4", "status": "CERTIFIED", "certification_commit": "e6ade2b05a157f8ae348d2cd2d1dac0c841c0fef", "certification": "docs/v2-roadmap/certifications/G4-repository-intelligence.json"},
+    {"phase": "G5", "status": "CERTIFIED", "certification_commit": "1aa9056828ffcabb64c3b42907f0f568bc30be88", "certification": "docs/v2-roadmap/certifications/G5-events-trajectories.json"},
+    {"phase": "G6", "status": "CERTIFIED", "certification_commit": "57d2f36f34cecb85563e8e5918e2e701d9c68214", "certification": "docs/v2-roadmap/certifications/G6-bounded-aci.json"},
+    {"phase": "G7", "status": "CERTIFIED", "certification_commit": "e33e344d1282e13788667088ec703e68c030816b", "certification": "docs/v2-roadmap/certifications/G7-context-planner.json"},
+    {"phase": "G8", "status": "CERTIFIED", "certification_commit": "96fb17cd1c5ae7b34eeae6e3231aeee06aa56c8e", "certification": "docs/v2-roadmap/certifications/G8-skills.json"},
+    {"phase": "G9", "status": "CERTIFIED", "certification_commit": "8d768eda39e46f31ed8b80a8ea214d6f8c95ef07", "certification": "docs/v2-roadmap/certifications/G9-hooks.json"},
+    {"phase": "G10", "status": "CERTIFIED", "certification_commit": "b88d03dedc3c286554ad93bd963b3a0289645ce6", "certification": "docs/v2-roadmap/certifications/G10-idle-consolidation.json"},
+    {"phase": "G11", "status": "CERTIFIED", "qualification": "RTL A/B separately blocked by absent candidate artifact and certified vLLM toolchain; no replacement promoted.", "implementation_commit": "36ddc6db6cc642e60cdefccc23bb40710638ba6c", "certification_commit": "a77db93737e24c2b3ccd8285f0a5095b72551e29", "certification": "docs/v2-roadmap/certifications/G11-subagents-models-scheduling.json"}
+  ],
+  "upstream_reuse_inventory": [
+    {"name": "barrydeen/Qwen3.8-27B-AWQ-4bit", "revision": "e6b4b8b025f85b3e18f13281db576e0b7d5fe314", "license": "Apache-2.0", "reuse_mode": "Certified local serving artifact reference; no source copied."},
+    {"name": "vLLM", "revision": "0.25.0+cu129", "license": "Recorded in the certified v1 dependency inventory", "reuse_mode": "Certified local serving runtime."},
+    {"name": "mem0ai/mem0", "revision": "b717e38785dd8bcc6542ad88212ffca33f573f10", "license": "Apache-2.0", "reuse_mode": "Architectural reference only; no source, dependency, hosted platform or provider copied."},
+    {"name": "cline/cline", "revision": "09ee9026393e681a4834d8acbf4d9d5fdfa8664a", "license": "Apache-2.0", "reuse_mode": "Rules and hook boundary reference only; no runtime or source copied."},
+    {"name": "Aider RepoMap", "revision": "0189cf4f0009aa58fd24a3b8c834819c8230fa77", "license": "Apache-2.0", "reuse_mode": "Repository-map architecture reference only; no source or dependency copied."},
+    {"name": "tree-sitter-language-pack", "revision": "86fa5a8925b1dc7b1adca47373e8c97167991fc2", "license": "MIT", "reuse_mode": "Parser loading and structure-extraction reference only; no grammar, binary or dependency added."},
+    {"name": "OpenHands software-agent-sdk", "revision": "c20709fb587f71d38d4af62c4813ff4d2681fa02", "license": "MIT", "reuse_mode": "Events, context, lifecycle-lock and interruption architecture reference only; no code or runtime copied."},
+    {"name": "SWE-agent", "revision": "3ea751c087f32b16e039a2233dd6eefecef325d5", "license": "MIT", "reuse_mode": "Bounded tool and trajectory architecture reference only; no source or shell bundle copied."},
+    {"name": "mini-SWE-agent", "revision": "4fe36a38941abde8a332bda950ca6c0de653a19f", "license": "MIT", "reuse_mode": "Linear trajectory architecture reference only; no source or dependency copied."},
+    {"name": "ai4s-research/open-science", "revision": "ca7ced57a68abe5ad00a61b43b07a148ad5f3282", "license": "MIT", "reuse_mode": "Provenance and scientific workflow reference only; no source or acquisition path copied."},
+    {"name": "NousResearch/hermes-agent", "revision": "74ad422d50e6d76e26ba5ce3b4d2a4d520e923dd", "license": "MIT", "reuse_mode": "Skills, consolidation and subagent boundary reference only; no runtime, provider or network skill copied."},
+    {"name": "ai4s-research/open-science", "revision": "fc8abad89e9e62ded08607ef77bf7fb53103a80e", "license": "MIT", "reuse_mode": "Skill packaging and provenance reference only; no skill text or connector copied."},
+    {"name": "ai4s-research/ai4s-skills", "revision": "2519e8d", "license": "MIT", "reuse_mode": "Scientific skill-format reference only; no skill text or SDK imported."},
+    {"name": "Yaxin9Luo/AutoDesign", "revision": "e4ccc6c1f8e90234b99df8da2f38e1d0be51d0c7", "license": "MIT", "reuse_mode": "Bounded evaluation-harness architecture reference only; no source or remote dependency copied."}
+  ],
+  "standalone_verification": {
+    "offline_integrated_campaign": {
+      "command": "PYTHONPATH=src pytest -q --ignore=tests/test_evaluation_v7.py",
+      "result": "PASS",
+      "scope": "Standalone Laplace APIs, memory, corpus/RAG, repository context, rules, events, checkpoints, compaction, ACI, skills, hooks, consolidation, scheduling, serving, model policy, reliability, security, operator and Zetsu unit/integration fixtures.",
+      "host_socket_permission_required": true,
+      "failures": []
+    },
+    "frozen_final_evaluation": {
+      "command": "PYTHONPATH=src pytest -q tests/test_evaluation_v7.py",
+      "execution_count_after_freeze": 1,
+      "result": "PASS",
+      "tests": 3,
+      "fixture_only": true,
+      "live_model_quality": "GPU_BLOCKED_BY_DESIGN",
+      "provider_contacted": false,
+      "failures": []
+    },
+    "static_and_security": {
+      "ruff": {"command": "PYTHONPATH=src ruff check src tests", "result": "PASS"},
+      "mypy": {"command": "PYTHONPATH=src mypy src/research_workspace", "result": "PASS", "source_files": 109},
+      "compileall": {"command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m compileall -q src tests", "result": "PASS"},
+      "bandit": {"command": "PYTHONPATH=src bandit -q -lll -r src/research_workspace", "result": "PASS", "high_severity_failures": 0},
+      "diff_check": {"command": "git diff --check", "result": "PASS"}
+    }
+  },
+  "standalone_capabilities": {
+    "verified": [
+      "Local UI/API and operator surfaces with localhost and ownership boundaries",
+      "Episodic/semantic/project memory with contradiction, supersession, update/delete and corrupt-storage fail-closed behavior",
+      "Personal Corpus/RAG permissions, provenance, hash-based ingestion and traversal/symlink/network restrictions",
+      "Repository map/context, bounded deterministic ACI, Python/SystemVerilog patch applicability and verification gates",
+      "Append-only events and trajectories, derived checkpoints, replay, crash/restart and resumable state validation",
+      "Logical long-context planning/compaction, rules hierarchy, governed skills, hooks and shadow idle consolidation",
+      "Single-GPU-aware serial and queued logical subagent scheduling with cancellation, OOM recovery, fairness and owner/depth gates",
+      "Zetsu retrieval/delegation/verification/result lifecycle fixtures and bounded large-result handling"
+    ],
+    "not_live_certified": [
+      "Live model generation quality, throughput, latency and VRAM measurements",
+      "Target-laptop endurance, file-descriptor/lock/disk-growth and repeated live-session measurements",
+      "A Codex-controlled mutating task using Laplace to modify this worktree"
+    ]
+  },
+  "zetsu_and_runtime": {
+    "status_command": "laplace zetsu status --json",
+    "result": "READY",
+    "repository": "/home/giando/work/laplace-v2",
+    "topology": "nocodev",
+    "codev": "intentionally_disabled; not degraded operation",
+    "qwen_ready": true,
+    "operator_ready": true,
+    "agent_execution_slot_limit": 1,
+    "pending_queue_capacity": 16,
+    "queued_agent_tasks": 0,
+    "running_agent_tasks": 0,
+    "production_restore": "laplace zetsu start --repo /home/giando/work/laplace --nocodev --json",
+    "production_source_modified": false,
+    "repository_agent_proof": "Passed bounded read-only agent_task without per_user_worktree_quota. A later mutating delegation hit the deterministic stale-target zetsu_agent_apply_target_not_clean guard; no unsafe workaround was used."
+  },
+  "rtl_and_routing": {
+    "g11_core_scheduler": "CERTIFIED",
+    "mandatory_ab": "BLOCKED",
+    "control": "CodeV-R1-7B BF16 control run not claimed because the required candidate comparison could not be formed.",
+    "candidate": "SiliconMind-V1.2-Qwen3-4B-T-2507 BF16 checkpoint/config/tensors absent under /home/giando.",
+    "toolchain_evidence": {"command": "laplace zetsu start --repo /home/giando/work/laplace-v2 --json", "exit_code": 2, "result": "{\"error\":\"certified_vllm_executable_missing\",\"ok\":false}"},
+    "routing_decision": "Keep the certified CodeV rollback route; do not promote SiliconMind. Current runtime remains nocodev by explicit topology choice.",
+    "measurements": "No A/B correctness, pass-by-3, repair, tokens, latency, throughput, VRAM, OOM or co-residency values fabricated."
+  },
+  "performance_and_endurance": {
+    "final_campaign_live_comparison": "NOT_EXECUTED",
+    "target_hardware_metrics": "NOT_MEASURED",
+    "v1_baseline": "Inherited from the certified G0 artifact; not rerun.",
+    "deterministic_fixture_correctness": "PASS",
+    "reason": "The local certified model/toolchain and target-hardware conditions required for live generation and endurance evidence were not available."
+  },
+  "limitations": [
+    "The final verdict is limited to research readiness; it is not a claim of controlled single-user or general production readiness.",
+    "The mandatory RTL A/B remains a genuine local artifact/toolchain blocker documented in the G11 certification.",
+    "No cloud inference, remote document upload, telemetry, paid API, paywall bypass or production-source modification was used.",
+    "Logical callable subagent state is not durably replayed after scheduler restart; durable whole-agent recovery remains in the repaired production control plane.",
+    "Socket-based tests require host permission because the restricted shell denies socket creation; the selected suite passed with that permission."
+  ],
+  "rollback": {
+    "v2_incremental": {"commit": "b88d03dedc3c286554ad93bd963b3a0289645ce6", "description": "Last certified pre-G11 v2 state."},
+    "production": {"checkout": "/home/giando/work/laplace", "branch": "production/v1", "description": "Immutable promoted control plane; no v2 source was written there."}
+  },
+  "artifact": "docs/v2-roadmap/certifications/final-integrated-verification.json"
+}
