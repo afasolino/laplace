@@ -23,6 +23,7 @@ from .repository_context import (
     RepositorySymbol,
 )
 from .rules import ContextItem, ContextPacket, RuleService
+from .skills import SkillRecord, SkillRegistry
 from .service_tiers import ModelLane, ServiceTierError, TieredServingService
 from .trajectory import (
     TrajectoryEvent,
@@ -70,6 +71,7 @@ class LaplaceCore:
         repository_context: RepositoryContextService | None = None,
         trajectory: TrajectoryService | None = None,
         context_planner: ContextPlanner | None = None,
+        skill_registry: SkillRegistry | None = None,
     ) -> None:
         self.repository_root = repository_root.resolve()
         self.corpus = corpus
@@ -80,10 +82,23 @@ class LaplaceCore:
             self.repository_root / ".laplace-state" / "trajectory"
         )
         self.context_planner = context_planner or ContextPlanner()
+        self._skill_registry = skill_registry
         self._repository_context = repository_context
         self._agent_coordinator = agent_coordinator
         self._agent_coordinator_lock = threading.Lock()
         self._repository_context_lock = threading.Lock()
+        self._skill_registry_lock = threading.Lock()
+
+    @property
+    def skill_registry(self) -> SkillRegistry:
+        """Return the shared local procedural-skill registry."""
+
+        with self._skill_registry_lock:
+            if self._skill_registry is None:
+                self._skill_registry = SkillRegistry(
+                    self.repository_root / ".laplace-state" / "skills"
+                )
+            return self._skill_registry
 
     @property
     def repository_context(self) -> RepositoryContextService:
@@ -255,6 +270,48 @@ class LaplaceCore:
         """Return the bounded repository-agent scheduler state."""
 
         return self.agent_coordinator.scheduler_status(user_id=user_id)
+
+    def select_skills(
+        self,
+        *,
+        owner_id: str,
+        project_id: str,
+        query: str,
+        available_tools: Sequence[str] = (),
+        available_verifiers: Sequence[str] = (),
+        enabled: bool = True,
+    ) -> tuple[SkillRecord, ...]:
+        """Select owner-scoped active procedures without granting authority."""
+
+        return self.skill_registry.select(
+            query,
+            owner_id=owner_id,
+            project_id=project_id,
+            available_tools=available_tools,
+            available_verifiers=available_verifiers,
+            enabled=enabled,
+        )
+
+    def skill_activation_packet(
+        self,
+        *,
+        owner_id: str,
+        project_id: str,
+        query: str,
+        available_tools: Sequence[str] = (),
+        available_verifiers: Sequence[str] = (),
+        enabled: bool = True,
+    ) -> JsonObject:
+        """Build an advisory-only skill packet for a local caller."""
+
+        return self.skill_registry.activation_packet(
+            query,
+            owner_id=owner_id,
+            project_id=project_id,
+            available_tools=available_tools,
+            available_verifiers=available_verifiers,
+            enabled=enabled,
+        )
 
     @staticmethod
     def deterministic_verification(
