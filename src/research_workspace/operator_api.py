@@ -1124,7 +1124,12 @@ def create_operator_app(
                         timeout=2,
                     )
                     assert writer is not None
-                    path = parsed.path.rstrip("/") + "/models"
+                    base_path = parsed.path.rstrip("/")
+                    path = (
+                        base_path + "/models"
+                        if base_path.endswith("/v1")
+                        else base_path + "/v1/models"
+                    )
                     writer.write(
                         (
                             f"GET {path} HTTP/1.1\r\n"

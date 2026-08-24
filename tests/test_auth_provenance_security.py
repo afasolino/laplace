@@ -254,9 +254,11 @@ async def test_production_readiness_probes_exact_local_model_identities(
         conversation_store=ConversationStore(tmp_path / "conversations.sqlite3"),
     )
 
+    requests: list[bytes] = []
+
     class ModelWriter:
-        def write(self, _value: bytes) -> None:
-            return
+        def write(self, value: bytes) -> None:
+            requests.append(value)
 
         async def drain(self) -> None:
             return
@@ -296,6 +298,8 @@ async def test_production_readiness_probes_exact_local_model_identities(
         ready = await client.get("/api/v1/readiness")
         assert ready.status_code == 200
         assert ready.json()["status"] == "READY"
+        assert len(requests) == 3
+        assert all(value.startswith(b"GET /v1/models HTTP/1.1\r\n") for value in requests)
 
         serve_wrong_model = True
         degraded = await client.get("/api/v1/readiness")

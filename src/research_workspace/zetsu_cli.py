@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -17,6 +18,12 @@ from .zetsu_config import DEFAULT_ENDPOINT, DEFAULT_TOKEN_ENV, ZetsuConfigError
 from .zetsu_config import configure as configure_zetsu
 from .zetsu_config import remove as remove_zetsu
 from .zetsu_config import status as zetsu_status
+from .zetsu_runtime import (
+    default_state_root,
+    load_local_plus_token,
+    start_local_runtime,
+    stop_local_runtime,
+)
 
 LEGACY_PROTOCOL_VERSION = "2025-11-25"
 
@@ -31,7 +38,14 @@ def _default_endpoint() -> str:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="laplace zetsu")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser.set_defaults(
+        command=None,
+        repo=Path.cwd(),
+        json=False,
+        offline=False,
+        timeout=10.0,
+    )
+    sub = parser.add_subparsers(dest="command")
     for name in ("configure", "status", "test", "remove"):
         item = sub.add_parser(name)
         item.add_argument("--repo", type=Path, default=Path.cwd())
@@ -43,6 +57,21 @@ def _parser() -> argparse.ArgumentParser:
         item = sub.choices[name]
         item.add_argument("--offline", action="store_true")
         item.add_argument("--timeout", type=float, default=10.0)
+    start = sub.add_parser("start")
+    start.add_argument("--repo", type=Path, default=Path.cwd())
+    start.add_argument("--state-root", type=Path, default=default_state_root())
+    start.add_argument("--timeout", type=float, default=1_800.0)
+    start.add_argument("--vllm", type=Path)
+    start.add_argument("--ffmpeg-lib", type=Path)
+    start.add_argument("--dry-run", action="store_true")
+    start.add_argument("--json", action="store_true")
+    stop = sub.add_parser("stop")
+    stop.add_argument("--state-root", type=Path, default=default_state_root())
+    stop.add_argument("--json", action="store_true")
+    codex = sub.add_parser("codex")
+    codex.add_argument("--repo", type=Path, default=Path.cwd())
+    codex.add_argument("--state-root", type=Path, default=default_state_root())
+    codex.add_argument("codex_args", nargs=argparse.REMAINDER)
     return parser
 
 
@@ -289,17 +318,230 @@ def _codex_recognition(repository: Path) -> dict[str, object]:
     return {"recognized": isinstance(value, dict), "configuration": value}
 
 
+def _load_command_token(
+    endpoint: str | None,
+    token_env_var: str | None,
+    state_root: Path,
+) -> bool:
+    """Load a protected local token for this command only, never into Codex config."""
+
+    if not endpoint or not token_env_var or os.environ.get(token_env_var):
+        return False
+    parsed = urlsplit(endpoint)
+    if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        return False
+    try:
+        token = load_local_plus_token(state_root)
+    except ZetsuConfigError:
+        return False
+    os.environ[token_env_var] = token
+    return True
+
+
+def _diagnostic_payload(
+    repository: Path,
+    *,
+    command: str,
+    offline: bool,
+    timeout: float,
+    state_root: Path,
+) -> dict[str, object]:
+    value = zetsu_status(repository)
+    token_loaded = _load_command_token(value.endpoint, value.token_env_var, state_root)
+    if token_loaded:
+        value = zetsu_status(repository)
+    local_ok = value.configured and value.skill_installed and value.compatible
+    online: dict[str, object] | None = None
+    laplace: dict[str, object] | None = None
+    readiness: dict[str, object] | None = None
+    detail = "offline"
+    online_ok = True
+    if not offline and local_ok and value.endpoint and value.token_env_var:
+        try:
+            online = _online_probe(
+                value.endpoint,
+                value.token_env_var,
+                timeout,
+                retrieval=command == "test",
+            )
+            laplace = _laplace_status(
+                value.endpoint,
+                value.token_env_var,
+                timeout,
+            )
+            readiness = _laplace_readiness(value.endpoint, timeout)
+            if readiness.get("status") == "READY":
+                detail = "ok"
+            else:
+                online_ok = False
+                raw_reasons = readiness.get("reasons")
+                reasons = (
+                    ",".join(str(item) for item in raw_reasons)
+                    if isinstance(raw_reasons, list)
+                    else "unknown"
+                )
+                detail = f"laplace_readiness_degraded:{reasons}"
+        except ZetsuConfigError as exc:
+            online_ok = False
+            detail = str(exc)
+    elif not local_ok:
+        online_ok = False
+        detail = "configuration_incomplete_or_incompatible"
+    return {
+        "ok": local_ok and online_ok,
+        "action": command,
+        "local_configuration": local_ok,
+        "token_loaded_from_local_file": token_loaded,
+        "online": online,
+        "laplace": laplace,
+        "readiness": readiness,
+        "detail": detail,
+        **value.as_dict(),
+        "codex": _codex_recognition(repository),
+    }
+
+
+def _ensure_payload(
+    repository: Path,
+    *,
+    state_root: Path,
+    timeout: float,
+) -> dict[str, object]:
+    before = zetsu_status(repository)
+    configured_now = not before.compatible
+    if configured_now:
+        configure_zetsu(
+            repository,
+            endpoint=_default_endpoint(),
+            token_env_var=DEFAULT_TOKEN_ENV,
+        )
+    status_payload = _diagnostic_payload(
+        repository,
+        command="status",
+        offline=False,
+        timeout=timeout,
+        state_root=state_root,
+    )
+    test_payload = _diagnostic_payload(
+        repository,
+        command="test",
+        offline=False,
+        timeout=timeout,
+        state_root=state_root,
+    )
+    return {
+        "ok": bool(status_payload["ok"]) and bool(test_payload["ok"]),
+        "action": "ensure",
+        "configured_now": configured_now,
+        "status": status_payload,
+        "test": test_payload,
+    }
+
+
+def _launch_codex(
+    repository: Path,
+    state_root: Path,
+    codex_args: Sequence[str],
+) -> int:
+    ensured = _ensure_payload(repository, state_root=state_root, timeout=10.0)
+    if not bool(ensured["ok"]):
+        _emit({**ensured, "action": "codex_preflight"}, as_json=False)
+        return 2
+    executable = shutil.which("codex")
+    if executable is None:
+        raise ZetsuConfigError("codex_executable_missing")
+    environment = dict(os.environ)
+    environment[DEFAULT_TOKEN_ENV] = load_local_plus_token(state_root)
+    forwarded = list(codex_args)
+    if forwarded[:1] == ["--"]:
+        forwarded.pop(0)
+    print("Zetsu READY; launching Codex with the protected local credential.")
+    sys.stdout.flush()
+    os.execvpe(executable, [executable, *forwarded], environment)
+    raise AssertionError("os.execvpe returned unexpectedly")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
     repository = args.repo.resolve()
     try:
-        if args.command == "configure":
+        if args.command is None:
+            payload = _ensure_payload(
+                repository,
+                state_root=default_state_root(),
+                timeout=10.0,
+            )
+        elif args.command == "codex":
+            return _launch_codex(repository, args.state_root, args.codex_args)
+        elif args.command == "start":
+            before = zetsu_status(repository)
+            configuration_update_required = not (
+                before.compatible
+                and before.endpoint == DEFAULT_ENDPOINT
+                and before.token_env_var == DEFAULT_TOKEN_ENV
+            )
+            if configuration_update_required and not args.dry_run:
+                configured = configure_zetsu(
+                    repository,
+                    endpoint=DEFAULT_ENDPOINT,
+                    token_env_var=DEFAULT_TOKEN_ENV,
+                )
+            else:
+                configured = before
+            runtime = start_local_runtime(
+                repository,
+                args.state_root,
+                timeout=args.timeout,
+                dry_run=args.dry_run,
+                vllm=args.vllm,
+                ffmpeg_lib=args.ffmpeg_lib,
+            )
+            if args.dry_run:
+                payload = {
+                    "ok": True,
+                    "action": "start",
+                    "configuration_update_required": configuration_update_required,
+                    "configured": configured.as_dict(),
+                    "runtime": runtime,
+                }
+            else:
+                status_payload = _diagnostic_payload(
+                    repository,
+                    command="status",
+                    offline=False,
+                    timeout=10.0,
+                    state_root=args.state_root,
+                )
+                test_payload = _diagnostic_payload(
+                    repository,
+                    command="test",
+                    offline=False,
+                    timeout=10.0,
+                    state_root=args.state_root,
+                )
+                payload = {
+                    "ok": bool(status_payload["ok"]) and bool(test_payload["ok"]),
+                    "action": "start",
+                    "configuration_update_required": configuration_update_required,
+                    "configured": configured.as_dict(),
+                    "runtime": runtime,
+                    "status": status_payload,
+                    "test": test_payload,
+                }
+        elif args.command == "stop":
+            runtime = stop_local_runtime(args.state_root)
+            payload = {
+                "ok": runtime.get("status") in {"STOPPED", "NOT_RUNNING"},
+                "action": "stop",
+                "runtime": runtime,
+            }
+        elif args.command == "configure":
             value = configure_zetsu(
                 repository,
                 endpoint=args.endpoint,
                 token_env_var=args.token_env_var,
             )
-            payload: dict[str, object] = {
+            payload = {
                 "ok": value.configured and value.skill_installed and value.compatible,
                 "action": "configure",
                 **value.as_dict(),
@@ -313,45 +555,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 **value.as_dict(),
             }
         else:
-            value = zetsu_status(repository)
-            local_ok = value.configured and value.skill_installed and value.compatible
-            online: dict[str, object] | None = None
-            laplace: dict[str, object] | None = None
-            readiness: dict[str, object] | None = None
-            detail = "offline"
-            online_ok = True
-            if not args.offline and local_ok and value.endpoint and value.token_env_var:
-                try:
-                    online = _online_probe(
-                        value.endpoint,
-                        value.token_env_var,
-                        args.timeout,
-                        retrieval=args.command == "test",
-                    )
-                    laplace = _laplace_status(
-                        value.endpoint,
-                        value.token_env_var,
-                        args.timeout,
-                    )
-                    readiness = _laplace_readiness(value.endpoint, args.timeout)
-                    detail = "ok"
-                except ZetsuConfigError as exc:
-                    online_ok = False
-                    detail = str(exc)
-            elif not local_ok:
-                online_ok = False
-                detail = "configuration_incomplete_or_incompatible"
-            payload = {
-                "ok": local_ok and online_ok,
-                "action": args.command,
-                "local_configuration": local_ok,
-                "online": online,
-                "laplace": laplace,
-                "readiness": readiness,
-                "detail": detail,
-                **value.as_dict(),
-                "codex": _codex_recognition(repository),
-            }
+            payload = _diagnostic_payload(
+                repository,
+                command=args.command,
+                offline=args.offline,
+                timeout=args.timeout,
+                state_root=default_state_root(),
+            )
         _emit(payload, as_json=args.json)
         return 0 if bool(payload["ok"]) else 2
     except (ZetsuConfigError, ValueError) as exc:

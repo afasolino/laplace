@@ -11,6 +11,47 @@ which tools each identity sees.
 
 ## Configure Codex
 
+Start the complete local production stack with one idempotent command from the
+Laplace checkout:
+
+```bash
+laplace zetsu start
+```
+
+The command starts owned supervisors in the certified CodeV → Qwen → Operator
+order, explicitly selects `.venv-vllm-cu129`, waits for exact model identities,
+checks authenticated Zetsu availability, and leaves the services running in the
+background. Private logs and PID ownership records are stored below
+`$LAPLACE_STATE_ROOT` or `~/.local/state/laplace`. If a later service fails to
+start, only supervisors created by that invocation are stopped. Use
+`laplace zetsu stop` for the matching ownership-safe shutdown. `--dry-run` prints
+the resolved commands without starting a process.
+
+In each repository that should use Zetsu, run:
+
+```bash
+laplace zetsu
+```
+
+With no subcommand, Laplace installs or refreshes the managed project Skill and
+user-level MCP registration when needed, then always runs both status and the
+authenticated retrieval connectivity test. For a loopback deployment, this CLI
+command reads the Plus credential directly from the protected local Operator
+token file for its own probes; it never prints or writes that value into Codex
+configuration.
+
+Start a new Codex session with the same checked configuration and protected
+environment-only credential by running:
+
+```bash
+laplace zetsu codex
+```
+
+This performs the configure, status, and retrieval preflight first, then replaces
+itself with Codex and supplies `LAPLACE_ZETSU_TOKEN` only in that child process.
+Arguments after `--` are forwarded, for example `laplace zetsu codex -- --version`.
+The credential remains absent from the shell, command line, and Codex config.
+
 Create an owner-bound Laplace bearer credential outside Git and export it in the
 environment that starts Codex:
 

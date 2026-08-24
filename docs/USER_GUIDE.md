@@ -206,11 +206,25 @@ corpus so file validation, quarantine, ownership, indexing, and citations apply.
 ## Zetsu and Codex
 
 For Codex-driven work, Zetsu exposes the same authenticated Laplace boundaries
-through MCP. A fresh repository is onboarded by running `laplace zetsu configure`
-from that repository after the bearer token is present in the Codex process
-environment. The managed project Skill tells Codex when to work locally, retrieve
-compact evidence, delegate bounded reasoning to Qwen, start a Qwen repository
-`agent_task`, or use CodeV `rtl_task` for eligible RTL/SystemVerilog work.
+through MCP. A fresh repository is onboarded by running bare `laplace zetsu` from
+that repository; it configures managed content when needed and runs status plus
+the retrieval connectivity test. The managed project Skill tells Codex when to
+work locally, retrieve compact evidence, delegate bounded reasoning to Qwen,
+start a Qwen repository `agent_task`, or use CodeV `rtl_task` for eligible
+RTL/SystemVerilog work. The process that starts Codex must still receive the
+configured bearer-token environment variable.
+
+For the local production deployment, `laplace zetsu start` starts CodeV, the
+selected Qwen profile, and the Operator in the certified order and waits for all
+three to become ready. Thereafter, bare `laplace zetsu` from any project performs
+configure-if-needed, status, and the authenticated retrieval test. The matching
+`laplace zetsu stop` command stops only supervisors recorded with matching owned
+process identities.
+
+Use `laplace zetsu codex` to start a new Codex session after the same live
+preflight. It loads the loopback bearer credential from the protected Operator
+token file into the Codex child environment without printing it or persisting it
+in Codex configuration.
 
 Qwen repository-agent sessions use a server-authorized isolated worktree and
 owner-scoped retrieval. They have no generic shell/network access and require
