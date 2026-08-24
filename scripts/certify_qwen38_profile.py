@@ -317,14 +317,14 @@ def _multi_turn(client: httpx.Client, endpoint: str, model: str) -> dict[str, ob
     messages = [
         {
             "role": "user",
-            "content": f"Remember this exact private test code: {marker}. Reply READY.",
+            "content": f"Remember this exact local continuity marker: {marker}. Reply READY.",
         }
     ]
     first = _post(client, endpoint, "/v1/chat/completions", _base_body(model, messages, 64))
     messages.extend(
         [
             {"role": "assistant", "content": _content(_message(first))},
-            {"role": "user", "content": "What was the exact test code?"},
+            {"role": "user", "content": "Return the exact continuity marker."},
         ]
     )
     second = _post(client, endpoint, "/v1/chat/completions", _base_body(model, messages, 64))
@@ -586,24 +586,43 @@ def _quantized_kernel(model_path: Path, log_path: Path) -> dict[str, object]:
     }
 
 
-def _mtp(client: httpx.Client, endpoint: str, log_path: Path) -> dict[str, object]:
+def _mtp_tokens(profile: ServingProfile) -> int:
+    for argument in profile.extra_args:
+        prefix = "--speculative-config="
+        if not argument.startswith(prefix):
+            continue
+        value: object = json.loads(argument.removeprefix(prefix))
+        tokens = value.get("num_speculative_tokens") if isinstance(value, dict) else None
+        method = value.get("method") if isinstance(value, dict) else None
+        if method == "mtp" and isinstance(tokens, int) and tokens > 0:
+            return tokens
+    raise RuntimeError("mtp_profile_configuration_missing")
+
+
+def _mtp(
+    client: httpx.Client,
+    endpoint: str,
+    log_path: Path,
+    expected_tokens: int,
+) -> dict[str, object]:
     metrics = _metrics(client, endpoint)
     drafted = _metric_sum(metrics, "vllm:spec_decode_num_draft_tokens")
     accepted = _metric_sum(metrics, "vllm:spec_decode_num_accepted_tokens")
     drafts = _metric_sum(metrics, "vllm:spec_decode_num_drafts")
     log = log_path.read_text(encoding="utf-8", errors="replace").lower()
     configured = (
-        "num_speculative_tokens=3" in log
-        or "'num_speculative_tokens': 3" in log
-        or '"num_speculative_tokens": 3' in log
+        f"num_speculative_tokens={expected_tokens}" in log
+        or f"'num_speculative_tokens': {expected_tokens}" in log
+        or f'"num_speculative_tokens": {expected_tokens}' in log
     ) and ("method='mtp'" in log or "'method': 'mtp'" in log or '"method": "mtp"' in log)
     return {
         "status": "PASS" if configured and drafted > 0 and drafts > 0 else "FAIL",
-        "configured_mtp_three_tokens": configured,
+        "configured_mtp_tokens": expected_tokens if configured else None,
         "drafts": drafts,
         "draft_tokens": drafted,
         "accepted_tokens": accepted,
         "acceptance_rate": accepted / drafted if drafted else None,
+        "committed_tokens_per_step": 1 + accepted / drafts if drafts else None,
     }
 
 
@@ -725,7 +744,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 lambda: _quantized_kernel(Path(profile.model_path), Path(owned.log_path)),
             )
             if arguments.profile_id == "P7_qwen38_w4a16_mtp":
-                _run_gate(gates, "mtp", lambda: _mtp(client, endpoint, Path(owned.log_path)))
+                expected_mtp_tokens = _mtp_tokens(profile)
+                _run_gate(
+                    gates,
+                    "mtp",
+                    lambda: _mtp(client, endpoint, Path(owned.log_path), expected_mtp_tokens),
+                )
     except Exception as exc:  # noqa: BLE001 - top-level terminal evidence
         gates["startup"] = {
             "status": "FAIL",

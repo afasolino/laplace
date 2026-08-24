@@ -41,6 +41,7 @@ from research_workspace.service_tiers import (
     ModelLane,
     ModelRoute,
     PriorityAdmissionScheduler,
+    ServiceTierError,
     TierAuditLog,
     TieredServingService,
     ValidatedPatchAgentBackend,
@@ -125,13 +126,20 @@ def test_gpu_observation_rejects_malformed_compute_rows() -> None:
         observe_gpu(runner=lambda *args, **kwargs: next(responses))
 
 
-def test_selected_main_routes_match_the_certified_p1_served_identity() -> None:
+def test_selected_main_routes_match_the_active_certified_served_identity() -> None:
     policy = _selected_lane_policy(ROOT)
-    profile: object = json.loads(
-        (ROOT / "configs/serving_profiles/P1_fp8_kv.json").read_text(
-            encoding="utf-8"
-        )
+    selected: object = json.loads(
+        (ROOT / "configs/selected_serving_profiles.json").read_text(encoding="utf-8")
     )
+    assert isinstance(selected, dict)
+    profile_id = selected["default_profile_id"]
+    assert isinstance(profile_id, str)
+    profile_root = (
+        ROOT / "configs/serving_profile_candidates"
+        if profile_id.startswith(("P6_", "P7_"))
+        else ROOT / "configs/serving_profiles"
+    )
+    profile: object = json.loads((profile_root / f"{profile_id}.json").read_text(encoding="utf-8"))
     assert isinstance(profile, dict)
     for lane in (ModelLane.QUALITY, ModelLane.STANDARD):
         route = policy.routes[lane]
@@ -205,9 +213,7 @@ def test_local_agent_schema_uses_strict_json_without_vllm_tool_parser(
                             },
                             "old_text": {
                                 "type": "string",
-                                "description": (
-                                    "Exact non-empty text currently present once."
-                                ),
+                                "description": ("Exact non-empty text currently present once."),
                             },
                             "new_text": {
                                 "type": "string",
@@ -221,9 +227,7 @@ def test_local_agent_schema_uses_strict_json_without_vllm_tool_parser(
         ),
         request_id="fixture-request",
     )
-    assert result["content"] == (
-        '{"path": "x", "old_text": "before", "new_text": "after"}'
-    )
+    assert result["content"] == ('{"path": "x", "old_text": "before", "new_text": "after"}')
     assert "tools" not in captured
     assert "tool_choice" not in captured
     assert captured["response_format"] == {
@@ -602,13 +606,15 @@ def test_economy_schema_failure_escalates_once_and_never_silently_passes(
     )
     failed_service, failed_users, _, _ = _service(tmp_path / "failed", chat=failed_backend)
     failed_users.set_user("basic-json", CapabilityTier.BASIC)
-    with pytest.raises(Exception, match="response_validation_failed"):
+    with pytest.raises(ServiceTierError, match="response_validation_failed") as caught:
         failed_service.chat(
             user_id="basic-json",
             lane=ModelLane.ECONOMY,
             domain="json",
             messages=[{"role": "user", "content": "return JSON"}],
         )
+    assert caught.value.evidence["gate_id"] == "valid_json"
+    assert caught.value.evidence["model_reported_usage"] is None
     assert len(failed_backend.calls) == 2
 
 
@@ -734,9 +740,7 @@ def test_profiles_resolve_deterministically_and_fail_closed(tmp_path: Path) -> N
             "--language-model-only",
         }
     )
-    capabilities = InstalledServingCapabilities.from_help(
-        version="0.25.0", help_text=help_text
-    )
+    capabilities = InstalledServingCapabilities.from_help(version="0.25.0", help_text=help_text)
     profiles = load_profiles(ROOT / "configs/serving_profiles")
     fixture_executable = Path.cwd().resolve() / "fixture-vllm/bin/vllm"
     first = resolve_all(
@@ -751,9 +755,7 @@ def test_profiles_resolve_deterministically_and_fail_closed(tmp_path: Path) -> N
         executable=fixture_executable,
         require_model=False,
     )
-    assert [item.resolution_sha256 for item in first] == [
-        item.resolution_sha256 for item in second
-    ]
+    assert [item.resolution_sha256 for item in first] == [item.resolution_sha256 for item in second]
     p2 = next(item for item in first if item.profile.profile_id.startswith("P2_"))
     assert "--cpu-offload-params" in p2.command
     assert "experts" in p2.command
@@ -803,9 +805,7 @@ async def test_api_enforces_basic_chat_only_and_plus_repository_binding(
         transport=httpx.ASGITransport(app=app),
         base_url="http://127.0.0.1:8765",
     ) as client:
-        basic_headers = {
-            "Authorization": "Bearer basic-token-00000000000000000000000"
-        }
+        basic_headers = {"Authorization": "Bearer basic-token-00000000000000000000000"}
         basic_session = await client.post("/api/v1/session", headers=basic_headers)
         basic_csrf = basic_session.json()["csrf_token"]
         assert basic_session.json()["capability_tier"] == "basic"
@@ -827,9 +827,7 @@ async def test_api_enforces_basic_chat_only_and_plus_repository_binding(
         )
         assert denied_agent.status_code == 403
 
-        plus_headers = {
-            "Authorization": "Bearer plus-token-000000000000000000000000"
-        }
+        plus_headers = {"Authorization": "Bearer plus-token-000000000000000000000000"}
         plus_session = await client.post("/api/v1/session", headers=plus_headers)
         plus_csrf = plus_session.json()["csrf_token"]
         created = await client.post(
@@ -870,8 +868,7 @@ async def test_api_enforces_basic_chat_only_and_plus_repository_binding(
         assert final_status.json()["status"] == "CANCELLED"
 
     audit_lines = [
-        json.loads(line)
-        for line in (tmp_path / "state/audit.jsonl").read_text().splitlines()
+        json.loads(line) for line in (tmp_path / "state/audit.jsonl").read_text().splitlines()
     ]
     denied = next(item for item in audit_lines if item.get("outcome") == "DENIED")
     assert denied["failure_category"] == "capability_denied"
@@ -1009,9 +1006,7 @@ def test_benchmark_mix_context_quality_and_concurrency_are_deterministic(
             None,
         )
 
-    measured = run_concurrent(
-        requests, profile_id="fixture", concurrency=4, probe=probe
-    )
+    measured = run_concurrent(requests, profile_id="fixture", concurrency=4, probe=probe)
     summary = summarize("fixture", measured)
     assert len(measured) == 10
     assert summary.success_count == 10
@@ -1026,9 +1021,7 @@ def test_safe_shutdown_releases_only_recorded_process_group(tmp_path: Path) -> N
     runtime = ServingProfileRuntime(tmp_path / "runtime")
     try:
         start_ticks = int(
-            Path(f"/proc/{owned_process.pid}/stat")
-            .read_text(encoding="utf-8")
-            .split()[21]
+            Path(f"/proc/{owned_process.pid}/stat").read_text(encoding="utf-8").split()[21]
         )
         record = OwnedProfileProcess(
             profile_id="P0_baseline",
@@ -1040,9 +1033,7 @@ def test_safe_shutdown_releases_only_recorded_process_group(tmp_path: Path) -> N
             log_path=str(tmp_path / "owned.log"),
             started_at_utc="2026-07-27T00:00:00+00:00",
         )
-        runtime.ownership_path.write_text(
-            json.dumps(asdict(record)), encoding="utf-8"
-        )
+        runtime.ownership_path.write_text(json.dumps(asdict(record)), encoding="utf-8")
         result = runtime.release_owned(timeout_seconds=2)
         owned_process.wait(timeout=5)
         assert result["status"] == "RELEASED_OWNED_PROFILE"
@@ -1109,9 +1100,7 @@ def test_quality_reservation_prevents_lower_lane_starvation() -> None:
     deadline = time.monotonic() + 2
     while len(entered) < 3 and time.monotonic() < deadline:
         time.sleep(0.01)
-    waiting_economy = threading.Thread(
-        target=hold, args=(ModelLane.ECONOMY, "economy-waiting")
-    )
+    waiting_economy = threading.Thread(target=hold, args=(ModelLane.ECONOMY, "economy-waiting"))
     waiting_economy.start()
     deadline = time.monotonic() + 2
     while not scheduler.snapshot()["waiting"] and time.monotonic() < deadline:

@@ -177,7 +177,7 @@ record `YIELDED_TO_SPECDEC`.
 Qwen3.8 promotion is evidence-gated. Resolve and record an immutable revision of
 the preferred published pre-quantized checkpoint, run the P6 131,072-token live
 profile and co-resident production gates, then promote only through the existing
-finalizer. P7 native MTP with three speculative tokens is optional. A failed P7
+finalizer. P7 native MTP with the measured three-token workpoint is optional. A failed P7
 leaves MTP disabled without invalidating a successful P6. Preserve Qwen3.6 as the
 configuration rollback and the CodeV Economy route as the bounded RTL specialist.
 See [QWEN38_PRODUCTION_MIGRATION.md](QWEN38_PRODUCTION_MIGRATION.md).

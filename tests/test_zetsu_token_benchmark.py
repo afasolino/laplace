@@ -5,6 +5,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -139,6 +141,39 @@ def test_codex_usage_parser_keeps_unavailable_fields_null(tmp_path: Path) -> Non
     assert usage["total_tokens"] is None
     assert usage["comparison_total_tokens"] == 45
     assert usage["comparison_total_source"] == "exact_input_plus_output"
+    assert usage["uncached_input_tokens"] == 28
+
+
+def test_inspect_codex_usage_is_compact_and_does_not_require_result_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _module()
+    path = tmp_path / "codex.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 40,
+                    "cached_input_tokens": 12,
+                    "output_tokens": 5,
+                    "reasoning_output_tokens": 2,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "sys.argv", ["benchmark_zetsu_token_efficiency.py", "--inspect-codex-usage", str(path)]
+    )
+    assert module.main() == 0
+    assert capsys.readouterr().out == (
+        '{"cached_input_tokens":12,"comparison_total_source":"exact_input_plus_output",'
+        '"comparison_total_tokens":45,"exact_model_reported":true,"input_tokens":40,'
+        '"output_tokens":5,"reasoning_tokens":2,"source":"turn.completed.usage:per_turn_sum",'
+        '"total_tokens":null,"turn_records":1,"uncached_input_tokens":28}\n'
+    )
 
 
 def test_codex_usage_parser_derives_comparison_total_from_exact_installed_schema(
@@ -206,6 +241,33 @@ def test_methodology_recomputes_frozen_repository_state_and_zetsu_use(tmp_path: 
     assert valid is True and reasons == []
 
 
+def test_production_local_route_permits_zero_zetsu_calls(tmp_path: Path) -> None:
+    module = _module()
+    repo, base = _repo(tmp_path)
+    task = {
+        "prompt": "same prompt",
+        "production_route": {"min_zetsu_calls": 0, "max_zetsu_calls": 0},
+    }
+    metadata = {
+        "task_config_sha256": "a" * 64,
+        "prompt_sha256": module._text_sha256("same prompt"),
+        "repository_state_sha256": module._repository_state_sha256(repo, base),
+        "base_revision": base,
+        "codex_model": "codex-model",
+        "codex_reasoning": "high",
+        "session_id": "production-local",
+        "worktree_path": str(repo),
+        "fresh_session": True,
+        "fresh_worktree": True,
+        "run_index": 1,
+        "zetsu_tool_calls": 0,
+    }
+    assert module._methodology_metadata(task, metadata, "a" * 64, "zetsu") == (
+        True,
+        [],
+    )
+
+
 def test_pair_methodology_requires_same_frozen_inputs_and_distinct_runs() -> None:
     module = _module()
     common = {
@@ -264,6 +326,7 @@ def test_task_config_is_exactly_three_frozen_tasks() -> None:
         "scripts/benchmark_zetsu_token_efficiency.py",
         "tests/test_zetsu_token_benchmark.py",
     ]
-    assert third["correctness"]["required_changed_paths"] == third["correctness"][
-        "allowed_changed_paths"
-    ]
+    assert (
+        third["correctness"]["required_changed_paths"]
+        == third["correctness"]["allowed_changed_paths"]
+    )

@@ -2,14 +2,20 @@
 
 ## Current state
 
-Qwen3.8 remains promotion-gated. The repository contains preparation and
-certification infrastructure, but no new live Qwen3.8, MTP, co-resident CodeV,
-Codex-credit, or remote-client gate is implied by these source changes. Until the
-mandatory certification gates execute successfully, the selected production
-configuration remains the previously certified Qwen3.6 rollback path.
+Qwen3.8 P7 is production-active for Quality and Standard with native MTP at the
+certified three-token workpoint. Economy remains on CodeV, and the previously
+certified Qwen3.6 configuration remains the immediate rollback. Promotion followed
+the mandatory P6 131,072-token profile and co-resident production gates, followed
+by independent P7 profile and co-resident gates.
 
 Machine-readable migration state is in
 `configs/model_manifests/qwen38_27b_a6000.json`.
+
+The measured 2026-08-24 production workpoint uses Qwen GPU utilization `0.77`
+and CodeV GPU utilization `0.134` with an 8,192-token CodeV context. Its
+co-resident gate recorded 45,109 MiB peak allocation and 4,031 MiB minimum free
+headroom without weakening the 2,048 MiB admission floor. The retained P7 evidence
+is under `outputs/qwen38_certification/20260824-primary-e6b4/`.
 
 ## Artifact selection and provenance
 
@@ -54,8 +60,8 @@ context, co-residency, or release checks.
 
 ## Certification and promotion
 
-P6 is the mandatory non-MTP profile. P7 adds native Qwen3.8 MTP with exactly
-three speculative tokens and is optional for promotion. Both are loopback-only.
+P6 is the mandatory non-MTP profile. P7 adds native Qwen3.8 MTP with the measured
+three-token co-resident workpoint and is optional for promotion. Both are loopback-only.
 The primary checkpoint serving recipe uses the `qwen3` reasoning parser and
 `qwen3_xml` tool-call parser; the checked-in P6/P7 candidates use the same parser
 pair and must be validated against the installed serving environment.
@@ -87,7 +93,7 @@ exercise Quality/Standard routing and co-resident CodeV RTL routing, enforce
 residual headroom, and release only owned processes.
 
 If P6 passes, Qwen3.8 may be promoted without MTP. P7 is run independently with
-its MTP configuration and three speculative tokens. A failed or unavailable P7
+its measured MTP configuration. A failed or unavailable P7
 must leave MTP disabled while preserving a valid P6 promotion.
 
 Promotion remains fail-closed through `scripts/finalize_qwen38_certification.py`:
@@ -105,7 +111,7 @@ self-report.
 
 ## Routing and Zetsu
 
-After successful P6 promotion:
+After successful Qwen3.8 promotion:
 
 - Quality → Qwen3.8;
 - Standard → Qwen3.8;

@@ -6,6 +6,7 @@ semantic aids only; exact resumable state is checkpointed independently.
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import os
@@ -19,9 +20,14 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping, Sequence, cast
+from typing import BinaryIO, Mapping, Sequence, cast
 
-from .agent_sandbox import AgentSandboxError, AgentSandboxManager, AgentSessionBinding, AgentToolPolicy
+from .agent_sandbox import (
+    AgentSandboxError,
+    AgentSandboxManager,
+    AgentSessionBinding,
+    AgentToolPolicy,
+)
 from .personal_corpus import CorpusError, PersonalCorpusStore
 from .repository_authorization import RepositoryAuthorizationError, validate_workspace_path
 from .service_tiers import ModelLane, ServiceTierError, TieredServingService
@@ -342,7 +348,9 @@ class ZetsuAgentCoordinator:
             raise ServiceTierError(f"zetsu_agent_{exc.category}", exc.evidence) from exc
 
     @staticmethod
-    def _run_git(worktree: Path, argv: Sequence[str], *, timeout: float = 30.0) -> subprocess.CompletedProcess[str]:
+    def _run_git(
+        worktree: Path, argv: Sequence[str], *, timeout: float = 30.0
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", "-C", str(worktree), *argv],
             capture_output=True,
@@ -375,6 +383,66 @@ class ZetsuAgentCoordinator:
             unique_changed[:_MAX_CHANGED_PATHS],
         )
 
+    def _handoff_patch(
+        self,
+        worktree: Path,
+        session_id: str,
+        changed_paths: Sequence[str],
+        *,
+        max_chars: int,
+    ) -> JsonObject:
+        """Capture exact verified code separately from disposable agent narration."""
+
+        tracked = self._run_git(
+            worktree,
+            ["diff", "--no-ext-diff", "--binary", "HEAD", "--"],
+        )
+        if tracked.returncode != 0:
+            raise ServiceTierError("zetsu_agent_handoff_patch_unavailable")
+        patch = tracked.stdout
+        for relative in changed_paths:
+            listed = self._run_git(
+                worktree,
+                ["ls-files", "--error-unmatch", "--", relative],
+            )
+            if listed.returncode == 0:
+                continue
+            target = self._relative_target(worktree, relative)
+            if not target.is_file() or target.stat().st_size > _MAX_NEW_FILE_CHARS:
+                raise ServiceTierError("zetsu_agent_handoff_new_file_unavailable")
+            try:
+                content = target.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise ServiceTierError("zetsu_agent_handoff_new_file_not_text") from exc
+            patch += f"diff --git a/{relative} b/{relative}\nnew file mode 100644\n"
+            patch += "".join(
+                difflib.unified_diff(
+                    (),
+                    content.splitlines(keepends=True),
+                    fromfile="/dev/null",
+                    tofile=f"b/{relative}",
+                )
+            )
+        digest = hashlib.sha256(patch.encode("utf-8")).hexdigest()
+        artifact = self.checkpoints.path(session_id).with_suffix(".patch")
+        temporary = artifact.with_name(f".{artifact.name}.{uuid.uuid4().hex}.tmp")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(patch)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, artifact)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return {
+            "patch": patch if len(patch) <= max_chars else None,
+            "patch_inline": len(patch) <= max_chars,
+            "patch_chars": len(patch),
+            "patch_sha256": digest,
+            "patch_path": str(artifact),
+        }
+
     @staticmethod
     def _check_text(value: str, *, maximum: int) -> None:
         if len(value) > maximum or "\x00" in value:
@@ -389,7 +457,12 @@ class ZetsuAgentCoordinator:
         pattern = action.get("glob", "*")
         if not isinstance(query, str) or not query or len(query) > 4_000:
             raise ServiceTierError("zetsu_agent_search_invalid")
-        if not isinstance(pattern, str) or not pattern or len(pattern) > 200 or ".." in Path(pattern).parts:
+        if (
+            not isinstance(pattern, str)
+            or not pattern
+            or len(pattern) > 200
+            or ".." in Path(pattern).parts
+        ):
             raise ServiceTierError("zetsu_agent_glob_invalid")
         matches: list[str] = []
         for path_index, path in enumerate(worktree.rglob(pattern)):
@@ -424,7 +497,9 @@ class ZetsuAgentCoordinator:
             raise ServiceTierError("zetsu_agent_read_target_not_text") from exc
         return text[:_MAX_READ_CHARS]
 
-    def _retrieve(self, ctx: AgentRunContext, state: AgentExecutionState, action: Mapping[str, object]) -> str:
+    def _retrieve(
+        self, ctx: AgentRunContext, state: AgentExecutionState, action: Mapping[str, object]
+    ) -> str:
         if self.corpus is None:
             raise ServiceTierError("zetsu_agent_retrieval_unavailable")
         self._ensure_active(ctx, state)
@@ -469,7 +544,9 @@ class ZetsuAgentCoordinator:
         check = self._run_git(ctx.worktree, ["diff", "--check"])
         if check.returncode != 0:
             target.write_text(original, encoding="utf-8")
-            raise ServiceTierError("zetsu_agent_edit_diff_check_failed", {"stderr": check.stderr[-2_000:]})
+            raise ServiceTierError(
+                "zetsu_agent_edit_diff_check_failed", {"stderr": check.stderr[-2_000:]}
+            )
         return f"EDITED:{target.relative_to(ctx.worktree).as_posix()}"
 
     def _create(self, ctx: AgentRunContext, action: Mapping[str, object]) -> str:
@@ -493,10 +570,7 @@ class ZetsuAgentCoordinator:
         if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or not value:
             raise ServiceTierError("zetsu_agent_verify_argv_invalid")
         argv = [str(item) for item in value]
-        if (
-            len(argv) > 64
-            or any(not item or len(item) > 1_000 or "\x00" in item for item in argv)
-        ):
+        if len(argv) > 64 or any(not item or len(item) > 1_000 or "\x00" in item for item in argv):
             raise ServiceTierError("zetsu_agent_verify_argv_invalid")
         executable = Path(argv[0]).name
         if (
@@ -601,14 +675,11 @@ class ZetsuAgentCoordinator:
         return hashlib.sha256(encoded).hexdigest()[:16]
 
     @staticmethod
-    def _remove_resolved_verification_failures(
-        state: AgentExecutionState, command_id: str
-    ) -> None:
+    def _remove_resolved_verification_failures(state: AgentExecutionState, command_id: str) -> None:
         marker = f":cmd={command_id}:"
         state.unresolved_failures = [
             item for item in state.unresolved_failures if marker not in item
         ]
-
 
     def _remaining_wall(self, ctx: AgentRunContext, state: AgentExecutionState) -> float:
         elapsed_this_run = time.monotonic() - ctx.run_started
@@ -659,14 +730,13 @@ class ZetsuAgentCoordinator:
             pass
 
     @staticmethod
-    def _read_file_tail(handle: object, *, limit: int = _MAX_VERIFY_CAPTURE_BYTES) -> str:
-        file_handle = cast(object, handle)
+    def _read_file_tail(file_handle: BinaryIO, *, limit: int = _MAX_VERIFY_CAPTURE_BYTES) -> str:
         # TemporaryFile is seekable. Read only a bounded suffix to avoid loading noisy
         # verification output into coordinator memory.
-        file_handle.seek(0, os.SEEK_END)  # type: ignore[attr-defined]
-        size = file_handle.tell()  # type: ignore[attr-defined]
-        file_handle.seek(max(0, size - limit), os.SEEK_SET)  # type: ignore[attr-defined]
-        raw = file_handle.read()  # type: ignore[attr-defined]
+        file_handle.seek(0, os.SEEK_END)
+        size = file_handle.tell()
+        file_handle.seek(max(0, size - limit), os.SEEK_SET)
+        raw = file_handle.read()
         if not isinstance(raw, bytes):
             return str(raw)[-limit:]
         return raw.decode("utf-8", errors="replace")
@@ -680,9 +750,7 @@ class ZetsuAgentCoordinator:
         env = AgentSandboxManager.fixed_environment(ctx.binding)
         executable = shutil.which(argv[0], path=env.get("PATH"))
         if executable is None:
-            raise ServiceTierError(
-                "zetsu_agent_verify_executable_missing", {"executable": argv[0]}
-            )
+            raise ServiceTierError("zetsu_agent_verify_executable_missing", {"executable": argv[0]})
         timeout = min(600.0, self._remaining_wall(ctx, state))
         deadline = time.monotonic() + timeout
         before_head, before_status, before_changed = self._worktree_state(ctx.worktree)
@@ -690,9 +758,10 @@ class ZetsuAgentCoordinator:
         stdout = ""
         stderr = ""
         aborted_category: str | None = None
-        with tempfile.TemporaryFile(mode="w+b") as stdout_file, tempfile.TemporaryFile(
-            mode="w+b"
-        ) as stderr_file:
+        with (
+            tempfile.TemporaryFile(mode="w+b") as stdout_file,
+            tempfile.TemporaryFile(mode="w+b") as stderr_file,
+        ):
             process = subprocess.Popen(  # nosec B603
                 [executable, *argv[1:]],
                 cwd=ctx.worktree,
@@ -737,7 +806,10 @@ class ZetsuAgentCoordinator:
             if aborted_category is None:
                 aborted_category = "zetsu_agent_verification_mutated_worktree"
 
-        qualifies = self._verification_qualifies(argv, ctx.required_verification_argv) and not verification_mutated_worktree
+        qualifies = (
+            self._verification_qualifies(argv, ctx.required_verification_argv)
+            and not verification_mutated_worktree
+        )
         passed = aborted_category is None and returncode == 0 and not verification_mutated_worktree
         record: JsonObject = {
             "argv": argv,
@@ -777,7 +849,6 @@ class ZetsuAgentCoordinator:
         if aborted_category is not None:
             raise ServiceTierError(aborted_category, {"verification": record})
         return record
-
 
     @staticmethod
     def _state_digest(state: AgentExecutionState) -> str:
@@ -820,10 +891,17 @@ class ZetsuAgentCoordinator:
         prompt = (
             f"OBJECTIVE:\n{state.objective}\n\nEXACT STATE (authoritative):\n{self._state_digest(state)}\n\n"
             f"SEMANTIC SUMMARY:\n{state.summary or 'NONE'}\n\nRECENT OBSERVATIONS:\n"
-            + ("\n\n".join(state.recent_observations[-_MAX_RECENT_OBSERVATIONS:]) if state.recent_observations else "NONE")
+            + (
+                "\n\n".join(state.recent_observations[-_MAX_RECENT_OBSERVATIONS:])
+                if state.recent_observations
+                else "NONE"
+            )
             + "\n\nChoose the next action."
         )
-        return ({"role": "system", "content": self._system_prompt()}, {"role": "user", "content": prompt})
+        return (
+            {"role": "system", "content": self._system_prompt()},
+            {"role": "user", "content": prompt},
+        )
 
     @staticmethod
     def _approximate_active_tokens(messages: Sequence[Mapping[str, str]]) -> int:
@@ -937,7 +1015,10 @@ class ZetsuAgentCoordinator:
             raise ServiceTierError("zetsu_agent_checkpoint_schema_unsupported")
         if raw.get("user_id_sha256") != self._owner_hash(ctx.user_id):
             raise ServiceTierError("zetsu_agent_checkpoint_owner_mismatch")
-        if raw.get("repo_id") != ctx.repo_id or raw.get("base_revision") != ctx.binding.base_revision:
+        if (
+            raw.get("repo_id") != ctx.repo_id
+            or raw.get("base_revision") != ctx.binding.base_revision
+        ):
             raise ServiceTierError("zetsu_agent_checkpoint_repository_mismatch")
         if raw.get("objective") != instruction:
             raise ServiceTierError("zetsu_agent_resume_objective_mismatch")
@@ -999,9 +1080,7 @@ class ZetsuAgentCoordinator:
                 not isinstance(value, list)
                 or len(value) > maximum_items
                 or any(
-                    not isinstance(item, str)
-                    or len(item) > maximum_chars
-                    or "\x00" in item
+                    not isinstance(item, str) or len(item) > maximum_chars or "\x00" in item
                     for item in value
                 )
             ):
@@ -1028,14 +1107,10 @@ class ZetsuAgentCoordinator:
             maximum_items=_MAX_CHANGED_PATHS,
             maximum_chars=500,
         )
-        unresolved_failures = strings(
-            "unresolved_failures", maximum_items=16, maximum_chars=2_000
-        )
+        unresolved_failures = strings("unresolved_failures", maximum_items=16, maximum_chars=2_000)
         evidence_refs = strings("evidence_refs", maximum_items=64, maximum_chars=2_000)
         worktree_head = string("worktree_head", maximum=128, allow_empty=False)
-        worktree_status_sha256 = string(
-            "worktree_status_sha256", maximum=64, allow_empty=False
-        )
+        worktree_status_sha256 = string("worktree_status_sha256", maximum=64, allow_empty=False)
         if len(worktree_status_sha256) != 64 or any(
             ch not in "0123456789abcdef" for ch in worktree_status_sha256
         ):
@@ -1111,6 +1186,26 @@ class ZetsuAgentCoordinator:
         if state.unresolved_failures:
             return False
         return state.mutation_epoch == 0 or state.last_verified_epoch == state.mutation_epoch
+
+    @staticmethod
+    def _record_recoverable_model_failure(
+        state: AgentExecutionState, step: int, exc: ServiceTierError
+    ) -> bool:
+        if exc.category != "response_validation_failed":
+            return False
+        usage = exc.evidence.get("model_reported_usage")
+        state.telemetry.add_usage(
+            {"response": {"usage": dict(usage) if isinstance(usage, Mapping) else None}}
+        )
+        state.telemetry.agent_steps += 1
+        gate = exc.evidence.get("gate_id")
+        reason = exc.evidence.get("reason")
+        state.recent_observations.append(
+            f"STEP {step} MODEL_RESPONSE_REJECTED gate={gate} reason={reason}; return one valid JSON action"
+        )
+        state.recent_observations = state.recent_observations[-_MAX_RECENT_OBSERVATIONS:]
+        state.next_state = "retry_valid_json_action"
+        return True
 
     def _record_failure_best_effort(
         self, ctx: AgentRunContext, state: AgentExecutionState, category: str
@@ -1230,8 +1325,9 @@ class ZetsuAgentCoordinator:
         prior_consumed = 0.0
         if not creating:
             raw = self.checkpoints.read(effective_session)
-            if isinstance(raw, Mapping) and isinstance(raw.get("consumed_wall_seconds"), (int, float)):
-                prior_consumed = float(raw["consumed_wall_seconds"])
+            consumed = raw.get("consumed_wall_seconds") if isinstance(raw, Mapping) else None
+            if isinstance(consumed, (int, float)):
+                prior_consumed = float(consumed)
                 if not 0.0 <= prior_consumed <= binding.tool_policy.max_wall_seconds:
                     raise ServiceTierError("zetsu_agent_checkpoint_wall_budget_invalid")
         remaining_wall = binding.tool_policy.max_wall_seconds - prior_consumed
@@ -1299,13 +1395,19 @@ class ZetsuAgentCoordinator:
                     self._checkpoint(ctx, state)
                     messages = self._messages(state)
                 self._ensure_active(ctx, state)
-                result = self.tiered.chat(
-                    user_id=user_id,
-                    lane=lane,
-                    domain="json",
-                    session_id=effective_session,
-                    messages=messages,
-                )
+                try:
+                    result = self.tiered.chat(
+                        user_id=user_id,
+                        lane=lane,
+                        domain="json",
+                        session_id=effective_session,
+                        messages=messages,
+                    )
+                except ServiceTierError as exc:
+                    if self._record_recoverable_model_failure(state, step, exc):
+                        self._checkpoint(ctx, state)
+                        continue
+                    raise
                 state.telemetry.add_usage(result)
                 state.telemetry.agent_steps += 1
                 self._ensure_active(ctx, state)
@@ -1318,7 +1420,9 @@ class ZetsuAgentCoordinator:
                         raise ServiceTierError("zetsu_agent_finish_invalid")
                     if not self._finish_allowed(state):
                         observation = "FINISH_REJECTED: deterministic verification required after latest mutation"
-                        state.recent_observations.append(f"STEP {step} ACTION finish\n{observation}")
+                        state.recent_observations.append(
+                            f"STEP {step} ACTION finish\n{observation}"
+                        )
                         state.next_state = "verify_latest_mutation"
                         self._checkpoint(ctx, state)
                         continue
@@ -1419,6 +1523,12 @@ class ZetsuAgentCoordinator:
         truncated = len(final_result) > max_chars
         if truncated:
             final_result = final_result[: max_chars - 1].rstrip() + "…"
+        handoff = self._handoff_patch(
+            worktree,
+            effective_session,
+            changed,
+            max_chars=max_chars,
+        )
         return {
             "status": status,
             "session_id": effective_session,
@@ -1432,6 +1542,7 @@ class ZetsuAgentCoordinator:
             "unresolved_failures": state.unresolved_failures,
             "evidence_refs": state.evidence_refs,
             "checkpoint_path": str(self.checkpoints.path(effective_session)),
+            "handoff": handoff,
             "truncated": truncated,
             "max_chars": max_chars,
             "elapsed_seconds": round(time.monotonic() - run_started, 3),

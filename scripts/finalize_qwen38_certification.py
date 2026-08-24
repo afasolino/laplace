@@ -7,11 +7,12 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess  # nosec B404 - fixed local Git command
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from research_workspace.production_model import select, verify_qwen38_artifact
 
@@ -164,6 +165,78 @@ def _evidence_record(path: Path) -> dict[str, object]:
     return {"path": str(path.resolve()), "sha256": _sha256(path.resolve())}
 
 
+def _already_promoted_p6_revision(
+    root: Path,
+    artifact: Mapping[str, object],
+    *,
+    p6_certification: Path,
+    p6_production_gate: Path,
+    p7_certification: Path,
+    p7_production_gate: Path,
+    repository_revision: str,
+) -> str | None:
+    """Return the prior P6 revision only when persisted state proves promotion."""
+
+    selected = _load(
+        root / "configs/selected_serving_profiles.json",
+        "selected_serving_profiles_malformed",
+    )
+    selected_profile = selected.get("default_profile_id")
+    if (
+        selected_profile not in {P6, P7}
+        or selected.get("high_context_profile_id") != selected_profile
+        or artifact.get("certification_status") != "PASSED"
+        or artifact.get("promotion_allowed") is not True
+    ):
+        return None
+    p6_cert_raw = _load(p6_certification, "profile_certification_malformed")
+    p6_prod_raw = _load(p6_production_gate, "production_gate_malformed")
+    p6_revision = p6_cert_raw.get("repository_revision")
+    if (
+        not isinstance(p6_revision, str)
+        or not re.fullmatch(r"[a-f0-9]{40}", p6_revision)
+        or p6_prod_raw.get("repository_revision") != p6_revision
+    ):
+        return None
+    recorded = artifact.get("certification_evidence")
+    p6_recorded = recorded.get("P6") if isinstance(recorded, Mapping) else None
+    if not isinstance(p6_recorded, Mapping):
+        return None
+    expected = {
+        "profile_certification": _evidence_record(p6_certification),
+        "production_gate": _evidence_record(p6_production_gate),
+    }
+    if p6_recorded != expected:
+        return None
+
+    certified_revision = artifact.get("certified_repository_revision")
+    if certified_revision not in {p6_revision, repository_revision}:
+        return None
+    p6_selection = (
+        f"{expected['production_gate']['path']}#sha256={expected['production_gate']['sha256']}"
+    )
+    if certified_revision == p6_revision:
+        return p6_revision if selected.get("selection_evidence") == p6_selection else None
+
+    p7_recorded = recorded.get("P7") if isinstance(recorded, Mapping) else None
+    p7_expected = {
+        "profile_certification": _evidence_record(p7_certification),
+        "production_gate": _evidence_record(p7_production_gate),
+    }
+    if p7_recorded != p7_expected:
+        return None
+    if selected_profile == P7:
+        p7_selection = (
+            f"{p7_expected['production_gate']['path']}"
+            f"#sha256={p7_expected['production_gate']['sha256']}"
+        )
+        if selected.get("selection_evidence") != p7_selection:
+            return None
+    elif selected.get("selection_evidence") != p6_selection:
+        return None
+    return p6_revision
+
+
 def evaluate_evidence(
     root: Path,
     *,
@@ -180,12 +253,29 @@ def evaluate_evidence(
     p6_profile_sha = _profile_sha256(root, P6)
     p6_cert_path = p6_certification.resolve(strict=True)
     p6_prod_path = p6_production_gate.resolve(strict=True)
+    p6_cert_raw = _load(p6_cert_path, "profile_certification_malformed")
+    p6_revision = repository_revision
+    if p6_cert_raw.get("repository_revision") != repository_revision:
+        if p7_certification is None or p7_production_gate is None:
+            raise RuntimeError("prior_p6_evidence_requires_current_p7_upgrade")
+        promoted_revision = _already_promoted_p6_revision(
+            root,
+            artifact,
+            p6_certification=p6_cert_path,
+            p6_production_gate=p6_prod_path,
+            p7_certification=p7_certification.resolve(strict=True),
+            p7_production_gate=p7_production_gate.resolve(strict=True),
+            repository_revision=repository_revision,
+        )
+        if promoted_revision != p6_cert_raw.get("repository_revision"):
+            raise RuntimeError("prior_p6_promotion_identity_mismatch")
+        p6_revision = promoted_revision
     p6_cert_passed, _ = _profile_evidence_state(
         p6_cert_path,
         profile_id=P6,
         profile_sha256=p6_profile_sha,
         artifact_sha256=artifact_sha256,
-        repository_revision=repository_revision,
+        repository_revision=p6_revision,
     )
     if not p6_cert_passed:
         raise RuntimeError("mandatory_p6_profile_certification_failed")
@@ -194,7 +284,7 @@ def evaluate_evidence(
         profile_id=P6,
         profile_sha256=p6_profile_sha,
         artifact_sha256=artifact_sha256,
-        repository_revision=repository_revision,
+        repository_revision=p6_revision,
         profile_certification_sha256=_sha256(p6_cert_path),
     )
     if not p6_prod_passed:
@@ -235,6 +325,7 @@ def evaluate_evidence(
         "selected_profile_id": P7 if mtp_enabled else P6,
         "mtp_enabled": mtp_enabled,
         "mtp_runtime_status": mtp_status,
+        "p6_evidence_repository_revision": p6_revision,
         "evidence": {
             "P6": {
                 "profile_certification": _evidence_record(p6_cert_path),
@@ -294,6 +385,8 @@ def _promoted_manifest(
         raise RuntimeError("qwen38_mtp_manifest_invalid")
     mtp["runtime_status"] = decision["mtp_runtime_status"]
     mtp["status"] = "PASSED" if mtp_enabled else "NOT_CERTIFIED"
+    if mtp_enabled:
+        mtp["asset_status"] = "PRESENT_CERTIFIED"
     return updated
 
 

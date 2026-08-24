@@ -79,5 +79,5 @@ value.
 The Qwen3.8 migration target is 131,072 tokens. Published pre-quantized
 checkpoints are resolved to immutable revisions before preparation. Quality and
 Standard are switched to Qwen3.8 only after mandatory P6 certification; Economy
-remains the CodeV RTL route. P7 MTP uses exactly three speculative tokens when its
+remains the CodeV RTL route. P7 MTP uses the certified three-token workpoint when its
 independent certification passes. Qwen3.6 remains the rollback selector.

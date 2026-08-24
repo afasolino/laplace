@@ -426,7 +426,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
         results["quality_owned_pid"] = owned.pid
     except Exception as exc:  # noqa: BLE001 - terminal production evidence
-        results["failure"] = {"type": type(exc).__name__, "error": str(exc)[:2_000]}
+        results["failure"] = {
+            "type": type(exc).__name__,
+            "error": str(exc)[:2_000],
+            "category": getattr(exc, "category", None),
+            "evidence": getattr(exc, "evidence", None),
+        }
     finally:
         if runtime.ownership_path.exists():
             try:

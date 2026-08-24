@@ -136,10 +136,10 @@
         "environment_path": "/home/giando/work/laplace/.venv-vllm",
         "executable": "/home/giando/work/laplace/.venv-vllm/bin/vllm",
         "endpoint": "http://127.0.0.1:8103",
-        "context_tokens": 16384,
+        "context_tokens": 8192,
         "max_output_tokens": 4096,
         "kernel": "compressed_tensors_marlin_runtime_validation_required",
-        "gpu_memory_utilization": 0.145,
+        "gpu_memory_utilization": 0.134,
         "max_num_seqs": 1,
         "extra_args": ["--enforce-eager"]
       },

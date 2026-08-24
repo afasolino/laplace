@@ -21,7 +21,7 @@
   "offload_prefetch_step": 1,
   "kv_offloading_size": null,
   "kv_offloading_backend": "native",
-  "gpu_memory_utilization": 0.795,
+  "gpu_memory_utilization": 0.77,
   "startup_timeout": 1200,
   "request_timeout": 300,
   "extra_args": [

@@ -49,6 +49,13 @@ def _parser() -> argparse.ArgumentParser:
         metavar="WORKTREE",
         help="Print the deterministic HEAD+tree digest used by benchmark run metadata.",
     )
+    parser.add_argument(
+        "--inspect-codex-usage",
+        type=Path,
+        default=None,
+        metavar="JSONL",
+        help="Print one compact normalized usage object for a Codex JSONL stream.",
+    )
     return parser
 
 
@@ -87,6 +94,19 @@ def _normalized_usage(value: object) -> dict[str, int | None]:
     return result
 
 
+def _with_uncached_input(value: dict[str, object]) -> dict[str, object]:
+    input_tokens = value.get("input_tokens")
+    cached_tokens = value.get("cached_input_tokens")
+    value["uncached_input_tokens"] = (
+        input_tokens - cached_tokens
+        if isinstance(input_tokens, int)
+        and isinstance(cached_tokens, int)
+        and input_tokens >= cached_tokens
+        else None
+    )
+    return value
+
+
 def _usage_from_codex_jsonl(path: Path) -> dict[str, object]:
     """Parse Codex usage without recursively summing cumulative events."""
 
@@ -116,14 +136,18 @@ def _usage_from_codex_jsonl(path: Path) -> dict[str, object]:
             if isinstance(input_tokens, int) and isinstance(output_tokens, int):
                 comparison_total = input_tokens + output_tokens
                 comparison_source = "exact_input_plus_output"
-        return {
-            **normalized_total,
-            "comparison_total_tokens": comparison_total,
-            "comparison_total_source": comparison_source if comparison_total is not None else None,
-            "source": "event_msg.token_count.info.total_token_usage:last",
-            "exact_model_reported": True,
-            "turn_records": len(turn_usages),
-        }
+        return _with_uncached_input(
+            {
+                **normalized_total,
+                "comparison_total_tokens": comparison_total,
+                "comparison_total_source": comparison_source
+                if comparison_total is not None
+                else None,
+                "source": "event_msg.token_count.info.total_token_usage:last",
+                "exact_model_reported": True,
+                "turn_records": len(turn_usages),
+            }
+        )
 
     if turn_usages:
         normalized_turns = [_normalized_usage(item) for item in turn_usages]
@@ -149,23 +173,52 @@ def _usage_from_codex_jsonl(path: Path) -> dict[str, object]:
             if isinstance(input_tokens, int) and isinstance(output_tokens, int):
                 comparison_total = input_tokens + output_tokens
                 comparison_source = "exact_input_plus_output"
-        return {
-            **summed,
-            "comparison_total_tokens": comparison_total,
-            "comparison_total_source": comparison_source if comparison_total is not None else None,
-            "source": "turn.completed.usage:per_turn_sum",
-            "exact_model_reported": True,
-            "turn_records": len(turn_usages),
-        }
+        return _with_uncached_input(
+            {
+                **summed,
+                "comparison_total_tokens": comparison_total,
+                "comparison_total_source": comparison_source
+                if comparison_total is not None
+                else None,
+                "source": "turn.completed.usage:per_turn_sum",
+                "exact_model_reported": True,
+                "turn_records": len(turn_usages),
+            }
+        )
 
-    return {
-        **_normalized_usage(None),
-        "comparison_total_tokens": None,
-        "comparison_total_source": None,
-        "source": None,
-        "exact_model_reported": False,
-        "turn_records": 0,
-    }
+    return _with_uncached_input(
+        {
+            **_normalized_usage(None),
+            "comparison_total_tokens": None,
+            "comparison_total_source": None,
+            "source": None,
+            "exact_model_reported": False,
+            "turn_records": 0,
+        }
+    )
+
+
+def _mcp_calls_from_codex_jsonl(path: Path) -> list[dict[str, object]]:
+    calls: list[dict[str, object]] = []
+    for root in _objects_from_jsonl(path):
+        if root.get("type") != "item.completed":
+            continue
+        item = root.get("item")
+        if not isinstance(item, Mapping) or item.get("type") != "mcp_tool_call":
+            continue
+        result = item.get("result")
+        result_bytes = len(
+            json.dumps(result, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+        )
+        calls.append(
+            {
+                "server": item.get("server"),
+                "tool": item.get("tool"),
+                "status": item.get("status"),
+                "result_utf8_bytes": result_bytes,
+            }
+        )
+    return calls
 
 
 def _sha256(path: Path) -> str:
@@ -238,7 +291,9 @@ def _safe_worktree(metadata: Mapping[str, object]) -> Path | None:
     return path if path.is_dir() and (path / ".git").exists() else None
 
 
-def _check_read_only(folder: Path, task: Mapping[str, object], metadata: Mapping[str, object]) -> tuple[str, str]:
+def _check_read_only(
+    folder: Path, task: Mapping[str, object], metadata: Mapping[str, object]
+) -> tuple[str, str]:
     correctness = task.get("correctness")
     if not isinstance(correctness, Mapping):
         return "FAIL", "missing_correctness_spec"
@@ -287,7 +342,11 @@ def _check_commands(task: Mapping[str, object], metadata: Mapping[str, object]) 
         return "FAIL", "implementation_path_spec_missing"
     allowed = {item for item in allowed_raw if isinstance(item, str) and item}
     required = {item for item in required_raw if isinstance(item, str) and item}
-    if len(allowed) != len(allowed_raw) or len(required) != len(required_raw) or not required <= allowed:
+    if (
+        len(allowed) != len(allowed_raw)
+        or len(required) != len(required_raw)
+        or not required <= allowed
+    ):
         return "FAIL", "implementation_path_spec_invalid"
     changed = _changed_paths(worktree)
     if changed is None:
@@ -325,7 +384,9 @@ def _check_commands(task: Mapping[str, object], metadata: Mapping[str, object]) 
     return "PASS", "frozen_commands_and_change_scope_passed"
 
 
-def _deterministic_correctness(folder: Path, task: Mapping[str, object], metadata: Mapping[str, object]) -> tuple[str, str]:
+def _deterministic_correctness(
+    folder: Path, task: Mapping[str, object], metadata: Mapping[str, object]
+) -> tuple[str, str]:
     kind = task.get("kind")
     if kind == "read_only":
         return _check_read_only(folder, task, metadata)
@@ -377,8 +438,16 @@ def _methodology_metadata(
         reasons.append("missing_zetsu_tool_calls")
     elif condition == "baseline" and calls != 0:
         reasons.append("baseline_used_zetsu")
-    elif condition == "zetsu" and calls < 1:
-        reasons.append("zetsu_condition_did_not_use_zetsu")
+    elif condition == "zetsu":
+        route = task.get("production_route")
+        minimum = route.get("min_zetsu_calls", 1) if isinstance(route, Mapping) else 1
+        maximum = route.get("max_zetsu_calls") if isinstance(route, Mapping) else None
+        if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum < 0:
+            reasons.append("invalid_min_zetsu_calls")
+        elif calls < minimum:
+            reasons.append("zetsu_condition_below_route_call_minimum")
+        if isinstance(maximum, int) and not isinstance(maximum, bool) and calls > maximum:
+            reasons.append("zetsu_condition_above_route_call_maximum")
     if metadata.get("fresh_session") is not True:
         reasons.append("fresh_session_not_attested")
     if metadata.get("fresh_worktree") is not True:
@@ -419,12 +488,15 @@ def _run_record(
     task_id = str(task["id"])
     folder = root / task_id / condition
     metadata = _metadata(folder)
+    jsonl_path = folder / "codex.jsonl"
     usage = (
         _usage_from_codex_jsonl(folder / "codex.jsonl")
         if (folder / "codex.jsonl").is_file()
         else _usage_from_codex_jsonl_empty()
     )
-    methodology_valid, methodology_reasons = _methodology_metadata(task, metadata, config_sha, condition)
+    methodology_valid, methodology_reasons = _methodology_metadata(
+        task, metadata, config_sha, condition
+    )
     correctness, reason = (
         _deterministic_correctness(folder, task, metadata)
         if methodology_valid
@@ -459,27 +531,31 @@ def _run_record(
         "zetsu_evidence_context_tokens_approx": metadata.get(
             "zetsu_evidence_context_tokens_approx"
         ),
-        "zetsu_evidence_context_token_method": metadata.get(
-            "zetsu_evidence_context_token_method"
-        ),
+        "zetsu_evidence_context_token_method": metadata.get("zetsu_evidence_context_token_method"),
         "local_qwen_input_tokens": metadata.get("local_qwen_input_tokens"),
         "local_qwen_output_tokens": metadata.get("local_qwen_output_tokens"),
         "local_qwen_usage_exact": metadata.get("local_qwen_usage_exact"),
         "local_qwen_calls": metadata.get("local_qwen_calls"),
         "elapsed_seconds": metadata.get("elapsed_seconds"),
         "zetsu_tool_calls": metadata.get("zetsu_tool_calls"),
+        "actual_production_route": metadata.get("actual_production_route"),
+        "mcp_calls": _mcp_calls_from_codex_jsonl(jsonl_path) if jsonl_path.is_file() else [],
+        "active_mcp_schema_utf8_bytes": metadata.get("active_mcp_schema_utf8_bytes"),
+        "actual_codex_credits": metadata.get("actual_codex_credits"),
     }
 
 
 def _usage_from_codex_jsonl_empty() -> dict[str, object]:
-    return {
-        **_normalized_usage(None),
-        "comparison_total_tokens": None,
-        "comparison_total_source": None,
-        "source": None,
-        "exact_model_reported": False,
-        "turn_records": 0,
-    }
+    return _with_uncached_input(
+        {
+            **_normalized_usage(None),
+            "comparison_total_tokens": None,
+            "comparison_total_source": None,
+            "source": None,
+            "exact_model_reported": False,
+            "turn_records": 0,
+        }
+    )
 
 
 def _primary_tokens(record: Mapping[str, object]) -> int | None:
@@ -494,6 +570,15 @@ def _primary_tokens(record: Mapping[str, object]) -> int | None:
 
 def main() -> int:
     args = _parser().parse_args()
+    if args.inspect_codex_usage is not None:
+        print(
+            json.dumps(
+                _usage_from_codex_jsonl(args.inspect_codex_usage.resolve()),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return 0
     config_path = args.task_config.resolve()
     config = _load_tasks(config_path)
     task_ids = _task_ids(config)
@@ -540,18 +625,20 @@ def main() -> int:
             baseline_sum += baseline_tokens
             zetsu_sum += zetsu_tokens
             valid_count += 1
-        pairs.append({
-            "task": task_id,
-            "baseline": baseline,
-            "zetsu": zetsu,
-            "baseline_codex_tokens": baseline_tokens,
-            "zetsu_codex_tokens": zetsu_tokens,
-            "saving": saving,
-            "pass_pair": pass_pair,
-            "pair_methodology_valid": pair_methodology_valid,
-            "pair_methodology_reasons": pair_methodology_reasons,
-            "included_in_aggregate": saving is not None,
-        })
+        pairs.append(
+            {
+                "task": task_id,
+                "baseline": baseline,
+                "zetsu": zetsu,
+                "baseline_codex_tokens": baseline_tokens,
+                "zetsu_codex_tokens": zetsu_tokens,
+                "saving": saving,
+                "pass_pair": pass_pair,
+                "pair_methodology_valid": pair_methodology_valid,
+                "pair_methodology_reasons": pair_methodology_reasons,
+                "included_in_aggregate": saving is not None,
+            }
+        )
     aggregate = 1.0 - (zetsu_sum / baseline_sum) if valid_count and baseline_sum > 0 else None
     report = {
         "schema_version": 3,

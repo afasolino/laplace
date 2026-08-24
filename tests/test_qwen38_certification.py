@@ -30,6 +30,31 @@ vllm:spec_decode_num_drafts_total{model_name="a",engine="0"} 7
     assert script._metric_sum(metrics, "vllm:spec_decode_num_drafts") == 7
 
 
+def test_mtp_sweep_committed_tokens_are_target_plus_accepted_drafts() -> None:
+    script = _script("benchmark_qwen38_mtp_sweep")
+    before = {"drafts": 2.0, "draft_tokens": 6.0, "accepted_tokens": 5.0}
+    after = {"drafts": 12.0, "draft_tokens": 36.0, "accepted_tokens": 30.0}
+    delta = script._counter_delta(after, before)
+    assert delta == {"drafts": 10.0, "draft_tokens": 30.0, "accepted_tokens": 25.0}
+    assert 1 + delta["accepted_tokens"] / delta["drafts"] == 3.5
+
+
+def test_mtp_certification_reads_the_selected_workpoint_from_profile() -> None:
+    script = _script()
+    profile = script._profile(ROOT / "configs/serving_profile_candidates/P7_qwen38_w4a16_mtp.json")
+    assert script._mtp_tokens(profile) == 3
+
+
+def test_production_gate_preserves_structured_admission_failure() -> None:
+    script = _script("certify_qwen38_production")
+    error = script.ServingRuntimeError(
+        "gpu_admission_blocked",
+        {"required_free_mib": 41_114, "gpu": {"free_mib": 40_138}},
+    )
+    assert error.category == "gpu_admission_blocked"
+    assert error.evidence["required_free_mib"] - error.evidence["gpu"]["free_mib"] == 976
+
+
 def test_quantized_kernel_gate_requires_format_and_runtime_evidence(
     tmp_path: Path,
 ) -> None:
@@ -259,4 +284,142 @@ def test_finalizer_selects_p6_and_enables_p7_only_with_both_gates(
     assert promoted["promotion_allowed"] is True
     assert promoted["certification_status"] == "PASSED"
     assert promoted["mtp"]["status"] == "PASSED"
+    assert promoted["mtp"]["asset_status"] == "PRESENT_CERTIFIED"
     assert "external_blocker" not in promoted
+
+
+def test_finalizer_upgrades_already_promoted_prior_revision_p6_to_current_p7(
+    tmp_path: Path,
+) -> None:
+    script = _script("finalize_qwen38_certification")
+    profiles = tmp_path / "configs/serving_profile_candidates"
+    profiles.mkdir(parents=True)
+    p6 = profiles / "P6_qwen38_w4a16.json"
+    p7 = profiles / "P7_qwen38_w4a16_mtp.json"
+    p6.write_text('{"profile":"p6"}\n', encoding="utf-8")
+    p7.write_text('{"profile":"p7"}\n', encoding="utf-8")
+    artifact_sha = "d" * 64
+    prior = "a" * 40
+    current = "b" * 40
+    p6_cert = tmp_path / "p6-cert.json"
+    p6_cert.write_text(
+        json.dumps(
+            _profile_certification(
+                script.P6,
+                profile_sha=script._sha256(p6),
+                artifact_sha=artifact_sha,
+                revision=prior,
+            )
+        ),
+        encoding="utf-8",
+    )
+    p6_prod = tmp_path / "p6-prod.json"
+    p6_prod.write_text(
+        json.dumps(
+            _production_gate(
+                script.P6,
+                profile_sha=script._sha256(p6),
+                artifact_sha=artifact_sha,
+                revision=prior,
+                certification_sha=script._sha256(p6_cert),
+            )
+        ),
+        encoding="utf-8",
+    )
+    p7_cert = tmp_path / "p7-cert.json"
+    p7_cert.write_text(
+        json.dumps(
+            _profile_certification(
+                script.P7,
+                profile_sha=script._sha256(p7),
+                artifact_sha=artifact_sha,
+                revision=current,
+            )
+        ),
+        encoding="utf-8",
+    )
+    p7_prod = tmp_path / "p7-prod.json"
+    p7_prod.write_text(
+        json.dumps(
+            _production_gate(
+                script.P7,
+                profile_sha=script._sha256(p7),
+                artifact_sha=artifact_sha,
+                revision=current,
+                certification_sha=script._sha256(p7_cert),
+            )
+        ),
+        encoding="utf-8",
+    )
+    selected = tmp_path / "configs/selected_serving_profiles.json"
+    selected.write_text(
+        json.dumps(
+            {
+                "default_profile_id": script.P6,
+                "high_context_profile_id": script.P6,
+                "selection_evidence": (f"{p6_prod.resolve()}#sha256={script._sha256(p6_prod)}"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact = {
+        "artifact_sha256": artifact_sha,
+        "certification_status": "PASSED",
+        "promotion_allowed": True,
+        "certified_repository_revision": prior,
+        "certification_evidence": {
+            "P6": {
+                "profile_certification": script._evidence_record(p6_cert),
+                "production_gate": script._evidence_record(p6_prod),
+            }
+        },
+    }
+    decision = script.evaluate_evidence(
+        tmp_path,
+        p6_certification=p6_cert,
+        p6_production_gate=p6_prod,
+        p7_certification=p7_cert,
+        p7_production_gate=p7_prod,
+        artifact=artifact,
+        repository_revision=current,
+    )
+    assert decision["selected_profile_id"] == script.P7
+    assert decision["mtp_enabled"] is True
+    assert decision["p6_evidence_repository_revision"] == prior
+
+    artifact["certified_repository_revision"] = current
+    artifact["certification_evidence"]["P7"] = {
+        "profile_certification": script._evidence_record(p7_cert),
+        "production_gate": script._evidence_record(p7_prod),
+    }
+    interrupted = script.evaluate_evidence(
+        tmp_path,
+        p6_certification=p6_cert,
+        p6_production_gate=p6_prod,
+        p7_certification=p7_cert,
+        p7_production_gate=p7_prod,
+        artifact=artifact,
+        repository_revision=current,
+    )
+    assert interrupted == decision
+
+    selected.write_text(
+        json.dumps(
+            {
+                "default_profile_id": script.P7,
+                "high_context_profile_id": script.P7,
+                "selection_evidence": (f"{p7_prod.resolve()}#sha256={script._sha256(p7_prod)}"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    repeated = script.evaluate_evidence(
+        tmp_path,
+        p6_certification=p6_cert,
+        p6_production_gate=p6_prod,
+        p7_certification=p7_cert,
+        p7_production_gate=p7_prod,
+        artifact=artifact,
+        repository_revision=current,
+    )
+    assert repeated == decision

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import threading
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -178,9 +178,7 @@ def test_checkpoint_resume_rejects_worktree_drift(tmp_path: Path, monkeypatch) -
         tiered, checkpoint_store=AgentCheckpointStore(tmp_path / "checkpoints")
     )
     ctx = _ctx(tmp_path, session="session-a", user="user-a")
-    monkeypatch.setattr(
-        coordinator, "_worktree_state", lambda _root: ("a" * 40, "0" * 64, [])
-    )
+    monkeypatch.setattr(coordinator, "_worktree_state", lambda _root: ("a" * 40, "0" * 64, []))
     coordinator._checkpoint(ctx, AgentExecutionState(objective="objective"))
     monkeypatch.setattr(
         coordinator,
@@ -217,14 +215,51 @@ def test_mutating_finish_requires_verification_after_latest_mutation() -> None:
     required = ["pytest", "tests/test_x.py", "-q"]
     assert coordinator._verification_qualifies(["git", "status"], required) is False
     assert coordinator._verification_qualifies(required, required) is True
-    assert coordinator._verification_qualifies(["pytest", "tests/test_y.py", "-q"], required) is False
-    assert coordinator._verification_qualifies(["pytest", "--collect-only"], ["pytest", "--collect-only"]) is False
-    assert coordinator._verification_qualifies(["ruff", "check", "src"], ["ruff", "check", "src"]) is False
+    assert (
+        coordinator._verification_qualifies(["pytest", "tests/test_y.py", "-q"], required) is False
+    )
+    assert (
+        coordinator._verification_qualifies(
+            ["pytest", "--collect-only"], ["pytest", "--collect-only"]
+        )
+        is False
+    )
+    assert (
+        coordinator._verification_qualifies(["ruff", "check", "src"], ["ruff", "check", "src"])
+        is False
+    )
     assert coordinator._verification_qualifies(["mypy", "src"], ["mypy", "src"]) is False
     state.last_verified_epoch = 1
     assert coordinator._finish_allowed(state) is True
     state.unresolved_failures.append("verification_failed:still-open")
     assert coordinator._finish_allowed(state) is False
+
+
+def test_malformed_model_action_is_accounted_and_retried_without_losing_state() -> None:
+    state = AgentExecutionState(objective="x", mutation_epoch=1, changed_paths=["src/a.py"])
+    error = ServiceTierError(
+        "response_validation_failed",
+        {
+            "gate_id": "valid_json",
+            "reason": "malformed JSON",
+            "model_reported_usage": {"prompt_tokens": 123, "completion_tokens": 17},
+        },
+    )
+    assert ZetsuAgentCoordinator._record_recoverable_model_failure(state, 4, error) is True
+    assert state.changed_paths == ["src/a.py"]
+    assert state.telemetry.qwen_calls == 1
+    assert state.telemetry.agent_steps == 1
+    assert state.telemetry.qwen_input_tokens == 123
+    assert state.telemetry.qwen_output_tokens == 17
+    assert state.telemetry.qwen_usage_reported_calls == 1
+    assert state.next_state == "retry_valid_json_action"
+    assert "MODEL_RESPONSE_REJECTED" in state.recent_observations[-1]
+    assert (
+        ZetsuAgentCoordinator._record_recoverable_model_failure(
+            state, 5, ServiceTierError("agent_session_cancelled")
+        )
+        is False
+    )
 
 
 def test_cancellation_and_command_budget_fail_closed(tmp_path: Path) -> None:
@@ -260,9 +295,7 @@ def test_cancellation_and_command_budget_fail_closed(tmp_path: Path) -> None:
         coordinator._ensure_active(ctx, state)
 
 
-def test_running_verification_honors_cancellation(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_running_verification_honors_cancellation(tmp_path: Path, monkeypatch) -> None:
     tiered = _Tiered(tmp_path)
     coordinator = ZetsuAgentCoordinator(
         tiered, checkpoint_store=AgentCheckpointStore(tmp_path / "checkpoints")
@@ -270,9 +303,7 @@ def test_running_verification_honors_cancellation(
     ctx = _ctx(tmp_path, session="session-a", user="user-a")
     state = AgentExecutionState(objective="x")
     executable = tmp_path / "pytest"
-    executable.write_text(
-        "#!/usr/bin/env python3\nimport time\ntime.sleep(10)\n", encoding="utf-8"
-    )
+    executable.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(10)\n", encoding="utf-8")
     executable.chmod(0o755)
     monkeypatch.setattr(
         "research_workspace.zetsu_agent.shutil.which",
@@ -282,9 +313,7 @@ def test_running_verification_honors_cancellation(
         "research_workspace.zetsu_agent.AgentSandboxManager.fixed_environment",
         staticmethod(lambda _binding: dict(os.environ)),
     )
-    monkeypatch.setattr(
-        coordinator, "_worktree_state", lambda _root: ("a" * 40, "0" * 64, [])
-    )
+    monkeypatch.setattr(coordinator, "_worktree_state", lambda _root: ("a" * 40, "0" * 64, []))
 
     def cancel() -> None:
         time.sleep(0.25)
@@ -312,6 +341,35 @@ def test_create_new_text_file_is_bounded_and_isolated(tmp_path: Path) -> None:
     assert (tmp_path / "new.txt").read_text(encoding="utf-8") == "bounded\n"
     with pytest.raises(ServiceTierError, match="zetsu_agent_git_metadata_forbidden"):
         coordinator._create(ctx, {"path": ".git/config", "content": "x"})
+
+
+def test_handoff_patch_preserves_tracked_and_new_file_code(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Test"], check=True)
+    (tmp_path / "existing.py").write_text("old = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "existing.py"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "base"], check=True)
+    (tmp_path / "existing.py").write_text("old = 2\n", encoding="utf-8")
+    (tmp_path / "created.py").write_text("created = True\n", encoding="utf-8")
+    coordinator = ZetsuAgentCoordinator(
+        _Tiered(tmp_path), checkpoint_store=AgentCheckpointStore(tmp_path / "checkpoints")
+    )
+    result = coordinator._handoff_patch(
+        tmp_path,
+        "handoff-session",
+        ["created.py", "existing.py"],
+        max_chars=8_000,
+    )
+    assert result["patch_inline"] is True
+    assert "-old = 1" in str(result["patch"])
+    assert "+old = 2" in str(result["patch"])
+    assert "+created = True" in str(result["patch"])
+    artifact = Path(str(result["patch_path"]))
+    assert artifact.read_text(encoding="utf-8") == result["patch"]
 
 
 def test_compaction_preserves_exact_state_and_can_continue(tmp_path: Path) -> None:
@@ -418,9 +476,7 @@ def test_checkpoint_resume_rejects_budget_change(tmp_path: Path, monkeypatch) ->
         coordinator._restore(changed, "objective")
 
 
-def test_resume_rejects_invalid_checkpoint_accounting(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_resume_rejects_invalid_checkpoint_accounting(tmp_path: Path, monkeypatch) -> None:
     tiered = _Tiered(tmp_path)
     coordinator = ZetsuAgentCoordinator(
         tiered, checkpoint_store=AgentCheckpointStore(tmp_path / "checkpoints")
@@ -480,31 +536,29 @@ def test_verification_that_mutates_worktree_fails_closed(tmp_path: Path, monkeyp
         coordinator._verify(ctx, state, {"argv": ["pytest", "tests/test_x.py", "-q"]})
     assert state.mutation_epoch == 1
     assert state.last_verified_epoch == -1
-    assert any(item.startswith("latest_mutation_unverified:epoch=1") for item in state.unresolved_failures)
-    assert any(item.startswith("verification_mutated_worktree:epoch=1:") for item in state.unresolved_failures)
+    assert any(
+        item.startswith("latest_mutation_unverified:epoch=1") for item in state.unresolved_failures
+    )
+    assert any(
+        item.startswith("verification_mutated_worktree:epoch=1:")
+        for item in state.unresolved_failures
+    )
     assert state.validation_history[-1]["worktree_mutated"] is True
+
 
 def test_verify_argv_rejects_executable_path_alias(tmp_path: Path) -> None:
     with pytest.raises(ServiceTierError, match="zetsu_agent_verify_command_forbidden"):
-        ZetsuAgentCoordinator._verify_argv(
-            tmp_path, ["/tmp/pytest", "tests/test_x.py", "-q"]
-        )
+        ZetsuAgentCoordinator._verify_argv(tmp_path, ["/tmp/pytest", "tests/test_x.py", "-q"])
     with pytest.raises(ServiceTierError, match="zetsu_agent_verify_command_forbidden"):
-        ZetsuAgentCoordinator._verify_argv(
-            tmp_path, ["../pytest", "tests/test_x.py", "-q"]
-        )
+        ZetsuAgentCoordinator._verify_argv(tmp_path, ["../pytest", "tests/test_x.py", "-q"])
 
 
-def test_checkpoint_resume_binds_route_and_required_verifier(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_checkpoint_resume_binds_route_and_required_verifier(tmp_path: Path, monkeypatch) -> None:
     tiered = _Tiered(tmp_path)
     coordinator = ZetsuAgentCoordinator(
         tiered, checkpoint_store=AgentCheckpointStore(tmp_path / "checkpoints")
     )
-    monkeypatch.setattr(
-        coordinator, "_worktree_state", lambda _root: ("a" * 40, "0" * 64, [])
-    )
+    monkeypatch.setattr(coordinator, "_worktree_state", lambda _root: ("a" * 40, "0" * 64, []))
     verifier = ("pytest", "tests/test_x.py", "-q")
     ctx = _ctx(
         tmp_path,
@@ -541,9 +595,7 @@ def test_checkpoint_rejects_malformed_semantic_state_and_telemetry(
     coordinator = ZetsuAgentCoordinator(
         tiered, checkpoint_store=AgentCheckpointStore(tmp_path / "checkpoints")
     )
-    monkeypatch.setattr(
-        coordinator, "_worktree_state", lambda _root: ("a" * 40, "0" * 64, [])
-    )
+    monkeypatch.setattr(coordinator, "_worktree_state", lambda _root: ("a" * 40, "0" * 64, []))
     ctx = _ctx(tmp_path, session="session-a", user="user-a")
     coordinator._checkpoint(ctx, AgentExecutionState(objective="objective"))
     raw = coordinator.checkpoints.read(ctx.session_id)

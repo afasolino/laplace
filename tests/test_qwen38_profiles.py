@@ -25,7 +25,7 @@ def test_qwen38_profiles_are_loopback_ampere_oriented_and_distinct() -> None:
         assert "--enable-auto-tool-choice" in args
         assert "--tool-call-parser=qwen3_xml" in args
     assert base["gpu_memory_utilization"] == 0.755
-    assert mtp["gpu_memory_utilization"] == 0.795
+    assert mtp["gpu_memory_utilization"] == 0.77
 
     assert base["port"] != mtp["port"]
     assert not any(str(arg).startswith("--speculative-config") for arg in base["extra_args"])

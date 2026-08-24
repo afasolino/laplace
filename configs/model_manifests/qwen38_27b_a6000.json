@@ -135,26 +135,26 @@
     "P7_qwen38_w4a16_mtp": {
       "profile_sha256": "c96c0471359700da8630426e5b36d9a51feac3d618198791438d38f3a1e65a7c",
       "max_model_len": 131072,
-      "gpu_memory_utilization": 0.795,
+      "gpu_memory_utilization": 0.77,
       "requested_speculative_tokens": 3,
-      "live_status": "FAILED",
+      "live_status": "PASSED",
       "evidence": {
         "profile_certification": {
-          "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p7-mtp-util0795/certification.json",
-          "sha256": "bff5a11399dfbcc170eabf275e4526a348428dfbbf7f75ae4933284e91f99e64"
+          "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p7-k3-util077-cert-v1/certification.json",
+          "sha256": "1be434bee5bd3317c423e8b101b10dc84cb725f7dd82e018d3372892d2795f2e"
         },
         "production_gate": {
-          "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p7-production-codev/production_gate.json",
-          "sha256": "719969d2e366d9180805be1c5c8652910d7d9f751bf016da3354fad9cb8d668d"
+          "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p7-k3-codev0134-prod-v1/production_gate.json",
+          "sha256": "e25ca5243325671e1834d88c239cb2f437da8f5525b3d68d4583a5c7e88e0d81"
         }
       }
     }
   },
   "mtp": {
     "requested_speculative_tokens": 3,
-    "asset_status": "PRESENT_UNCERTIFIED",
-    "runtime_status": "FAILED",
-    "status": "NOT_CERTIFIED"
+    "asset_status": "PRESENT_CERTIFIED",
+    "runtime_status": "PASSED",
+    "status": "PASSED"
   },
   "certification_status": "PASSED",
   "promotion_allowed": true,
@@ -166,8 +166,8 @@
     "local_quantization_role": "final_fallback_only",
     "prepared_at_utc": "2026-08-24T06:57:22.826064+00:00"
   },
-  "certified_at_utc": "2026-08-24T09:08:04.577913+00:00",
-  "certified_repository_revision": "5726b68d54e11023dd7610cb0271be0f69b792ec",
+  "certified_at_utc": "2026-08-24T11:25:28.079046+00:00",
+  "certified_repository_revision": "833a308e218eeb05b24a7c7d70d9fd7c1b9bceff",
   "certification_evidence": {
     "P6": {
       "profile_certification": {
@@ -181,12 +181,12 @@
     },
     "P7": {
       "profile_certification": {
-        "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p7-mtp-util0795/certification.json",
-        "sha256": "bff5a11399dfbcc170eabf275e4526a348428dfbbf7f75ae4933284e91f99e64"
+        "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p7-k3-util077-cert-v1/certification.json",
+        "sha256": "1be434bee5bd3317c423e8b101b10dc84cb725f7dd82e018d3372892d2795f2e"
       },
       "production_gate": {
-        "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p7-production-codev/production_gate.json",
-        "sha256": "719969d2e366d9180805be1c5c8652910d7d9f751bf016da3354fad9cb8d668d"
+        "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p7-k3-codev0134-prod-v1/production_gate.json",
+        "sha256": "e25ca5243325671e1834d88c239cb2f437da8f5525b3d68d4583a5c7e88e0d81"
       }
     }
   }

@@ -821,9 +821,14 @@ class TieredServingService:
             }
         )
         if not result.passed:
+            usage = response.get("usage")
             raise ServiceTierError(
                 "response_validation_failed",
-                {"gate_id": result.gate_id, "reason": result.reason},
+                {
+                    "gate_id": result.gate_id,
+                    "reason": result.reason,
+                    "model_reported_usage": dict(usage) if isinstance(usage, Mapping) else None,
+                },
             )
         return {
             "status": "SUCCESS",
