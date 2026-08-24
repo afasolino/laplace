@@ -1,0 +1,160 @@
+{
+  "schema_version": 1,
+  "phase": "G8",
+  "title": "Procedural Memory / Human-Governed Skill Registry",
+  "lifecycle_state": "CERTIFICATION",
+  "feature_lifecycle_state": "SHADOW",
+  "status": "CERTIFIED",
+  "generated_at_utc": "2026-08-24T19:11:23Z",
+  "control_plane": {
+    "production_root": "/home/giando/work/laplace",
+    "production_branch": "production/v1",
+    "production_source_modified": false,
+    "v2_root": "/home/giando/work/laplace-v2",
+    "v2_branch": "feature/laplace-v2",
+    "base_commit": "e33e344d1282e13788667088ec703e68c030816b",
+    "candidate_commit": "7f94c764843dffef457556699db889ccd649ef87",
+    "worktree_status_before_certification_artifact": "modified only by G8 implementation and this artifact",
+    "zetsu_mutation_note": "The repaired read-only repository-agent proof passed without per_user_worktree_quota. The bounded mutating delegation remained deterministically blocked by the stale promotion target (zetsu_agent_apply_target_not_clean); local implementation was used under the documented fallback, and the production control-plane checkout was not modified."
+  },
+  "implementation": {
+    "service": "src/research_workspace/skills.py:SkillRegistry",
+    "core_integration": "LaplaceCore exposes one shared SkillRegistry and advisory selection/activation-packet adapters; no Zetsu-only implementation path was added.",
+    "lifecycle": [
+      "candidate",
+      "validated",
+      "A/B-tested",
+      "human-approved",
+      "active",
+      "deactivated"
+    ],
+    "stored_fields": [
+      "skill identifier and semver version",
+      "positive trigger phrases",
+      "global/user/project scope and owner binding",
+      "procedure text",
+      "required bounded tools and deterministic verifiers",
+      "source kind, URI, immutable revision, license, author and model-generation flag",
+      "success/failure and frozen A/B statistics",
+      "validation, human approval, deactivation and rollback metadata",
+      "content hash and atomic registry revision"
+    ],
+    "changed_paths": [
+      "src/research_workspace/skills.py",
+      "src/research_workspace/laplace_core.py",
+      "tests/test_skills_g8.py",
+      "docs/v2-roadmap/certifications/G8-skills.json"
+    ],
+    "security_boundaries": [
+      "Skill text is advisory data; no skill file, support script, tool name or verifier is executed by the registry.",
+      "Only the bounded ACI and deterministic retrieval/verifier tool names are accepted as requirements.",
+      "Authority, policy and project-rule override language is rejected; activation packets explicitly deny override, authority grant and execution.",
+      "Scope mismatch, malformed versions, source traversal, symlinked skill sources, duplicate versions and ambiguous equal triggers fail closed.",
+      "Model-generated records are always registered as candidates and require deterministic validation, frozen A/B evidence and explicit human approval before activation."
+    ]
+  },
+  "upstream_evaluation": [
+    {
+      "name": "NousResearch/Hermes-Agent",
+      "repository": "https://github.com/NousResearch/hermes-agent",
+      "inspected_revision": "74ad422d50e6d76e26ba5ce3b4d2a4d520e923dd",
+      "license": "MIT",
+      "license_path": "https://github.com/NousResearch/hermes-agent/blob/74ad422d50e6d76e26ba5ce3b4d2a4d520e923dd/LICENSE",
+      "inspected_material": "AGENTS.md skill layout/frontmatter and the built-in/optional skill split; current main revision observed 2026-08-24.",
+      "reuse_mode": "architectural reference only; no Hermes runtime, network skill hub, shell surface, or hosted model was copied."
+    },
+    {
+      "name": "ai4s-research/open-science",
+      "repository": "https://github.com/ai4s-research/open-science",
+      "inspected_revision": "fc8abad89e9e62ded08607ef77bf7fb53103a80e",
+      "license": "MIT",
+      "license_path": "https://github.com/ai4s-research/open-science/blob/fc8abad89e9e62ded08607ef77bf7fb53103a80e/LICENSE",
+      "inspected_material": "README.md and PROGRESS.md skill-pack packaging/provenance notes; local-first scientific skills and explicit draft/review posture.",
+      "reuse_mode": "provenance and packaging reference only; no Open Science source, connector, remote acquisition or runtime was copied."
+    },
+    {
+      "name": "ai4s-research/ai4s-skills",
+      "repository": "https://github.com/ai4s-research/ai4s-skills",
+      "inspected_revision": "2519e8d",
+      "revision_format": "immutable short SHA recorded by the upstream open-science PROGRESS.md pin",
+      "license": "MIT",
+      "license_path": "https://github.com/ai4s-research/ai4s-skills/blob/2519e8d/LICENSE",
+      "inspected_material": "README.md and ai4s-agent/paper-writer/research-explorer SKILL.md surfaces: frontmatter, deterministic companion tools, ordered scientific workflow and source traceability.",
+      "reuse_mode": "scientific skill-format and traceability reference only; no skill text, dependency, LLM SDK or remote tool was imported."
+    }
+  ],
+  "executed_gates": {
+    "focused_development": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest -q tests/test_skills_g8.py",
+      "returncode": 0,
+      "tests": 6,
+      "covered": "Lifecycle persistence, positive/negative/ambiguous/no-skill controls, owner isolation, advisory packet boundaries, model candidates, malicious procedures, rollback/deactivation, source boundary and Core integration."
+    },
+    "frozen_phase_acceptance_and_previous_regression": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest -q tests/test_skills_g8.py tests/test_context_planner_g7.py tests/test_bounded_aci_g6.py tests/test_trajectory_g5.py tests/test_repository_context_g4.py tests/test_rules_g3.py tests/test_memory_g2.py tests/test_laplace_core_g1.py tests/test_zetsu_mcp.py tests/test_zetsu_agent_mcp.py tests/test_zetsu_agent_checkpoint.py tests/test_personal_corpus_api_v6.py tests/test_tiered_serving.py tests/test_auth_provenance_security.py tests/test_operator_api.py tests/test_architecture_v7.py",
+      "returncode": 0,
+      "host_socket_permission_required": true,
+      "covered": "G8 acceptance plus G1-G7 phase suites and selected v1 security, API, serving, checkpoint and architecture regressions."
+    },
+    "security_and_negative": {
+      "result": "PASS",
+      "commands": [
+        "PYTHONPATH=src ruff check src/research_workspace/skills.py src/research_workspace/laplace_core.py tests/test_skills_g8.py",
+        "PYTHONPATH=src mypy src/research_workspace/skills.py src/research_workspace/laplace_core.py tests/test_skills_g8.py",
+        "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m compileall -q src/research_workspace/skills.py src/research_workspace/laplace_core.py tests/test_skills_g8.py",
+        "PYTHONPATH=src bandit -q -lll -r src/research_workspace/skills.py src/research_workspace/laplace_core.py",
+        "git diff --check"
+      ],
+      "returncodes": [0, 0, 0, 0, 0],
+      "covered": [
+        "malformed registry JSON and duplicate active versions fail closed",
+        "path traversal and symlink skill sources are rejected",
+        "unapproved tools, authority-overriding procedures and ambiguous triggers are rejected",
+        "no model-generated candidate can auto-promote",
+        "no shell, network, telemetry, cloud inference, document command execution or new authority path was added"
+      ],
+      "bandit_note": "Bandit returned zero high-severity findings; no executable subprocess or dynamic evaluation was introduced by the registry."
+    }
+  },
+  "comparison": {
+    "result": "PASS",
+    "method": "Frozen deterministic fixture tasks compared candidate-with-skill and no-skill arms through record_ab_test; correctness was required and both efficiency/reliability deltas were required to be positive before human approval. The no-skill control and ambiguous/negative trigger controls were also executed.",
+    "correctness": "NO_LOSS",
+    "security": "NO_LOSS",
+    "controlled_ab_observation": {
+      "with_skill_reliability": 0.95,
+      "without_skill_reliability": 0.80,
+      "with_skill_efficiency": 0.80,
+      "without_skill_efficiency": 0.60,
+      "reliability_delta": 0.15,
+      "efficiency_delta": 0.20,
+      "interpretation": "Controlled fixture evidence for the registry gate only; not a production model latency, token, throughput or GPU measurement."
+    },
+    "default_enable_decision": "NO",
+    "reason": "The registry is production-safe as an explicit shared capability, but no bundled skill is activated by default and no real local-model task benefit was measured. Human-approved activation remains opt-in and scoped."
+  },
+  "metrics": {
+    "focused_test_returncode": 0,
+    "frozen_regression_returncode": 0,
+    "ruff_returncode": 0,
+    "mypy_returncode": 0,
+    "compileall_returncode": 0,
+    "bandit_high_returncode": 0,
+    "gpu_vram_latency_throughput": "NOT_MEASURED"
+  },
+  "limitations": [
+    "The coordinator does not automatically inject registry-selected skills into model prompts; Core exposes the governed API so future adapters cannot bypass it.",
+    "The controlled A/B numbers are fixture evidence for lifecycle enforcement, not hardware or model performance claims.",
+    "ai4s-skills is recorded at the exact upstream pinned short revision 2519e8d because the source release record exposes that immutable short SHA; it was not treated as a mutable branch reference.",
+    "The existing FrozenSkillRegistry remains the run-reproducibility lock for the legacy team runner; G8 SkillRegistry governs version lifecycle and activation separately.",
+    "The full G0 certification was not repeated, per the roadmap instruction and prior phase certifications.",
+    "The socket-concurrency regression requires host socket permission because the restricted shell denies socket creation; the selected unchanged suite passed under that permission."
+  ],
+  "rollback_target": {
+    "commit": "e33e344d1282e13788667088ec703e68c030816b",
+    "description": "G7-certified shadow ContextPlanner with G6-G1 capabilities; production/v1 remains separately immutable."
+  },
+  "certification_artifact": "docs/v2-roadmap/certifications/G8-skills.json"
+}
