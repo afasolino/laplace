@@ -15,6 +15,12 @@ from typing import Literal, TypeAlias
 from .model_routing import RoutingTaskMetadata, assess_rtl_worker_eligibility
 from .memory import MemoryService
 from .personal_corpus import PersonalCorpusStore
+from .repository_context import (
+    RepoMap,
+    RepositoryContextService,
+    RepositoryEdge,
+    RepositorySymbol,
+)
 from .rules import ContextItem, ContextPacket, RuleService
 from .service_tiers import ModelLane, ServiceTierError, TieredServingService
 from .user_capabilities import Capability
@@ -52,14 +58,26 @@ class LaplaceCore:
         agent_coordinator: ZetsuAgentCoordinator | None = None,
         memory: MemoryService | None = None,
         rules: RuleService | None = None,
+        repository_context: RepositoryContextService | None = None,
     ) -> None:
         self.repository_root = repository_root.resolve()
         self.corpus = corpus
         self.tiered = tiered
         self.memory = memory
         self.rules = rules
+        self._repository_context = repository_context
         self._agent_coordinator = agent_coordinator
         self._agent_coordinator_lock = threading.Lock()
+        self._repository_context_lock = threading.Lock()
+
+    @property
+    def repository_context(self) -> RepositoryContextService:
+        """Return the standalone repository intelligence service."""
+
+        with self._repository_context_lock:
+            if self._repository_context is None:
+                self._repository_context = RepositoryContextService(self.repository_root)
+            return self._repository_context
 
     @property
     def agent_coordinator(self) -> ZetsuAgentCoordinator:
@@ -262,6 +280,31 @@ class LaplaceCore:
             retrieval=retrieval,
             objective=objective,
         )
+
+    def repo_map(
+        self,
+        *,
+        query: str = "",
+        focus_paths: Sequence[str] = (),
+        token_budget: int = 1_000,
+    ) -> RepoMap:
+        """Return advisory structural context; callers must read real files for changes."""
+
+        return self.repository_context.build_repo_map(
+            query=query,
+            focus_paths=focus_paths,
+            token_budget=token_budget,
+        )
+
+    def find_symbol(self, name: str) -> tuple[RepositorySymbol, ...]:
+        """Find exact structural definitions without invoking a model."""
+
+        return self.repository_context.find_symbol(name)
+
+    def find_references(self, name: str) -> tuple[RepositoryEdge, ...]:
+        """Find reliable structural references without replacing file reads."""
+
+        return self.repository_context.find_references(name)
 
     @staticmethod
     def validate_verification_command(worktree: Path, argv: Sequence[str]) -> list[str]:
