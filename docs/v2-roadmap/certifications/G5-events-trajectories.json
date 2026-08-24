@@ -1,0 +1,157 @@
+{
+  "schema_version": 1,
+  "phase": "G5",
+  "title": "Event Store, Trajectories and Provenance",
+  "lifecycle_state": "CERTIFICATION",
+  "feature_lifecycle_state": "SHADOW",
+  "status": "CERTIFIED",
+  "generated_at_utc": "2026-08-24T18:37:17Z",
+  "control_plane": {
+    "production_root": "/home/giando/work/laplace",
+    "production_branch": "production/v1",
+    "production_source_modified": false,
+    "v2_root": "/home/giando/work/laplace-v2",
+    "v2_branch": "feature/laplace-v2",
+    "base_commit": "e6ade2b05a157f8ae348d2cd2d1dac0c841c0fef",
+    "candidate_commit": "2f41cb8f66be8fd316d33d7d29ec64099545314a",
+    "worktree_status_before_certification_artifact": "clean",
+    "zetsu_mutation_note": "The repaired read-only repository-agent proof passed without per_user_worktree_quota. The bounded mutating delegation remained deterministically blocked by the stale promotion target (zetsu_agent_apply_target_not_clean); the documented local fallback was used. The production control-plane checkout was not modified."
+  },
+  "implementation": {
+    "service": "src/research_workspace/trajectory.py:TrajectoryService",
+    "models": [
+      "TrajectoryIdentity",
+      "TrajectoryProvenance",
+      "TrajectoryEvent",
+      "TrajectoryReplay"
+    ],
+    "core_integration": "LaplaceCore exposes append_trajectory_event, replay_trajectory and checkpoint_trajectory; the Operator API supplies local operator-state persistence when it constructs Core.",
+    "storage": "Owner-bound append-only JSONL events with a SHA-256 chain and one atomic derived JSON checkpoint; no database, model, network or cloud dependency was added.",
+    "event_types": [
+      "task_started",
+      "task_resumed",
+      "task_cancelled",
+      "retrieval_accessed",
+      "memory_accessed",
+      "model_called",
+      "tool_action",
+      "edit",
+      "verification",
+      "compaction",
+      "checkpoint",
+      "failure",
+      "completion"
+    ],
+    "invariants": [
+      "Events carry owner, project, session and task identity.",
+      "Every event carries bounded typed provenance and state-before/state-after hashes.",
+      "Replay validates schema, event IDs, idempotency keys, sequence, hash chain and state transitions.",
+      "Checkpoints are validated acceleration snapshots; intact events remain authoritative.",
+      "Exact duplicate idempotency keys return the original immutable event; conflicting reuse fails closed.",
+      "Unknown schema versions, complete corruption, duplicate records, state conflicts and cross-owner access fail closed.",
+      "Only an unterminated final crash fragment is quarantined and recovered; complete malformed records are never silently discarded."
+    ],
+    "changed_paths": [
+      "src/research_workspace/trajectory.py",
+      "src/research_workspace/laplace_core.py",
+      "src/research_workspace/operator_api.py",
+      "tests/test_trajectory_g5.py"
+    ]
+  },
+  "upstream_evaluation": [
+    {
+      "name": "OpenHands software-agent-sdk",
+      "repository": "https://github.com/OpenHands/software-agent-sdk",
+      "inspected_revision": "c20709fb587f71d38d4af62c4813ff4d2681fa02",
+      "license": "MIT",
+      "license_path": "https://github.com/OpenHands/software-agent-sdk/blob/c20709fb587f71d38d4af62c4813ff4d2681fa02/LICENSE",
+      "inspected_api": "SDK event documentation and event package: immutable typed events, append-only conversation history, observer boundary and interruption/error event distinction",
+      "reuse_mode": "architectural reference only; no OpenHands source, dependency, model, network or runtime was copied"
+    },
+    {
+      "name": "mini-SWE-agent",
+      "repository": "https://github.com/SWE-agent/mini-swe-agent",
+      "inspected_revision": "4fe36a38941abde8a332bda950ca6c0de653a19f",
+      "license": "MIT",
+      "license_path": "https://github.com/SWE-agent/mini-swe-agent/blob/4fe36a38941abde8a332bda950ca6c0de653a19f/LICENSE.md",
+      "inspected_api": "linear message/trajectory loop and trajectory browser design",
+      "reuse_mode": "architectural reference only; no SWE-agent source, dependency, model, network or runtime was copied"
+    },
+    {
+      "name": "Open Science",
+      "repository": "https://github.com/ai4s-research/open-science",
+      "inspected_revision": "ca7ced57a68abe5ad00a61b43b07a148ad5f3282",
+      "license": "MIT",
+      "license_path": "https://github.com/ai4s-research/open-science/blob/ca7ced57a68abe5ad00a61b43b07a148ad5f3282/LICENSE",
+      "inspected_api": "append-oriented provenance JSONL and artifact-to-run linkage concepts",
+      "reuse_mode": "architectural reference only; local provenance is stricter, bounded and hash-based; no Open Science source, dependency or acquisition path was added"
+    }
+  ],
+  "executed_gates": {
+    "focused_development": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest tests/test_trajectory_g5.py -q",
+      "returncode": 0,
+      "tests": 6
+    },
+    "frozen_phase_acceptance_and_previous_regression": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest -q tests/test_trajectory_g5.py tests/test_repository_context_g4.py tests/test_rules_g3.py tests/test_memory_g2.py tests/test_laplace_core_g1.py tests/test_zetsu_mcp.py tests/test_zetsu_agent_mcp.py tests/test_personal_corpus_api_v6.py tests/test_tiered_serving.py tests/test_auth_provenance_security.py tests/test_operator_api.py tests/test_architecture_v7.py",
+      "returncode": 0,
+      "scope": "G5 event vocabulary, append/replay/checkpoint crash recovery, strict corruption handling, owner isolation and Core integration plus G4/G3/G2/G1 and selected v1 corpus, serving, authorization, operator and architecture regressions",
+      "host_socket_permission_required": true
+    },
+    "security_and_negative": {
+      "result": "PASS",
+      "commands": [
+        "PYTHONPATH=src ruff check src/research_workspace/trajectory.py src/research_workspace/laplace_core.py src/research_workspace/operator_api.py tests/test_trajectory_g5.py",
+        "PYTHONPATH=src mypy src/research_workspace/trajectory.py src/research_workspace/laplace_core.py src/research_workspace/operator_api.py tests/test_trajectory_g5.py",
+        "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m compileall -q src/research_workspace/trajectory.py src/research_workspace/laplace_core.py src/research_workspace/operator_api.py",
+        "PYTHONPATH=src bandit -q -lll -r src/research_workspace/trajectory.py src/research_workspace/laplace_core.py src/research_workspace/operator_api.py",
+        "git diff --check"
+      ],
+      "returncodes": [0, 0, 0, 0, 0],
+      "covered": [
+        "strict finite JSON and bounded payload/state/provenance sizes",
+        "raw prompt/response/source-code/secret/token fields rejected",
+        "owner/project/session identity binding and cross-owner denial",
+        "idempotency conflict and duplicate physical record rejection",
+        "partial final append quarantine and complete corruption fail-closed behavior",
+        "unknown event/checkpoint schema rejection",
+        "no shell execution, remote upload, telemetry or cloud inference path"
+      ]
+    }
+  },
+  "persistence_and_recovery": {
+    "result": "PASS",
+    "restart_resume": "A new TrajectoryService instance reconstructed the exact state from the event log.",
+    "checkpoint": "A valid checkpoint was used as an acceleration snapshot; a corrupt checkpoint was ignored and the intact trajectory replayed exactly.",
+    "crash_during_append": "An injected crash after a partial final write quarantined the fragment; the next replay recovered an empty pre-append state and accepted the next event.",
+    "crash_between_event_and_checkpoint": "An injected checkpoint crash left the already durable event authoritative; restart replay returned the exact post-event state.",
+    "cancellation": "task_cancelled is a typed replayable event and survives checkpoint/restart.",
+    "migration": "Schema version 1 is current; unknown versions fail closed and future versions require explicit transforms through migrate()."
+  },
+  "metrics": {
+    "focused_test_returncode": 0,
+    "frozen_regression_returncode": 0,
+    "ruff_returncode": 0,
+    "mypy_returncode": 0,
+    "compileall_returncode": 0,
+    "bandit_high_returncode": 0,
+    "event_replay_model_or_gpu_measurements": "NOT_APPLICABLE",
+    "gpu_vram_latency_throughput": "NOT_MEASURED"
+  },
+  "limitations": [
+    "G5 is certified in SHADOW lifecycle because existing agent execution has not yet been migrated to emit every event automatically; the standalone Core API is available and tested.",
+    "Trajectory state is a bounded JSON object and callers must provide deterministic state_after values; the service does not infer state from model text.",
+    "The local JSONL store is single-trajectory per service root; deployment code must allocate a separate state-root path per trajectory scope.",
+    "The existing Zetsu repository-agent registry remains stale relative to the current v2 checkout; local implementation was used after the deterministic promotion-target failure recorded in prior certifications.",
+    "The socket-concurrency regression requires host socket permission because the restricted shell denies socket creation; the unchanged selected suite passed under that permission.",
+    "The full G0 production certification was not repeated, per the roadmap instruction and prior phase certifications."
+  ],
+  "rollback_target": {
+    "commit": "e6ade2b05a157f8ae348d2cd2d1dac0c841c0fef",
+    "description": "G4-certified advisory repository intelligence with G3/G2/G1 shared-core capabilities and production/v1 remaining separately immutable."
+  },
+  "certification_artifact": "docs/v2-roadmap/certifications/G5-events-trajectories.json"
+}
