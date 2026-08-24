@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "phase": "G1",
+  "title": "Shared Standalone Laplace Core",
+  "lifecycle_state": "CERTIFICATION",
+  "feature_lifecycle_state": "ENABLED",
+  "status": "CERTIFIED",
+  "generated_at_utc": "2026-08-24T17:50:11Z",
+  "control_plane": {
+    "production_root": "/home/giando/work/laplace",
+    "production_branch": "production/v1",
+    "production_commit_observed": "62b3ecd838129fde4ca3d19ae5fbcfc67e84638e5",
+    "v2_root": "/home/giando/work/laplace-v2",
+    "v2_branch": "feature/laplace-v2",
+    "base_commit": "96cb045f92ca2537ac18c03e666fb11310bf2ab7",
+    "candidate_commit": "0cbcc219684961b1f8ad22b2469ca57bfe30c1f3",
+    "production_source_modified": false,
+    "worktree_status_before_certification_artifact": "clean"
+  },
+  "implementation": {
+    "shared_core": "src/research_workspace/laplace_core.py:LaplaceCore",
+    "standalone_adapter": "src/research_workspace/operator_api.py:create_operator_app",
+    "zetsu_adapter": "src/research_workspace/zetsu_mcp.py:ZetsuService",
+    "shared_capabilities": [
+      "owner-authorized Personal Corpus retrieval and evidence expansion",
+      "TieredServingService model routing and validation",
+      "bounded Qwen repository-agent execution",
+      "policy-eligible bounded SystemVerilog specialist routing",
+      "VerificationGateRegistry deterministic verification projection",
+      "owner-scoped task state and scheduler access"
+    ],
+    "zetsu_optional_runtime": true,
+    "standalone_disable_switch": "create_operator_app(..., zetsu_enabled=false)",
+    "changed_paths": [
+      "src/research_workspace/laplace_core.py",
+      "src/research_workspace/operator_api.py",
+      "src/research_workspace/zetsu_mcp.py",
+      "tests/test_laplace_core_g1.py"
+    ]
+  },
+  "upstream_dependencies": [
+    {
+      "name": "barrydeen/Qwen3.8-27B-AWQ-4bit",
+      "revision": "e6b4b8b025f85b3e18f13281db576e0b7d5fe314",
+      "license": "Apache-2.0",
+      "reuse_mode": "existing certified v1 local serving artifact; no source copied in G1"
+    },
+    {
+      "name": "vLLM",
+      "revision": "0.25.0+cu129",
+      "license": "recorded in the certified v1 dependency inventory",
+      "reuse_mode": "existing certified local serving runtime; no source copied in G1"
+    }
+  ],
+  "executed_gates": {
+    "zetsu_repository_agent_health_proof": {
+      "result": "PASS",
+      "repo_id": "laplace-v2",
+      "apply_to_repository": false,
+      "bounded": true,
+      "per_user_worktree_quota_failure": false,
+      "observed_repository_agent_head": "eeb29f2ce67f4d58f90dbdccd625ead94da13405",
+      "note": "The proof path works, but its registered target is stale relative to the v2 worktree; the first mutating promotion was rejected with apply_target_not_clean before execution."
+    },
+    "focused_development": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest tests/test_laplace_core_g1.py -q",
+      "returncode": 0
+    },
+    "lint_and_types": [
+      {
+        "command": "PYTHONPATH=src ruff check src/research_workspace/laplace_core.py src/research_workspace/zetsu_mcp.py src/research_workspace/operator_api.py tests/test_laplace_core_g1.py",
+        "returncode": 0
+      },
+      {
+        "command": "PYTHONPATH=src mypy src/research_workspace/laplace_core.py src/research_workspace/zetsu_mcp.py src/research_workspace/operator_api.py tests/test_laplace_core_g1.py",
+        "returncode": 0
+      }
+    ],
+    "frozen_phase_acceptance_and_previous_regression": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest -q tests/test_laplace_core_g1.py tests/test_zetsu_mcp.py tests/test_zetsu_agent_mcp.py tests/test_personal_corpus_api_v6.py tests/test_tiered_serving.py tests/test_auth_provenance_security.py tests/test_operator_api.py tests/test_architecture_v7.py",
+      "returncode": 0,
+      "host_socket_permission_required": true,
+      "scope": "G1 shared-core parity, Personal Corpus, routing, agent lifecycle, RTL policy, operator API, and authorization regression"
+    },
+    "security_negative": {
+      "result": "PASS",
+      "tests_in_frozen_command": [
+        "owner isolation",
+        "closed MCP schemas",
+        "unsafe verifier command rejection",
+        "capability and route enforcement",
+        "no new network or shell path"
+      ],
+      "command": "PYTHONPATH=src bandit -q -lll -r src/research_workspace/laplace_core.py src/research_workspace/zetsu_mcp.py src/research_workspace/operator_api.py",
+      "returncode": 0,
+      "severity_threshold": "high"
+    },
+    "deterministic_static": [
+      {
+        "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m compileall -q src/research_workspace/laplace_core.py src/research_workspace/zetsu_mcp.py src/research_workspace/operator_api.py",
+        "returncode": 0
+      },
+      {
+        "command": "git diff --check",
+        "returncode": 0
+      }
+    ]
+  },
+  "persistence_and_restart": {
+    "new_schema": false,
+    "state_owner": "existing PersonalCorpusStore, AgentSandboxManager, and ZetsuAgentCoordinator stores",
+    "restart_test": "NOT_RUN",
+    "reason": "G1 adds a composition boundary only; no live service was started and the immutable production control plane was not touched.",
+    "interpretation": "Existing persistence and restart semantics remain delegated to the certified services and are covered by the selected lifecycle regression tests."
+  },
+  "metrics": {
+    "focused_test_returncode": 0,
+    "frozen_regression_returncode": 0,
+    "ruff_returncode": 0,
+    "mypy_returncode": 0,
+    "compileall_returncode": 0,
+    "bandit_high_returncode": 0,
+    "live_model_measurements": "NOT_RUN",
+    "gpu_vram_latency_throughput": "NOT_MEASURED",
+    "human_intervention_during_gates": "host-permission approval only for the existing socket-concurrency regression and Git linked-worktree metadata"
+  },
+  "security_and_negative_results": {
+    "status": "PASS",
+    "authorization": "Core delegates capability checks and owner-scoped stores; Zetsu remains a transport adapter.",
+    "routing": "Core delegates TieredServingService, preserving economy SystemVerilog restrictions and CodeV-disabled behavior.",
+    "verification": "Unsafe verifier argv is rejected before execution; deterministic gate projection is registry-owned.",
+    "network": "No cloud, upload, or new network behavior added."
+  },
+  "limitations": [
+    "The registered Zetsu repository-agent target is stale at eeb29f2; read-only proof succeeds, but mutating promotion for the current 96cb045-based worktree deterministically fails closed with apply_target_not_clean.",
+    "The frozen socket-concurrency test requires host socket permission because the restricted shell denies socket creation; the unchanged test passed under that permission.",
+    "No live model, GPU, CodeV, or localhost service was started; CodeV-disabled topology remains an intentional supported mode.",
+    "The full G0 production certification was not repeated, per the instruction to avoid redoing an already certified phase; focused previous-baseline regressions were run."
+  ],
+  "rollback_target": {
+    "commit": "96cb045f92ca2537ac18c03e666fb11310bf2ab7",
+    "description": "G1 parent/current v2 state before shared-core changes; production/v1 remains separately immutable."
+  },
+  "certification_artifact": "docs/v2-roadmap/certifications/G1-shared-core.json"
+}
