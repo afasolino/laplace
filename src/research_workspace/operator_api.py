@@ -49,6 +49,7 @@ from .operator_service import (
     RunExecutor,
 )
 from .laplace_core import LaplaceCore
+from .memory import MemoryService, SQLiteMemoryBackend
 from .personal_corpus import (
     CorpusError,
     PersonalCorpusStore,
@@ -486,6 +487,7 @@ def create_operator_app(
     tiered: TieredServingService | None = None,
     core: LaplaceCore | None = None,
     zetsu_enabled: bool = True,
+    memory: MemoryService | None = None,
     serving_profile_operator: ServingProfileOperator | None = None,
     registered_auth: RegisteredEmailAuth | None = None,
     conversation_store: ConversationStore | None = None,
@@ -505,11 +507,14 @@ def create_operator_app(
         operator.state_root / "requests/request_states.sqlite3"
     )
     client_devices = ClientDeviceStore(operator.state_root / "client/client_devices.sqlite3")
+    memory_service = memory or MemoryService(
+        SQLiteMemoryBackend(operator.state_root / "memory/memory.sqlite3")
+    )
     shared_core = (
         core
         if core is not None
         else (
-            LaplaceCore(operator.repository_root, corpus_store, tiered)
+            LaplaceCore(operator.repository_root, corpus_store, tiered, memory=memory_service)
             if tiered is not None
             else None
         )

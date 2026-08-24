@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Literal, TypeAlias
 
 from .model_routing import RoutingTaskMetadata, assess_rtl_worker_eligibility
+from .memory import MemoryService
 from .personal_corpus import PersonalCorpusStore
 from .service_tiers import ModelLane, ServiceTierError, TieredServingService
 from .user_capabilities import Capability
@@ -48,10 +49,12 @@ class LaplaceCore:
         tiered: TieredServingService,
         *,
         agent_coordinator: ZetsuAgentCoordinator | None = None,
+        memory: MemoryService | None = None,
     ) -> None:
         self.repository_root = repository_root.resolve()
         self.corpus = corpus
         self.tiered = tiered
+        self.memory = memory
         self._agent_coordinator = agent_coordinator
         self._agent_coordinator_lock = threading.Lock()
 
