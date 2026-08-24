@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "phase": "G11",
+  "title": "Subagents, RTL Specialist Modernization and GPU-Aware Scheduling",
+  "lifecycle_state": "CERTIFICATION",
+  "feature_lifecycle_state": "SHADOW",
+  "status": "CERTIFIED_WITH_TOOLCHAIN_BLOCKER",
+  "core_status": "CERTIFIED",
+  "generated_at_utc": "2026-08-24T19:53:26Z",
+  "control_plane": {
+    "production_root": "/home/giando/work/laplace",
+    "production_branch": "production/v1",
+    "production_source_modified": false,
+    "v2_root": "/home/giando/work/laplace-v2",
+    "v2_branch": "feature/laplace-v2",
+    "base_commit": "b88d03dedc3c286554ad93bd963b3a0289645ce6",
+    "candidate_commit": "36ddc6db6cc642e60cdefccc23bb40710638ba6c",
+    "worktree_status_before_certification_artifact": "clean after pushed G11 implementation commit; this artifact is the only pending change",
+    "production_runtime_restore": {
+      "command": "laplace zetsu start --repo /home/giando/work/laplace --nocodev --json",
+      "result": "READY",
+      "topology": "nocodev",
+      "qwen_status": "STARTED_READY",
+      "operator_status": "STARTED_READY",
+      "agent_execution_slot_limit": 1,
+      "pending_queue_capacity": 16,
+      "production_source_modified": false
+    },
+    "zetsu_mutation_note": "The required bounded read-only repository-agent proof passed without per_user_worktree_quota. Mutating delegation remained deterministically blocked by the stale promotion target (zetsu_agent_apply_target_not_clean); local implementation was used under the documented fallback."
+  },
+  "implementation": {
+    "service": "src/research_workspace/logical_subagents.py:GpuAwareSubagentScheduler",
+    "core_integration": "LaplaceCore exposes an injectable/lazy logical_subagents scheduler and run_logical_subagents adapter.",
+    "changed_paths": [
+      "src/research_workspace/logical_subagents.py",
+      "src/research_workspace/laplace_core.py",
+      "tests/test_logical_subagents_g11.py",
+      "docs/v2-roadmap/certifications/G11-subagents-models-scheduling.json"
+    ],
+    "properties": [
+      "Logical children are typed, owner/project scoped, bounded by queue width and spawn depth, and restricted to declared local read/verification/proposal capabilities.",
+      "The default mode is SERIAL with one GPU execution slot. QUEUED_LOGICAL preserves FIFO order while keeping actual GPU execution serial. REAL_CONCURRENT is rejected unless an explicit policy enables it with a GPU concurrency limit of at least two.",
+      "GPU admission requires an injected AVAILABLE observation and sufficient free MiB; unavailable or uncertain ownership fails closed. NVIDIA VRAM is treated as a separate resource and no memory-pool union is asserted.",
+      "Cooperative cancellation covers queued and running children; executor cancellation signals are propagated, queued cancellation does not execute the callable, and owner checks prevent cross-user cancellation.",
+      "Executor OOM is reported as RECOVERABLE and releases the slot so subsequent queued work can proceed. Other executor failures are typed FAILED; no automatic retry or hidden replay exists.",
+      "Queue outcomes preserve input order and expose queue position, observed queue wait, elapsed time, GPU observation and failure category. These observations are evidence fields, not unmeasured production claims."
+    ],
+    "security_boundaries": [
+      "The scheduler has no subprocess, shell, network, dynamic import or model-response execution path; model work is supplied only by the caller's cooperative executor.",
+      "Tasks cannot increase authority, spawn depth, GPU slots or concurrency through goal/context text. Real concurrency is a constructor policy decision and is not enabled by default.",
+      "A scheduler close signals queued/running work and never forcibly kills arbitrary processes. Durable whole-agent queue/restart ownership remains in the repaired production AgentTaskScheduler; logical callable state is intentionally not replayed after a scheduler restart.",
+      "No model backend, serving profile, CodeV route, production routing policy or source checkout was changed."
+    ]
+  },
+  "upstream_evaluation": [
+    {
+      "name": "NousResearch/hermes-agent",
+      "repository": "https://github.com/NousResearch/hermes-agent",
+      "inspected_revision": "74ad422d50e6d76e26ba5ce3b4d2a4d520e923dd",
+      "license": "MIT",
+      "license_path": "https://github.com/NousResearch/hermes-agent/blob/main/LICENSE",
+      "inspected_material": "Delegation and parallel-work documentation: isolated child context/tool sessions, bounded default width, flat default depth, parent interrupt propagation and result ordering guidance.",
+      "reuse_mode": "Architecture reference only. Laplace uses typed local tasks, one conservative GPU slot and no inherited arbitrary toolset or recursive delegation."
+    },
+    {
+      "name": "OpenHands/software-agent-sdk",
+      "repository": "https://github.com/OpenHands/software-agent-sdk",
+      "inspected_revision": "c20709fb587f71d38d4af62c4813ff4d2681fa02",
+      "license": "MIT",
+      "license_path": "https://github.com/OpenHands/software-agent-sdk/blob/main/LICENSE",
+      "inspected_material": "Current SDK repository boundaries and agent-server lifecycle notes: per-conversation lifecycle locks and interrupt propagation through the async conversation stack.",
+      "reuse_mode": "Architecture reference only. No OpenHands code, server, workspace runtime or dependency was copied."
+    }
+  ],
+  "rtl_ab_experiment": {
+    "status": "BLOCKED_CANDIDATE_ARTIFACT_AND_TOOLCHAIN_MISSING",
+    "control": {
+      "model": "CodeV-R1-7B BF16 control requested by phase; local available artifact observed as /home/giando/work/laplace/.models/CodeV-R1-RL-Qwen-7B-W4A16-AWQ",
+      "rollback": "retained; no route or profile promotion was attempted",
+      "measurement": "NOT_RUN_IN_G11_BECAUSE_THE_REQUIRED_CANDIDATE_COMPARISON_CANNOT_BE_FORMED"
+    },
+    "candidate": {
+      "model": "SiliconMind-V1.2-Qwen3-4B-T-2507 BF16",
+      "local_checkpoint_check": {
+        "command": "find /home/giando -maxdepth 5 -iname '*siliconmind*' -o -iname '*v1.2*' 2>/dev/null | head -100",
+        "result": "no output; no matching local checkpoint/config/tensor directory"
+      },
+      "promotion": "NOT_ATTEMPTED"
+    },
+    "full_topology_toolchain_check": {
+      "dry_run_command": "laplace zetsu start --repo /home/giando/work/laplace-v2 --dry-run --json",
+      "expected_vllm_executable": "/home/giando/work/laplace-v2/.venv-vllm-cu129/bin/vllm",
+      "start_command": "laplace zetsu start --repo /home/giando/work/laplace-v2 --json",
+      "exit_code": 2,
+      "result": "{\"error\":\"certified_vllm_executable_missing\",\"ok\":false}",
+      "interpretation": "The full CodeV/Qwen topology cannot be launched from the v2 toolchain in this worktree. No A/B score, latency, token rate, VRAM, OOM or co-residency measurement is fabricated."
+    },
+    "frozen_task_suite": "NOT_RUN; candidate artifact and full-topology toolchain are absent",
+    "repair_budget": "NOT_RUN",
+    "decision": "KEEP_CODEV_ROLLBACK_AND_DO_NOT_PROMOTE_SILICONMIND"
+  },
+  "executed_gates": {
+    "focused_development": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest -q tests/test_logical_subagents_g11.py",
+      "returncode": 0,
+      "tests": 5,
+      "covered": "Serial and queued logical FIFO behavior, default one-slot GPU bound, running cancellation, GPU uncertainty blocking, OOM recovery and slot release, explicit real-concurrency gate, owner scope, spawn depth and Core integration."
+    },
+    "frozen_phase_acceptance_and_previous_regression": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest -q tests/test_logical_subagents_g11.py tests/test_idle_consolidation_g10.py tests/test_gpu_coordination_v8.py tests/test_model_servers.py tests/test_production_robustness.py tests/test_hooks_g9.py tests/test_skills_g8.py tests/test_context_planner_g7.py tests/test_bounded_aci_g6.py tests/test_trajectory_g5.py tests/test_repository_context_g4.py tests/test_rules_g3.py tests/test_memory_g2.py tests/test_laplace_core_g1.py tests/test_zetsu_mcp.py tests/test_zetsu_agent_mcp.py tests/test_zetsu_agent_checkpoint.py tests/test_personal_corpus_api_v6.py tests/test_tiered_serving.py tests/test_auth_provenance_security.py tests/test_operator_api.py tests/test_architecture_v7.py",
+      "returncode": 0,
+      "host_socket_permission_required": true,
+      "covered": "G11 core plus G10, G8-G1 and selected v1 GPU ownership, model-server, production robustness, serving, API, security, MCP, checkpoint and architecture regressions."
+    },
+    "security_and_negative": {
+      "result": "PASS",
+      "commands": [
+        "PYTHONPATH=src ruff check src/research_workspace/logical_subagents.py src/research_workspace/laplace_core.py tests/test_logical_subagents_g11.py",
+        "PYTHONPATH=src mypy src/research_workspace/logical_subagents.py src/research_workspace/laplace_core.py tests/test_logical_subagents_g11.py",
+        "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m compileall -q src/research_workspace/logical_subagents.py src/research_workspace/laplace_core.py tests/test_logical_subagents_g11.py",
+        "PYTHONPATH=src bandit -q -lll -r src/research_workspace/logical_subagents.py src/research_workspace/laplace_core.py",
+        "git diff --check"
+      ],
+      "returncodes": [0, 0, 0, 0, 0],
+      "covered": [
+        "Invalid policy, scope, depth, duplicate IDs, queue bounds and cross-owner cancellation fail closed",
+        "Unknown/uncertain GPU observations and insufficient headroom never invoke an executor",
+        "No arbitrary command, subprocess, network, recursive delegation or auto-promotion path",
+        "Bandit returned zero high-severity findings"
+      ]
+    }
+  },
+  "comparison": {
+    "scheduler_modes": {
+      "serial": "PASS under deterministic executor; one active GPU slot",
+      "queued_logical": "PASS under deterministic executor; FIFO logical children with one active GPU slot",
+      "real_concurrent": "Mechanism test PASS only under explicit injected policy; not enabled or adopted for production"
+    },
+    "correctness": "NO_LOSS",
+    "security": "NO_LOSS",
+    "cancellation_recovery_fairness": "PASS for typed deterministic scheduler tests",
+    "model_or_hardware_efficiency": "NOT_MEASURED",
+    "production_concurrency_decision": "KEEP_SERIAL_ONE_GPU_SLOT",
+    "reason": "The target laptop GPU capacity is not transferable from the available A6000 evidence. A higher concurrent-serving policy requires a separate live target-hardware certification."
+  },
+  "metrics": {
+    "focused_test_returncode": 0,
+    "frozen_regression_returncode": 0,
+    "ruff_returncode": 0,
+    "mypy_returncode": 0,
+    "compileall_returncode": 0,
+    "bandit_high_returncode": 0,
+    "production_gpu_vram_latency_throughput": "NOT_MEASURED",
+    "rtl_ab_measurements": "BLOCKED_NOT_AVAILABLE",
+    "target_gpu_memory_pool_assumption": "NONE"
+  },
+  "limitations": [
+    "The mandatory SiliconMind-vs-CodeV RTL A/B could not run because the candidate checkpoint/config/tensors were absent locally and the v2 full-topology certified vLLM executable was missing. This is recorded as an exact toolchain/artifact blocker, not a model result.",
+    "No SiliconMind 8B diagnostic was attempted because the required 4B candidate was not available and the 4B comparison could not be formed.",
+    "No real target-laptop GPU concurrency, VRAM, OOM, latency, throughput or token-rate claim is made; the default remains one slot.",
+    "Logical callable state is intentionally not durably replayed after scheduler restart; durable whole-agent queue and checkpoint recovery remain in the repaired production control plane.",
+    "G0 certification was not repeated, per the roadmap instruction and previous certifications.",
+    "The socket-concurrency regression requires host socket permission because the restricted shell denies socket creation; the final selected suite passed with that permission."
+  ],
+  "rollback_target": {
+    "commit": "b88d03dedc3c286554ad93bd963b3a0289645ce6",
+    "description": "G10-certified shadow idle consolidation with G9-G1 capabilities; production/v1 remains separately immutable."
+  },
+  "certification_artifact": "docs/v2-roadmap/certifications/G11-subagents-models-scheduling.json"
+}
