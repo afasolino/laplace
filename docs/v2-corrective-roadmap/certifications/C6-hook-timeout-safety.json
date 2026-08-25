@@ -1,0 +1,66 @@
+{
+  "phase": "C6",
+  "status": "CERTIFIED",
+  "base_commit": "d068ed4",
+  "summary": "Trusted in-process hooks now expose cooperative deadline/cancellation semantics without claiming physical termination of arbitrary Python callbacks.",
+  "implementation": {
+    "callback_model": "trusted_host_registered_in_process",
+    "physical_termination_guaranteed": false,
+    "cooperative_cancel_signal": true,
+    "bounded_worker_limit": 4,
+    "late_completion_diagnostics": true,
+    "late_authoritative_result_discarded": true,
+    "pre_hook_timeout": "fail_closed",
+    "post_hook_timeout": "observational_only",
+    "shutdown": "reject_new_work_and_explicitly_leave_running_callbacks_cooperative"
+  },
+  "delegated_review": {
+    "substrate": "zetsu",
+    "status": "UNAVAILABLE_DIRTY_CALLER_STATE",
+    "error": "zetsu_agent_read_target_unavailable",
+    "reason": "The changed C6 files were uncommitted and therefore were not materialized in the isolated Zetsu worktree; exact local verification completed in Codex."
+  },
+  "tests": {
+    "focused": {
+      "command": "PYTHONPATH=src pytest -q tests/test_corrective_c6_hooks.py tests/test_hooks_g9.py",
+      "passed": 13,
+      "failed": 0
+    },
+    "previous_phase_regression": {
+      "command": "C0-C5 corrective and affected repository/runtime regression suite",
+      "passed": 73,
+      "failed": 0
+    },
+    "combined_c0_c6": {
+      "command": "C0-C6 corrective and affected repository/runtime regression suite",
+      "passed": 78,
+      "failed": 0
+    },
+    "ruff": {
+      "passed": true
+    },
+    "mypy": {
+      "passed": true,
+      "scope": "src/research_workspace/hooks.py"
+    },
+    "compileall": {
+      "passed": true
+    },
+    "git_diff_check": {
+      "passed": true
+    }
+  },
+  "schema_changes": false,
+  "security_notes": [
+    "A timed-out callback receives a cooperative cancellation signal and its result is never authoritative.",
+    "The bounded pool prevents one ignored callback per timeout from creating an unbounded thread population.",
+    "Pre-hook failures remain fail-closed and post-hook failures remain observational.",
+    "No callback process or thread is represented as physically terminated when Python cannot guarantee that fact."
+  ],
+  "changed_paths": [
+    "src/research_workspace/hooks.py",
+    "tests/test_corrective_c6_hooks.py",
+    "docs/v2-corrective-roadmap/certifications/C6-hook-timeout-safety.json"
+  ],
+  "production_checkout_modified": false
+}

@@ -1,11 +1,13 @@
 """Typed, local lifecycle hooks for Laplace.
 
 This module deliberately does not discover files, import plugins, invoke
-subprocesses, or interpret model output.  A hook is an in-process Python
-callback registered by the host, with a bounded timeout and a declared
-failure policy.  Security-sensitive pre hooks fail closed; post hooks are
-observability-only and their failures are recorded without changing the
-operation result.
+subprocesses, or interpret model output.  A hook is a trusted, host-registered
+in-process Python callback with a cooperative deadline/cancellation contract
+and a declared failure policy.  Python cannot physically terminate arbitrary
+running callback code from a thread timeout; late completion is therefore
+recorded and its result is discarded.  Security-sensitive pre hooks fail
+closed; post hooks are observability-only and their failures are recorded
+without changing the operation result.
 """
 
 from __future__ import annotations
@@ -15,8 +17,9 @@ import json
 import os
 import re
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeout
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
@@ -95,7 +98,7 @@ class HookResult:
 
 @dataclass(frozen=True)
 class HookContext:
-    """Read-only callback view with a shared cancellation signal."""
+    """Read-only callback view with cooperative cancellation and deadline."""
 
     stage: HookStage
     event_id: str
@@ -106,6 +109,16 @@ class HookContext:
     task_id: str
     payload: Mapping[str, object]
     cancel_event: threading.Event
+    deadline_monotonic: float = float("inf")
+    cooperative_cancel_event: threading.Event = field(default_factory=threading.Event)
+
+    @property
+    def cancellation_requested(self) -> bool:
+        return self.cancel_event.is_set() or self.cooperative_cancel_event.is_set()
+
+    @property
+    def deadline_exceeded(self) -> bool:
+        return time.monotonic() >= self.deadline_monotonic
 
 
 @dataclass(frozen=True)
@@ -180,6 +193,8 @@ _POST_STAGES = frozenset(
 )
 _STAGES = frozenset(HookStage)
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_MAX_CALLBACK_WORKERS = 4
+_MAX_LATE_COMPLETIONS = 128
 
 
 def _canonical(value: object) -> bytes:
@@ -230,6 +245,14 @@ class HookService:
         self._events: dict[str, JsonObject] = {}
         self._revision = 0
         self._lock = threading.RLock()
+        self._callback_executor = ThreadPoolExecutor(
+            max_workers=_MAX_CALLBACK_WORKERS,
+            thread_name_prefix="laplace-hook",
+        )
+        self._callback_active = 0
+        self._callback_peak = 0
+        self._late_completions: list[JsonObject] = []
+        self._closed = False
         self._load()
 
     def _load(self) -> None:
@@ -340,6 +363,8 @@ class HookService:
     ) -> None:
         """Register one typed callback; no file or command hook is accepted."""
 
+        if self._closed:
+            raise HookError("hook_service_closed")
         if not _SAFE_NAME.fullmatch(name) or name in self._registrations:
             raise HookError("hook_name_invalid_or_duplicate")
         if stage not in _STAGES or not callable(callback):
@@ -477,21 +502,44 @@ class HookService:
     def _run_callback(
         self, registration: _HookRegistration, context: HookContext
     ) -> HookResult:
-        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="laplace-hook")
-        future: Future[HookResult | None] = executor.submit(registration.callback, context)
+        if self._closed:
+            raise HookError("hook_service_closed")
+
+        def invoke() -> HookResult | None:
+            with self._lock:
+                self._callback_active += 1
+                self._callback_peak = max(self._callback_peak, self._callback_active)
+            try:
+                return registration.callback(context)
+            finally:
+                with self._lock:
+                    self._callback_active = max(0, self._callback_active - 1)
+
+        try:
+            future: Future[HookResult | None] = self._callback_executor.submit(invoke)
+        except RuntimeError as exc:
+            raise HookError("hook_service_closed") from exc
         try:
             value = future.result(timeout=registration.timeout_seconds)
         except FutureTimeout as exc:
+            context.cooperative_cancel_event.set()
             future.cancel()
-            executor.shutdown(wait=False, cancel_futures=True)
-            raise HookError("hook_timeout", {"hook": registration.name}) from exc
+            future.add_done_callback(
+                lambda completed: self._record_late_completion(completed, registration.name)
+            )
+            raise HookError(
+                "hook_timeout",
+                {
+                    "hook": registration.name,
+                    "cooperative_cancel_requested": True,
+                    "physical_termination_guaranteed": False,
+                    "callback_may_still_be_running": not future.cancelled(),
+                },
+            ) from exc
         except Exception as exc:
-            executor.shutdown(wait=False, cancel_futures=True)
             raise HookError(
                 "hook_exception", {"hook": registration.name, "exception": type(exc).__name__}
             ) from exc
-        else:
-            executor.shutdown(wait=True, cancel_futures=True)
         if value is None:
             return HookResult()
         if not isinstance(value, HookResult):
@@ -500,10 +548,60 @@ class HookService:
             raise HookError("hook_result_too_large", {"hook": registration.name})
         return value
 
+    def _record_late_completion(
+        self, future: Future[HookResult | None], hook_name: str
+    ) -> None:
+        if future.cancelled():
+            return
+        try:
+            value = future.result()
+            outcome = "returned" if value is None or isinstance(value, HookResult) else "invalid_result"
+            exception = None
+        except Exception as exc:  # pragma: no cover - exercised through diagnostics assertions
+            outcome = "raised"
+            exception = type(exc).__name__
+        with self._lock:
+            self._late_completions.append(
+                {
+                    "hook": hook_name,
+                    "outcome": outcome,
+                    "exception": exception,
+                    "authoritative_result_discarded": True,
+                }
+            )
+            del self._late_completions[:-_MAX_LATE_COMPLETIONS]
+
+    def diagnostics(self) -> JsonObject:
+        """Return bounded timeout/worker evidence without exposing callback data."""
+
+        with self._lock:
+            return {
+                "closed": self._closed,
+                "worker_limit": _MAX_CALLBACK_WORKERS,
+                "active_callbacks": self._callback_active,
+                "peak_active_callbacks": self._callback_peak,
+                "late_completion_count": len(self._late_completions),
+                "late_completions": list(self._late_completions),
+                "physical_termination_guaranteed": False,
+            }
+
+    def close(self, *, wait: bool = False) -> None:
+        """Stop accepting new callbacks; running trusted callbacks are cooperative."""
+
+        if not isinstance(wait, bool):
+            raise HookError("hook_shutdown_argument_invalid")
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        self._callback_executor.shutdown(wait=wait, cancel_futures=True)
+
     def dispatch(self, event: HookEvent, *, cancel_event: threading.Event | None = None) -> HookReport:
         """Run matching hooks once, in stable order, and persist the result."""
 
         self._validate_event(event)
+        if self._closed:
+            raise HookError("hook_service_closed")
         signal = cancel_event or threading.Event()
         with self._lock:
             existing = self._events.get(event.idempotency_key)
@@ -567,6 +665,7 @@ class HookService:
                 task_id=event.task_id,
                 payload=MappingProxyType(dict(event.payload)),
                 cancel_event=signal,
+                deadline_monotonic=time.monotonic() + registration.timeout_seconds,
             )
             try:
                 result = self._run_callback(registration, context)
@@ -580,7 +679,9 @@ class HookService:
                     )
                     with self._lock:
                         self._store_report(event, report)
-                    raise HookSecurityError(exc.category, failure.to_json()) from exc
+                    evidence = failure.to_json()
+                    evidence.update(exc.evidence)
+                    raise HookSecurityError(exc.category, evidence) from exc
                 continue
             executed.append(registration.name)
             if result.context_modification:
