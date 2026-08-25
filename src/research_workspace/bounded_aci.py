@@ -9,7 +9,10 @@ this class supplies a smaller structured tool surface for shadow comparison.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -20,7 +23,7 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, cast
 
 from .repository_authorization import RepositoryAuthorizationError, validate_workspace_path
 from .repository_context import RepoMap, RepositoryContextService
@@ -32,9 +35,14 @@ ACIPathOperation = Literal[
     "find_references",
     "search_text",
     "read_region",
+    "read_page",
     "inspect_diff",
     "edit_region",
     "create_text_file",
+    "begin_file_write",
+    "write_file_chunk",
+    "finalize_file_write",
+    "abort_file_write",
     "verify",
     "git_state",
 ]
@@ -49,6 +57,9 @@ _MAX_SEARCH_FILE_BYTES = 1_000_000
 _MAX_DIFF_BYTES = 64_000
 _MAX_RESULT_CHARS = 64_000
 _MAX_TEXT_CHARS = 256_000
+_MAX_WRITE_CHUNK_BYTES = 32_000
+_MAX_CURSOR_CHARS = 2_048
+_CURSOR_SCHEMA = 1
 
 
 class BoundedACIError(RuntimeError):
@@ -80,6 +91,50 @@ def _integer(value: object, *, label: str, minimum: int, maximum: int) -> int:
     return value
 
 
+def _sha256_hex(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or len(value) != 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise BoundedACIError(f"invalid_{label}")
+    return value
+
+
+def _cursor_encode(value: JsonObject) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _cursor_decode(value: object) -> JsonObject:
+    if not isinstance(value, str) or not value or len(value) > _MAX_CURSOR_CHARS:
+        raise BoundedACIError("aci_read_cursor_invalid")
+    try:
+        padded = value + "=" * (-len(value) % 4)
+        raw: object = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+    except (ValueError, UnicodeDecodeError, binascii.Error, json.JSONDecodeError) as exc:
+        raise BoundedACIError("aci_read_cursor_invalid") from exc
+    if not isinstance(raw, dict) or set(raw) != {
+        "schema",
+        "path",
+        "snapshot_sha256",
+        "next_line",
+        "page_lines",
+    }:
+        raise BoundedACIError("aci_read_cursor_invalid")
+    if raw["schema"] != _CURSOR_SCHEMA or not isinstance(raw["path"], str):
+        raise BoundedACIError("aci_read_cursor_invalid")
+    _sha256_hex(raw["snapshot_sha256"], label="read_cursor_snapshot")
+    if (
+        isinstance(raw["next_line"], bool)
+        or not isinstance(raw["next_line"], int)
+        or raw["next_line"] < 1
+        or isinstance(raw["page_lines"], bool)
+        or not isinstance(raw["page_lines"], int)
+        or not 1 <= raw["page_lines"] <= _MAX_READ_LINES
+    ):
+        raise BoundedACIError("aci_read_cursor_invalid")
+    return raw
+
+
 class BoundedRepositoryACI:
     """Small structured repository interface with no generic shell action."""
 
@@ -107,6 +162,7 @@ class BoundedRepositoryACI:
         )
         self.is_cancelled = is_cancelled or (lambda: False)
         self.repository_context = RepositoryContextService(self.worktree)
+        self._write_transactions: dict[str, JsonObject] = {}
 
     def _envelope(self, result: JsonObject) -> JsonObject:
         return {
@@ -237,6 +293,64 @@ class BoundedRepositoryACI:
                 "end_line": min(end, len(lines)),
                 "content": selected,
                 "sha256": hashlib.sha256(selected.encode("utf-8")).hexdigest(),
+            }
+        )
+
+    def read_page(
+        self,
+        *,
+        path: str,
+        cursor: str | None = None,
+        start_line: int = 1,
+        max_lines: int = _MAX_READ_LINES,
+    ) -> JsonObject:
+        """Read a bounded page with a content-bound continuation cursor."""
+
+        target = self._target(path)
+        relative = target.relative_to(self.worktree).as_posix()
+        page_lines = _integer(max_lines, label="page_lines", minimum=1, maximum=_MAX_READ_LINES)
+        requested_start = _integer(start_line, label="start_line", minimum=1, maximum=1_000_000)
+        cursor_value: JsonObject | None = None
+        if cursor is not None:
+            cursor_value = _cursor_decode(cursor)
+            if cursor_value["path"] != relative or cursor_value["page_lines"] != page_lines:
+                raise BoundedACIError("aci_read_cursor_invalid")
+            if requested_start != 1:
+                raise BoundedACIError("aci_read_cursor_invalid")
+            requested_start = cast(int, cursor_value["next_line"])
+        content = self._read_text(target, category="aci_read_page")
+        snapshot_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if cursor_value is not None and cursor_value["snapshot_sha256"] != snapshot_sha256:
+            raise BoundedACIError(
+                "aci_read_cursor_stale",
+                {"path": relative, "snapshot_sha256": snapshot_sha256},
+            )
+        lines = content.splitlines(keepends=True)
+        selected = "".join(lines[requested_start - 1 : requested_start - 1 + page_lines])
+        if len(selected.encode("utf-8")) > _MAX_READ_CHARS:
+            raise BoundedACIError("aci_read_page_output_too_large")
+        end_line = min(requested_start + page_lines - 1, len(lines))
+        next_cursor = None
+        if end_line < len(lines):
+            next_cursor = _cursor_encode(
+                {
+                    "schema": _CURSOR_SCHEMA,
+                    "path": relative,
+                    "snapshot_sha256": snapshot_sha256,
+                    "next_line": end_line + 1,
+                    "page_lines": page_lines,
+                }
+            )
+        return self._envelope(
+            {
+                "path": relative,
+                "start_line": requested_start,
+                "end_line": end_line,
+                "content": selected,
+                "content_sha256": hashlib.sha256(selected.encode("utf-8")).hexdigest(),
+                "snapshot_sha256": snapshot_sha256,
+                "next_cursor": next_cursor,
+                "total_lines": len(lines),
             }
         )
 
@@ -381,6 +495,230 @@ class BoundedRepositoryACI:
                 "path": target.relative_to(self.worktree).as_posix(),
                 "content_sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(),
             }
+        )
+
+    def _write_transaction(self, transaction_id: str) -> JsonObject:
+        identifier = _text(transaction_id, label="transaction_id", maximum=128)
+        if _IDENTIFIER.fullmatch(identifier) is None:
+            raise BoundedACIError("invalid_transaction_id")
+        transaction = self._write_transactions.get(identifier)
+        if transaction is None:
+            raise BoundedACIError("aci_write_transaction_not_found")
+        return transaction
+
+    @staticmethod
+    def _file_sha256(target: Path) -> str | None:
+        try:
+            details = target.lstat()
+            if not target.is_file() or target.is_symlink() or details.st_size > _MAX_FILE_BYTES:
+                raise BoundedACIError("aci_write_target_invalid")
+            return hashlib.sha256(target.read_bytes()).hexdigest()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise BoundedACIError("aci_write_target_unavailable") from exc
+
+    def _abort_if_cancelled(self, transaction_id: str) -> None:
+        if self.is_cancelled():
+            self.abort_file_write(transaction_id)
+            raise BoundedACIError("aci_write_cancelled")
+
+    def begin_file_write(
+        self,
+        *,
+        path: str,
+        expected_base_sha256: str | None = None,
+        expected_bytes: int | None = None,
+    ) -> JsonObject:
+        """Begin an ordered, same-directory staged write."""
+
+        if not self.allow_mutation:
+            raise BoundedACIError("aci_mutation_not_allowed")
+        if self.is_cancelled():
+            raise BoundedACIError("aci_write_cancelled")
+        target = self._target(path)
+        if not target.parent.is_dir() or (target.exists() and not target.is_file()):
+            raise BoundedACIError("aci_write_target_invalid")
+        if expected_base_sha256 is not None:
+            expected_base_sha256 = _sha256_hex(
+                expected_base_sha256, label="expected_base_sha256"
+            )
+        if expected_bytes is not None:
+            expected_bytes = _integer(
+                expected_bytes,
+                label="expected_bytes",
+                minimum=0,
+                maximum=_MAX_FILE_BYTES,
+            )
+        current_sha256 = self._file_sha256(target)
+        if expected_base_sha256 != current_sha256 and expected_base_sha256 is not None:
+            raise BoundedACIError(
+                "aci_write_base_changed",
+                {"path": target.relative_to(self.worktree).as_posix()},
+            )
+        transaction_id = f"aciw_{uuid.uuid4().hex}"
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.aci.tmp")
+        try:
+            with temporary.open("xb") as handle:
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temporary, 0o600)
+        except OSError as exc:
+            temporary.unlink(missing_ok=True)
+            raise BoundedACIError("aci_write_begin_failed") from exc
+        self._write_transactions[transaction_id] = {
+            "transaction_id": transaction_id,
+            "target": target,
+            "relative_path": target.relative_to(self.worktree).as_posix(),
+            "temporary": temporary,
+            "base_sha256": current_sha256,
+            "expected_bytes": expected_bytes,
+            "next_sequence": 0,
+            "next_offset": 0,
+            "last_sequence": None,
+            "last_offset": None,
+            "last_bytes": 0,
+            "last_sha256": None,
+        }
+        return self._envelope(
+            {
+                "transaction_id": transaction_id,
+                "path": target.relative_to(self.worktree).as_posix(),
+                "base_sha256": current_sha256,
+                "next_sequence": 0,
+                "next_offset": 0,
+            }
+        )
+
+    def write_file_chunk(
+        self,
+        *,
+        transaction_id: str,
+        sequence: int,
+        offset: int,
+        content: str,
+        chunk_sha256: str,
+    ) -> JsonObject:
+        """Append one ordered chunk; an exact retry of the last chunk is idempotent."""
+
+        if not self.allow_mutation:
+            raise BoundedACIError("aci_mutation_not_allowed")
+        transaction = self._write_transaction(transaction_id)
+        self._abort_if_cancelled(transaction_id)
+        sequence = _integer(sequence, label="sequence", minimum=0, maximum=1_000_000)
+        offset = _integer(offset, label="offset", minimum=0, maximum=_MAX_FILE_BYTES)
+        value = _text(content, label="chunk", maximum=_MAX_TEXT_CHARS)
+        raw = value.encode("utf-8")
+        if len(raw) > _MAX_WRITE_CHUNK_BYTES:
+            raise BoundedACIError("aci_write_chunk_too_large")
+        chunk_sha256 = _sha256_hex(chunk_sha256, label="chunk_sha256")
+        actual_sha256 = hashlib.sha256(raw).hexdigest()
+        if actual_sha256 != chunk_sha256:
+            raise BoundedACIError("aci_write_chunk_hash_mismatch")
+        if sequence == transaction["last_sequence"] and offset == transaction["last_offset"]:
+            if chunk_sha256 == transaction["last_sha256"] and len(raw) == transaction["last_bytes"]:
+                return self._envelope(
+                    {
+                        "transaction_id": transaction_id,
+                        "sequence": sequence,
+                        "offset": offset,
+                        "bytes": len(raw),
+                        "next_sequence": transaction["next_sequence"],
+                        "next_offset": transaction["next_offset"],
+                        "idempotent_retry": True,
+                    }
+                )
+            raise BoundedACIError("aci_write_duplicate_chunk_conflict")
+        if sequence != transaction["next_sequence"] or offset != transaction["next_offset"]:
+            raise BoundedACIError("aci_write_chunk_out_of_order")
+        expected_bytes = cast(int | None, transaction["expected_bytes"])
+        if expected_bytes is not None and offset + len(raw) > expected_bytes:
+            raise BoundedACIError("aci_write_expected_size_exceeded")
+        temporary = transaction["temporary"]
+        if not isinstance(temporary, Path) or temporary.is_symlink():
+            raise BoundedACIError("aci_write_staging_invalid")
+        try:
+            with temporary.open("ab") as handle:
+                handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            raise BoundedACIError("aci_write_chunk_failed") from exc
+        transaction["last_sequence"] = sequence
+        transaction["last_offset"] = offset
+        transaction["last_bytes"] = len(raw)
+        transaction["last_sha256"] = chunk_sha256
+        transaction["next_sequence"] = sequence + 1
+        transaction["next_offset"] = offset + len(raw)
+        return self._envelope(
+            {
+                "transaction_id": transaction_id,
+                "sequence": sequence,
+                "offset": offset,
+                "bytes": len(raw),
+                "next_sequence": transaction["next_sequence"],
+                "next_offset": transaction["next_offset"],
+                "idempotent_retry": False,
+            }
+        )
+
+    def finalize_file_write(self, *, transaction_id: str, content_sha256: str) -> JsonObject:
+        """Verify staged bytes and atomically publish the complete file."""
+
+        if not self.allow_mutation:
+            raise BoundedACIError("aci_mutation_not_allowed")
+        transaction = self._write_transaction(transaction_id)
+        self._abort_if_cancelled(transaction_id)
+        content_sha256 = _sha256_hex(content_sha256, label="content_sha256")
+        expected_bytes = transaction["expected_bytes"]
+        next_offset = cast(int, transaction["next_offset"])
+        if expected_bytes is not None and next_offset != expected_bytes:
+            raise BoundedACIError("aci_write_chunks_incomplete")
+        temporary = transaction["temporary"]
+        if not isinstance(temporary, Path) or temporary.is_symlink():
+            raise BoundedACIError("aci_write_staging_invalid")
+        try:
+            staged = temporary.read_bytes()
+        except OSError as exc:
+            raise BoundedACIError("aci_write_staging_unavailable") from exc
+        if len(staged) != next_offset or hashlib.sha256(staged).hexdigest() != content_sha256:
+            raise BoundedACIError("aci_write_finalize_hash_mismatch")
+        target = transaction["target"]
+        if not isinstance(target, Path) or self._file_sha256(target) != transaction["base_sha256"]:
+            raise BoundedACIError("aci_write_target_drift")
+        try:
+            validated_target = self._target(str(transaction["relative_path"]))
+            if validated_target != target or validated_target.is_symlink():
+                raise BoundedACIError("aci_write_target_invalid")
+            os.replace(temporary, target)
+        except OSError as exc:
+            raise BoundedACIError("aci_write_finalize_failed") from exc
+        self._write_transactions.pop(transaction_id, None)
+        return self._envelope(
+            {
+                "transaction_id": transaction_id,
+                "path": str(transaction["relative_path"]),
+                "bytes": len(staged),
+                "content_sha256": content_sha256,
+                "finalized": True,
+            }
+        )
+
+    def abort_file_write(self, transaction_id: str) -> JsonObject:
+        """Discard only the controlled staging file for one active transaction."""
+
+        transaction = self._write_transactions.pop(transaction_id, None)
+        if transaction is None:
+            raise BoundedACIError("aci_write_transaction_not_found")
+        temporary = transaction["temporary"]
+        if isinstance(temporary, Path) and not temporary.is_symlink():
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as exc:
+                self._write_transactions[transaction_id] = transaction
+                raise BoundedACIError("aci_write_abort_failed") from exc
+        return self._envelope(
+            {"transaction_id": transaction_id, "aborted": True}
         )
 
     @staticmethod
