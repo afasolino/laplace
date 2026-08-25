@@ -10,6 +10,7 @@ from research_workspace.memory import (
     MemoryCorruptionError,
     MemoryNotFoundError,
     MemoryProvenance,
+    MemorySchemaCompatibilityError,
     MemoryService,
     MemoryValidationError,
     SQLiteMemoryBackend,
@@ -101,6 +102,8 @@ def test_memory_restart_preserves_provenance_and_history(tmp_path: Path) -> None
     )[0].memory_id == replacement.memory_id
     assert len(restarted.history(owner_id="owner-a", project_id="project-a", memory_id=first.memory_id)) >= 2
     assert restarted.health()["backend"] == "sqlite_local_lexical_v1"
+    assert restarted.health()["capability"] == "deterministic_lexical_token_matching"
+    assert restarted.health()["semantic_similarity"] is False
 
 
 def test_contradiction_requires_explicit_supersession_and_delete_removes_searchability(
@@ -182,3 +185,56 @@ def test_model_proposals_need_approval_and_corrupt_provenance_fails_closed(
         corrupted.search(owner_id="owner-a", project_id="project-a", query="approved fact")
     with pytest.raises(MemoryCorruptionError):
         corrupted.health()
+
+
+def test_newer_schema_fails_closed_without_rewriting_metadata(tmp_path: Path) -> None:
+    database = tmp_path / "memory.sqlite3"
+    _service(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE memory_schema SET schema_version=99 WHERE singleton=1"
+        )
+    with pytest.raises(MemorySchemaCompatibilityError, match="memory_schema_newer_unsupported"):
+        SQLiteMemoryBackend(database)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT schema_version FROM memory_schema WHERE singleton=1"
+        ).fetchone()[0] == 99
+
+
+def test_unsupported_older_schema_is_recoverable_and_not_advanced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "memory.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE memory_schema (singleton INTEGER PRIMARY KEY, schema_version INTEGER NOT NULL, updated_at_utc TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO memory_schema VALUES (1, 0, '2026-01-01T00:00:00+00:00')"
+        )
+
+    def interrupted(*_: object) -> None:
+        raise MemorySchemaCompatibilityError("memory_schema_migration_interrupted")
+
+    monkeypatch.setattr(SQLiteMemoryBackend, "_migrate", staticmethod(interrupted))
+    with pytest.raises(MemorySchemaCompatibilityError, match="migration_interrupted"):
+        SQLiteMemoryBackend(database)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT schema_version FROM memory_schema WHERE singleton=1"
+        ).fetchone()[0] == 0
+
+
+def test_incompatible_schema_fails_closed(tmp_path: Path) -> None:
+    database = tmp_path / "memory.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE memory_schema (singleton INTEGER PRIMARY KEY, schema_version INTEGER NOT NULL, updated_at_utc TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO memory_schema VALUES (1, 1, '2026-01-01T00:00:00+00:00')"
+        )
+        connection.execute("CREATE TABLE memory_entries (memory_id TEXT PRIMARY KEY)")
+    with pytest.raises(MemorySchemaCompatibilityError, match="memory_schema_incompatible"):
+        SQLiteMemoryBackend(database)

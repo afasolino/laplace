@@ -1,0 +1,87 @@
+{
+  "phase": "C4",
+  "status": "CERTIFIED",
+  "certified_at_utc": "2026-08-25T08:20:20Z",
+  "branch": "feature/laplace-v2",
+  "base_commit": "9f728874377eaa7a71987e46becce03ba3656a87",
+  "remote": "git@github.com:afasolino/laplace.git",
+  "previous_phase": "docs/v2-corrective-roadmap/certifications/C3-aci-large-work.json",
+  "implementation": {
+    "summary": "Memory startup now negotiates schema metadata explicitly, rejects newer and malformed schemas before DDL can reinterpret them, and exposes the existing backend as deterministic lexical matching.",
+    "changed_paths": [
+      "src/research_workspace/memory.py",
+      "tests/test_memory_g2.py"
+    ],
+    "persistent_schema_change": false,
+    "supported_schema_versions": [1],
+    "supported_migrations": [],
+    "migration_policy": "No older schema is silently accepted; a future migration must be explicitly registered and run inside a transaction. Unsupported/failed migration state is left unchanged.",
+    "production_checkout_modified": false
+  },
+  "acceptance": {
+    "empty_db_initialization": true,
+    "same_version_reopen": true,
+    "newer_schema_fails_closed": true,
+    "newer_schema_metadata_unchanged": true,
+    "unsupported_older_state_not_advanced": true,
+    "interrupted_migration_state_recoverable": true,
+    "malformed_existing_schema_fails_before_ddl": true,
+    "provenance_and_approval_unchanged": true,
+    "owner_project_isolation_unchanged": true,
+    "lexical_capability_explicit": true,
+    "personal_corpus_remains_separate": true
+  },
+  "backend_contract": {
+    "backend": "sqlite_local_lexical_v1",
+    "matching": "Deterministic token/lexical matching over owner/project-scoped learned memory records.",
+    "semantic_similarity": false,
+    "embeddings": false,
+    "personal_corpus_rag": "Separate subsystem; not learned memory and not merged by this phase.",
+    "mem0_evaluation": "No deterministic local Mem0 evaluation or A/B evidence exists. Prior G2 evidence records mem0ai/mem0 as an architectural reference only; no dependency or provider was added.",
+    "experimental_comparison_artifact": "This certification records the comparison plan and non-promotion decision; a future semantic backend requires owner-scoped migration tests and deterministic lexical-vs-semantic A/B evidence before promotion."
+  },
+  "focused_tests": {
+    "command": "PYTHONPATH=src pytest -q tests/test_memory_g2.py",
+    "collected": 7,
+    "passed": 7,
+    "failed": 0,
+    "result": "PASS"
+  },
+  "previous_phase_regression": {
+    "command": "PYTHONPATH=src pytest -q tests/test_corrective_c1_results.py tests/test_corrective_c2_scheduler.py tests/test_corrective_c3_aci.py tests/test_logical_subagents_g11.py tests/test_bounded_aci_g6.py tests/test_memory_g2.py tests/test_repository_context_g4.py tests/test_hooks_g9.py tests/test_laplace_core_g1.py tests/test_zetsu_hotfix_lifecycle.py tests/test_release_v7.py",
+    "collected": 71,
+    "passed": 71,
+    "failed": 0,
+    "result": "PASS",
+    "c3_certification_json": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "static_checks": {
+    "ruff": "PASS",
+    "mypy": "PASS",
+    "compileall": "PASS"
+  },
+  "security_review": {
+    "result": "PASS",
+    "notes": [
+      "A newer schema marker is rejected before CREATE IF NOT EXISTS, index creation, or metadata update.",
+      "Malformed pre-existing tables are rejected before index DDL can fail ambiguously or reinterpret data.",
+      "No memory write path bypasses provenance, explicit intent, approval, owner, or project scope.",
+      "No Mem0 dependency, hosted service, cloud inference, or semantic-memory claim was introduced."
+    ]
+  },
+  "delegated_review": {
+    "substrate": "Zetsu",
+    "mode": "bounded_read_only",
+    "status": "INCOMPLETE",
+    "max_steps": 6,
+    "unresolved_failures": [],
+    "edits_applied": false,
+    "note": "The bounded reviewer exhausted its step cap without contradictory evidence; Codex source inspection and deterministic tests are authoritative for this gate."
+  },
+  "remaining_scope": [
+    "Repository parser contract remains C5 scope.",
+    "Hook timeout safety remains C6 scope."
+  ],
+  "production_source_modified": false
+}

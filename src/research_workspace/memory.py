@@ -32,6 +32,34 @@ _MEMORY_ID = re.compile(r"^mem_[a-f0-9]{32}$")
 _MAX_CONTENT_CHARS = 32_000
 _MAX_METADATA_BYTES = 16_384
 _SCHEMA_VERSION = 1
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({_SCHEMA_VERSION})
+_REQUIRED_SCHEMA_COLUMNS = {
+    "memory_schema": {"singleton", "schema_version", "updated_at_utc"},
+    "memory_entries": {
+        "memory_id",
+        "owner_id",
+        "project_id",
+        "kind",
+        "content",
+        "state",
+        "version",
+        "created_at_utc",
+        "updated_at_utc",
+        "provenance_json",
+        "content_sha256",
+        "contradiction_key",
+        "supersedes_memory_id",
+    },
+    "memory_events": {
+        "event_id",
+        "memory_id",
+        "owner_id",
+        "project_id",
+        "event_type",
+        "occurred_at_utc",
+        "payload_json",
+    },
+}
 
 
 class MemoryError(RuntimeError):
@@ -53,6 +81,10 @@ class MemoryNotFoundError(MemoryError):
 
 class MemoryCorruptionError(MemoryError):
     """Durable memory or provenance failed strict decoding."""
+
+
+class MemorySchemaCompatibilityError(MemoryCorruptionError):
+    """Durable memory schema is unsupported and must not be reinterpreted."""
 
 
 class MemoryKindValue(StrEnum):
@@ -275,7 +307,12 @@ def _record_from_row(row: sqlite3.Row) -> MemoryRecord:
 
 
 class SQLiteMemoryBackend:
-    """Private SQLite backend with atomic writes and deterministic lexical search."""
+    """Owner-scoped SQLite backend with deterministic lexical token matching.
+
+    This backend does not provide embedding or semantic similarity.  Personal
+    Corpus/RAG remains a separate document-evidence system, and a new memory
+    backend requires an independently certified migration and A/B evaluation.
+    """
 
     def __init__(self, path: Path, *, clock: Callable[[], str] = _now) -> None:
         self.path = path.resolve()
@@ -293,9 +330,86 @@ class SQLiteMemoryBackend:
         connection.execute("PRAGMA busy_timeout = 15000")
         return connection
 
+    @staticmethod
+    def _schema_marker(connection: sqlite3.Connection) -> int | None:
+        table = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_schema'"
+        ).fetchone()
+        if table is None:
+            return None
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(memory_schema)").fetchall()
+        }
+        if columns != _REQUIRED_SCHEMA_COLUMNS["memory_schema"]:
+            raise MemorySchemaCompatibilityError("memory_schema_incompatible")
+        row = connection.execute(
+            "SELECT schema_version FROM memory_schema WHERE singleton=1"
+        ).fetchone()
+        if row is None:
+            return None
+        version = row[0]
+        if isinstance(version, bool) or not isinstance(version, int) or version < 0:
+            raise MemorySchemaCompatibilityError("memory_schema_version_invalid")
+        return version
+
+    @staticmethod
+    def _validate_schema(connection: sqlite3.Connection) -> None:
+        for table, required in _REQUIRED_SCHEMA_COLUMNS.items():
+            columns = {
+                str(row[1])
+                for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if columns != required:
+                raise MemorySchemaCompatibilityError(
+                    "memory_schema_incompatible", {"table": table}
+                )
+
+    @staticmethod
+    def _validate_existing_schema(connection: sqlite3.Connection) -> None:
+        """Reject malformed pre-existing tables before CREATE IF NOT EXISTS/index DDL."""
+
+        for table, required in _REQUIRED_SCHEMA_COLUMNS.items():
+            exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if exists is None:
+                continue
+            columns = {
+                str(row[1])
+                for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if columns != required:
+                raise MemorySchemaCompatibilityError(
+                    "memory_schema_incompatible", {"table": table}
+                )
+
+    @staticmethod
+    def _migrate(connection: sqlite3.Connection, from_version: int) -> None:
+        """Run only explicitly registered migrations inside the caller transaction."""
+
+        if from_version not in _SUPPORTED_SCHEMA_VERSIONS:
+            raise MemorySchemaCompatibilityError(
+                "memory_schema_migration_unsupported",
+                {"from_version": from_version, "to_version": _SCHEMA_VERSION},
+            )
+
     def _initialize(self) -> None:
         try:
             with self._connect() as connection:
+                stored_version = self._schema_marker(connection)
+                if stored_version is not None and stored_version > _SCHEMA_VERSION:
+                    raise MemorySchemaCompatibilityError(
+                        "memory_schema_newer_unsupported",
+                        {
+                            "stored_version": stored_version,
+                            "supported_version": _SCHEMA_VERSION,
+                        },
+                    )
+                self._validate_existing_schema(connection)
+                if stored_version is not None and stored_version < _SCHEMA_VERSION:
+                    connection.execute("BEGIN IMMEDIATE")
+                    self._migrate(connection, stored_version)
                 connection.executescript(
                     """
                     CREATE TABLE IF NOT EXISTS memory_schema (
@@ -335,16 +449,20 @@ class SQLiteMemoryBackend:
                         ON memory_events(owner_id, project_id, memory_id, event_id);
                     """,
                 )
-                connection.execute(
-                    """
-                    INSERT INTO memory_schema(singleton, schema_version, updated_at_utc)
-                    VALUES (1, ?, ?)
-                    ON CONFLICT(singleton) DO UPDATE SET
-                        schema_version=excluded.schema_version,
-                        updated_at_utc=excluded.updated_at_utc
-                    """,
-                    (_SCHEMA_VERSION, self.clock()),
-                )
+                self._validate_schema(connection)
+                if stored_version is None:
+                    connection.execute(
+                        """
+                        INSERT INTO memory_schema(singleton, schema_version, updated_at_utc)
+                        VALUES (1, ?, ?)
+                        """,
+                        (_SCHEMA_VERSION, self.clock()),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE memory_schema SET updated_at_utc=? WHERE singleton=1",
+                        (self.clock(),),
+                    )
         except (sqlite3.DatabaseError, OSError) as exc:
             raise MemoryCorruptionError("memory_database_unavailable") from exc
 
@@ -704,6 +822,9 @@ class SQLiteMemoryBackend:
                 "path": str(self.path),
                 "entries": int(row["count"]) if row is not None else 0,
                 "backend": "sqlite_local_lexical_v1",
+                "capability": "deterministic_lexical_token_matching",
+                "semantic_similarity": False,
+                "personal_corpus_separate": True,
             }
         except MemoryError:
             raise
