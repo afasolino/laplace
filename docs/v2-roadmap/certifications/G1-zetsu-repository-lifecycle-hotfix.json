@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "phase": "G1-ZETSU-REPOSITORY-LIFECYCLE-HOTFIX",
+  "title": "Zetsu Repository Readiness and Worktree Lifecycle Hotfix",
+  "lifecycle_state": "CERTIFICATION",
+  "status": "CERTIFIED",
+  "generated_at_utc": "2026-08-25T07:44:00Z",
+  "control_plane": {
+    "production_root": "/home/giando/work/laplace",
+    "production_branch": "production/v1",
+    "production_source_modified": false,
+    "v2_root": "/home/giando/work/laplace-v2",
+    "v2_branch": "feature/laplace-v2",
+    "base_commit": "76201ca266ec9b9c70cf41f879865a9a7dd6d8d8",
+    "candidate_commit": "baac0895b6dd6641b468241c1e6ce701c059dc1e",
+    "trusted_remote": "git@github.com:afasolino/laplace.git"
+  },
+  "implementation": {
+    "authorization": "RepositoryAuthorizationStore readiness and clean-HEAD grant synchronization",
+    "sandbox": "AgentSandboxManager exact-commit worktree binding, bounded reconciliation and owner-scoped session inspection",
+    "agent": "ZetsuAgentCoordinator precise dirty-state materialization errors and setup-failure cleanup",
+    "cli": "authenticated laplace zetsu sessions --json and repository-bound readiness diagnostics",
+    "mcp": "repository-bound readiness in Zetsu status",
+    "persistent_schema": "repository_revision_events audit table created idempotently for existing authorization databases"
+  },
+  "security_negative_results": [
+    "unregistered repositories remain repository_not_registered",
+    "registered repositories without an owner grant remain repository_not_authorized",
+    "registered repository device/inode identity changes remain rejected",
+    "dirty caller content is never copied or auto-committed",
+    "dirty and cancelled-dirty worktrees remain preserved",
+    "cross-user session inspection/reconciliation remains rejected or owner-scoped",
+    "grant synchronization is performed only for the authorized canonical repository and clean committed HEAD",
+    "normal automatic cleanup uses the existing safe worktree lifecycle and never force-removes a dirty worktree"
+  ],
+  "executed_gates": {
+    "bounded_read_only_repository_agent_proof": {
+      "result": "PASS",
+      "repo_id": "laplace-v2",
+      "per_user_worktree_quota_failure": false,
+      "scope": "read-only repository-agent path after production scheduler/control-plane repair"
+    },
+    "focused_development": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest -q tests/test_repository_lifecycle_fix.py",
+      "passed": 15,
+      "failed": 0
+    },
+    "frozen_acceptance_and_previous_regression": {
+      "result": "PASS",
+      "command": "PYTHONPATH=src pytest -q affected repository, sandbox, agent, Zetsu, service-tier, CLI, runtime and security tests -k 'not test_real_http_api_dispatches_blocking_model_calls_concurrently'",
+      "passed": 131,
+      "failed": 0,
+      "separate_host_socket_regression": {
+        "command": "PYTHONPATH=src pytest -q tests/test_tiered_serving.py::test_real_http_api_dispatches_blocking_model_calls_concurrently",
+        "passed": 1,
+        "failed": 0,
+        "host_permission_required": true
+      }
+    },
+    "static_and_integrity": [
+      {
+        "command": "ruff check touched source and tests",
+        "result": "PASS"
+      },
+      {
+        "command": "mypy touched source",
+        "result": "PASS"
+      },
+      {
+        "command": "python -m compileall touched source",
+        "result": "PASS"
+      },
+      {
+        "command": "git diff --check",
+        "result": "PASS"
+      }
+    ],
+    "local_integration": {
+      "production_control_plane": "READY; runtime_topology=nocodev; CodeV state=intentionally_disabled",
+      "v2_repository_status": "registered and authorized; dirty development state reported as repository_state_not_materialized",
+      "authenticated_sessions_json": "PASS; owner-scoped records expose quota and safe-release fields",
+      "fixture_revision_sync_dirty_cleanup_resume": "PASS in focused deterministic suite",
+      "production_checkout": "read-only status remained clean"
+    }
+  },
+  "limitations": [
+    "A dirty canonical checkout intentionally retains the prior committed grant; checkpoint/normal commit followed by a new delegation is required to materialize newer content.",
+    "The live v2 repository status was not ready while the candidate/certification artifact was uncommitted; no dirty files are imported into isolated worktrees.",
+    "No model-serving behavior was changed or recertified."
+  ],
+  "rollback_target": "76201ca266ec9b9c70cf41f879865a9a7dd6d8d8",
+  "feature_lifecycle_state": "ENABLED"
+}
