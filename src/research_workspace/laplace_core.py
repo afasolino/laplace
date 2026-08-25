@@ -24,6 +24,7 @@ from .logical_subagents import (
     SubagentExecutor,
 )
 from .personal_corpus import PersonalCorpusStore
+from .repository_agent_service import RepositoryAgentService
 from .repository_context import (
     RepoMap,
     RepositoryContextService,
@@ -43,8 +44,8 @@ from .trajectory import (
 )
 from .user_capabilities import Capability
 from .verification_gates import VerificationGateRegistry
-from .zetsu_agent import ZetsuAgentCoordinator
-from .zetsu_results import ZetsuResultStore
+from .result_store import ResultStore
+from .verification_policy import validate_verification_argv
 
 JsonObject: TypeAlias = dict[str, object]
 VerificationDomain = Literal["python", "c", "verilog", "systemverilog"]
@@ -74,7 +75,8 @@ class LaplaceCore:
         corpus: PersonalCorpusStore,
         tiered: TieredServingService,
         *,
-        agent_coordinator: ZetsuAgentCoordinator | None = None,
+        repository_agent_service: RepositoryAgentService | None = None,
+        agent_coordinator: RepositoryAgentService | None = None,
         memory: MemoryService | None = None,
         rules: RuleService | None = None,
         repository_context: RepositoryContextService | None = None,
@@ -99,8 +101,10 @@ class LaplaceCore:
         self._consolidation = consolidation
         self._logical_subagents = logical_subagents
         self._repository_context = repository_context
-        self._agent_coordinator = agent_coordinator
-        self._agent_coordinator_lock = threading.Lock()
+        if repository_agent_service is not None and agent_coordinator is not None:
+            raise LaplaceCoreError("repository_agent_service_conflict")
+        self._repository_agent_service = repository_agent_service or agent_coordinator
+        self._repository_agent_lock = threading.Lock()
         self._repository_context_lock = threading.Lock()
         self._skill_registry_lock = threading.Lock()
         self._hooks_lock = threading.Lock()
@@ -145,7 +149,7 @@ class LaplaceCore:
         with self._logical_subagents_lock:
             if self._logical_subagents is None:
                 self._logical_subagents = GpuAwareSubagentScheduler(
-                    result_store=ZetsuResultStore(
+                    result_store=ResultStore(
                         self.repository_root / ".laplace-state" / "logical-subagent-results"
                     )
                 )
@@ -161,13 +165,36 @@ class LaplaceCore:
             return self._repository_context
 
     @property
-    def agent_coordinator(self) -> ZetsuAgentCoordinator:
-        """Return the one repository-agent coordinator shared by all adapters."""
+    def repository_agent_service(self) -> RepositoryAgentService | None:
+        """Return the adapter supplied for bounded repository-agent work."""
 
-        with self._agent_coordinator_lock:
-            if self._agent_coordinator is None:
-                self._agent_coordinator = ZetsuAgentCoordinator(self.tiered, self.corpus)
-            return self._agent_coordinator
+        with self._repository_agent_lock:
+            return self._repository_agent_service
+
+    def bind_repository_agent(self, service: RepositoryAgentService) -> None:
+        """Bind one repository-agent adapter without importing its implementation."""
+
+        if not all(
+            callable(getattr(service, name, None))
+            for name in (
+                "run",
+                "scheduler_status",
+                "task_status",
+                "cancel_queued",
+                "handoff_evidence",
+            )
+        ):
+            raise LaplaceCoreError("repository_agent_service_invalid")
+        with self._repository_agent_lock:
+            if self._repository_agent_service is not None and self._repository_agent_service is not service:
+                raise LaplaceCoreError("repository_agent_service_already_bound")
+            self._repository_agent_service = service
+
+    def _require_repository_agent(self) -> RepositoryAgentService:
+        service = self.repository_agent_service
+        if service is None:
+            raise LaplaceCoreError("repository_agent_unavailable")
+        return service
 
     def _require(self, user_id: str, capability: Capability) -> None:
         capabilities = self.tiered.effective_capabilities(user_id)
@@ -250,7 +277,7 @@ class LaplaceCore:
     ) -> JsonObject:
         """Run the bounded Qwen repository agent without an MCP dependency."""
 
-        return self.agent_coordinator.run(
+        return self._require_repository_agent().run(
             user_id=user_id,
             repo_id=repo_id,
             instruction=instruction,
@@ -320,7 +347,7 @@ class LaplaceCore:
     def scheduler_status(self, *, user_id: str) -> JsonObject:
         """Return the bounded repository-agent scheduler state."""
 
-        return self.agent_coordinator.scheduler_status(user_id=user_id)
+        return self._require_repository_agent().scheduler_status(user_id=user_id)
 
     def select_skills(
         self,
@@ -565,6 +592,6 @@ class LaplaceCore:
         """Apply the repository-agent verifier policy without executing a command."""
 
         try:
-            return ZetsuAgentCoordinator._verify_argv(worktree.resolve(), argv)
+            return validate_verification_argv(worktree.resolve(), argv)
         except ServiceTierError as exc:
             raise LaplaceCoreError(exc.category, exc.evidence) from exc

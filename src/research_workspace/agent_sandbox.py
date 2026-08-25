@@ -1598,7 +1598,7 @@ class AgentSandboxManager:
     ) -> sqlite3.Row:
         """Persist an exact clean-worktree diagnostic before authorizing release."""
 
-        from .zetsu_results import ZetsuResultStore
+        from .result_store import ResultStore
 
         deadline = self._row_deadline(row, binding)
         diagnostic: JsonObject = {
@@ -1621,7 +1621,7 @@ class AgentSandboxManager:
         }
         if checkpoint is not None:
             artifacts["checkpoint.json"] = checkpoint
-        delivery = ZetsuResultStore(
+        delivery = ResultStore(
             self.sandbox_root / "zetsu_agent_results"
         ).persist(
             user_id=binding.user_id,
@@ -1937,7 +1937,7 @@ class AgentSandboxManager:
         binding: AgentSessionBinding,
         checkpoint: Path,
     ) -> sqlite3.Row:
-        from .zetsu_results import ZetsuResultStore
+        from .result_store import ResultStore
 
         state = str(row["state"])
         status = "SUCCESS" if state == "SUCCEEDED_LEGACY" else "FAILED"
@@ -1952,7 +1952,7 @@ class AgentSandboxManager:
             "diff_hash": row["diff_hash"],
             "checkpoint_preserved": True,
         }
-        delivery = ZetsuResultStore(
+        delivery = ResultStore(
             self.sandbox_root / "zetsu_agent_results"
         ).persist(
             user_id=binding.user_id,

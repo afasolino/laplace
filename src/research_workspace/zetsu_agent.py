@@ -34,8 +34,9 @@ from .context_planner import DEFAULT_COMPACTION_RATIO, ContextPlanner, ContextPl
 from .personal_corpus import CorpusError, PersonalCorpusStore
 from .repository_authorization import RepositoryAuthorizationError, validate_workspace_path
 from .service_tiers import ModelLane, ServiceTierError, TieredServingService
+from .verification_policy import validate_verification_argv
 from .zetsu_context import compact_personal_results
-from .zetsu_results import ZetsuResultError, ZetsuResultStore
+from .result_store import ResultStore, ResultStoreError
 from .zetsu_scheduler import (
     AgentAdmission,
     AgentSchedulerError,
@@ -45,7 +46,6 @@ from .zetsu_scheduler import (
 
 JsonObject = dict[str, object]
 
-_ALLOWED_VERIFY_EXECUTABLES = frozenset({"pytest", "ruff", "mypy"})
 _MAX_READ_CHARS = 64_000
 _MAX_NEW_FILE_CHARS = 256_000
 _MAX_SEARCH_MATCHES = 80
@@ -284,7 +284,7 @@ class ZetsuAgentCoordinator:
         corpus: PersonalCorpusStore | None = None,
         *,
         checkpoint_store: AgentCheckpointStore | None = None,
-        result_store: ZetsuResultStore | None = None,
+        result_store: ResultStore | None = None,
         scheduler: AgentTaskScheduler | None = None,
     ) -> None:
         self.tiered = tiered
@@ -293,7 +293,7 @@ class ZetsuAgentCoordinator:
         self.checkpoints = checkpoint_store or AgentCheckpointStore(
             tiered.sandboxes.sandbox_root / "zetsu_agent_checkpoints"
         )
-        self.results = result_store or ZetsuResultStore(
+        self.results = result_store or ResultStore(
             tiered.sandboxes.sandbox_root / "zetsu_agent_results"
         )
         scheduler_capable = all(
@@ -876,91 +876,7 @@ class ZetsuAgentCoordinator:
 
     @classmethod
     def _verify_argv(cls, worktree: Path, value: object) -> list[str]:
-        if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or not value:
-            raise ServiceTierError("zetsu_agent_verify_argv_invalid")
-        argv = [str(item) for item in value]
-        if len(argv) > 64 or any(not item or len(item) > 1_000 or "\x00" in item for item in argv):
-            raise ServiceTierError("zetsu_agent_verify_argv_invalid")
-        executable = Path(argv[0]).name
-        if (
-            argv[0] != executable
-            or "/" in argv[0]
-            or "\\" in argv[0]
-            or executable not in _ALLOWED_VERIFY_EXECUTABLES
-        ):
-            raise ServiceTierError("zetsu_agent_verify_command_forbidden")
-
-        lowered = [item.casefold() for item in argv[1:]]
-        forbidden_options = {
-            "-c",
-            "-p",
-            "-o",
-            "--override-ini",
-            "--basetemp",
-            "--confcutdir",
-            "--config",
-            "--config-file",
-            "--cache-dir",
-            "--custom-typeshed-dir",
-            "--python-executable",
-            "--junit-xml",
-            "--junitxml",
-            "--output-file",
-            "--pyargs",
-            "--rootdir",
-        }
-        if any(
-            item in forbidden_options
-            or any(item.startswith(prefix + "=") for prefix in forbidden_options)
-            for item in lowered
-        ):
-            raise ServiceTierError("zetsu_agent_verify_command_forbidden")
-        if executable == "ruff" and (
-            "--fix" in lowered
-            or "--unsafe-fixes" in lowered
-            or "format" in lowered
-            or (argv[1:] and not argv[1].startswith("-") and argv[1] != "check")
-        ):
-            raise ServiceTierError("zetsu_agent_verify_command_forbidden")
-
-        # Non-option arguments that denote repository targets must remain inside the
-        # authorized worktree. Explicit node IDs such as tests/test_x.py::test_y are
-        # checked using their path component. Known selector values (-k/-m) are not paths.
-        skip_next_value = False
-        for index, item in enumerate(argv[1:], start=1):
-            if skip_next_value:
-                skip_next_value = False
-                continue
-            lowered_item = item.casefold()
-            if lowered_item in {"-k", "-m"} and executable == "pytest":
-                skip_next_value = True
-                continue
-            if item.startswith("@"):
-                raise ServiceTierError("zetsu_agent_verify_command_forbidden")
-            candidate = item.split("::", 1)[0]
-            if item.startswith("-"):
-                if "=" in item:
-                    option_value = item.split("=", 1)[1]
-                    if Path(option_value).is_absolute() or ".." in Path(option_value).parts:
-                        raise ServiceTierError("zetsu_agent_verify_path_forbidden")
-                continue
-            if executable == "ruff" and index == 1 and item == "check":
-                continue
-            path_value = Path(candidate)
-            if path_value.is_absolute() or ".." in path_value.parts:
-                raise ServiceTierError("zetsu_agent_verify_path_forbidden")
-            # Verification targets are repository paths, not arbitrary installed modules.
-            if candidate not in {"."} and not (
-                "/" in candidate
-                or "\\" in candidate
-                or path_value.suffix in {".py", ".pyi"}
-                or (worktree / candidate).exists()
-            ):
-                raise ServiceTierError("zetsu_agent_verify_target_invalid")
-            cls._relative_target(worktree, candidate)
-        if skip_next_value:
-            raise ServiceTierError("zetsu_agent_verify_argv_invalid")
-        return argv
+        return validate_verification_argv(worktree, value)
 
     @staticmethod
     def _verification_qualifies(
@@ -2269,7 +2185,7 @@ class ZetsuAgentCoordinator:
             raise ServiceTierError(
                 str(failure_category), evidence if isinstance(evidence, dict) else None
             ) from exc
-        except ZetsuResultError as exc:
+        except ResultStoreError as exc:
             failure_category = exc.category
             self._finalize_terminal_failure_best_effort(ctx, state, exc.category)
             raise ServiceTierError(exc.category) from exc
@@ -2354,7 +2270,7 @@ class ZetsuAgentCoordinator:
                 summary=final_result,
                 artifacts=artifacts,
             )
-        except ZetsuResultError as exc:
+        except ResultStoreError as exc:
             self._record_failure_best_effort(ctx, state, exc.category)
             raise ServiceTierError(exc.category) from exc
         self.tiered.sandboxes.record_result(

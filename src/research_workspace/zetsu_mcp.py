@@ -20,6 +20,7 @@ from .model_routing import (
 from .agent_sandbox import AgentSandboxError
 from .laplace_core import LaplaceCore
 from .personal_corpus import CorpusError, PersonalCorpusStore
+from .repository_agent_service import RepositoryAgentService
 from .service_tiers import ModelLane, ServiceTierError, TieredServingService
 from .user_capabilities import Capability
 from .versioning import version_record
@@ -512,13 +513,19 @@ class ZetsuService:
         # Retrieval and the dedicated CodeV path do not require a Qwen-agent sandbox.
         # Construct the coordinator only for agent_task, while retaining one shared
         # per-session lock table even when concurrent requests arrive first.
-        self._agent_coordinator: ZetsuAgentCoordinator | None = None
+        self._agent_coordinator: RepositoryAgentService | None = None
         self._agent_coordinator_lock = threading.Lock()
 
-    def _agent_service(self) -> ZetsuAgentCoordinator:
+    def _agent_service(self) -> RepositoryAgentService:
         with self._agent_coordinator_lock:
             if self._agent_coordinator is None:
-                self._agent_coordinator = self._core().agent_coordinator
+                core = self._core()
+                service = core.repository_agent_service
+                if service is None:
+                    service = ZetsuAgentCoordinator(self.tiered, self.corpus)
+                    core.bind_repository_agent(service)
+                self._agent_coordinator = service
+            assert self._agent_coordinator is not None
             return self._agent_coordinator
 
     def _core(self) -> LaplaceCore:
@@ -574,7 +581,7 @@ class ZetsuService:
                 "policy": "bounded_policy_eligible_rtl_only",
             },
             "repository": repository,
-            "agent_scheduler": self._core().scheduler_status(user_id=user_id),
+            "agent_scheduler": self._agent_service().scheduler_status(user_id=user_id),
         }
 
     def call(self, user_id: str, name: str, arguments: Mapping[str, object]) -> JsonObject:
@@ -802,7 +809,8 @@ class ZetsuService:
                 ),
             )
         if name == "get_result":
-            return self._agent_service().results.page(
+            coordinator = cast(ZetsuAgentCoordinator, self._agent_service())
+            return coordinator.results.page(
                 user_id=user_id,
                 repo_id=_text(args.get("repo_id"), label="repo_id", maximum=128),
                 session_id=_session_id(args.get("session_id")),

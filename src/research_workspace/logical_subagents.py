@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Literal, TypeAlias, cast
 
-from .zetsu_results import ZetsuResultError, ZetsuResultStore
+from .result_store import ResultStore, ResultStoreError
 
 JsonObject: TypeAlias = dict[str, object]
 GpuStatus = Literal["AVAILABLE", "UNAVAILABLE", "UNCERTAIN"]
@@ -336,7 +336,7 @@ class GpuAwareSubagentScheduler:
         *,
         policy: SubagentSchedulerPolicy | None = None,
         gpu_probe: GpuProbe | None = None,
-        result_store: ZetsuResultStore | None = None,
+        result_store: ResultStore | None = None,
     ) -> None:
         self.policy = policy or SubagentSchedulerPolicy()
         self.gpu_probe = gpu_probe or GpuAvailability.unavailable
@@ -434,7 +434,7 @@ class GpuAwareSubagentScheduler:
                 summary=f"SUCCEEDED:{task.task_id}",
                 artifacts={"result.json": encoded_bytes},
             )
-        except ZetsuResultError as exc:
+        except ResultStoreError as exc:
             if len(encoded_bytes) <= 128_000:
                 return result, None, None, "FAILED", exc.category
             return (
@@ -790,7 +790,7 @@ class GpuAwareSubagentScheduler:
                 offset=offset,
                 max_bytes=max_bytes,
             )
-        except ZetsuResultError as exc:
+        except ResultStoreError as exc:
             raise LogicalSubagentError(exc.category) from exc
 
     def close(self, *, wait_timeout_seconds: float = 1.0) -> None:
