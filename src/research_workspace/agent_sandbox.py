@@ -485,8 +485,9 @@ class AgentSandboxManager:
                     return self.require_active(str(existing["session_id"]), user_id=user_id)
             if identifier in self._sessions:
                 raise AgentSandboxError("session_exists", {"session_id": identifier})
+            prepared = self.authorizations.prepare_new_session(user_id, repo_id)
+            grant = prepared.grant
             self._require_quota(user_id)
-        grant = self.authorizations.require_grant(user_id, repo_id)
         target = self.sandbox_root / user_id / identifier
         if target.exists():
             raise AgentSandboxError("worktree_exists", {"path": str(target)})
@@ -519,11 +520,7 @@ class AgentSandboxManager:
             check=False,
             timeout=30,
         )
-        if (
-            head.returncode != 0
-            or head.stdout.strip()
-            and head.stdout.strip() != grant.base_revision
-        ):
+        if head.returncode != 0 or head.stdout.strip() != grant.base_revision:
             self._runner(
                 [
                     "git",
@@ -540,10 +537,29 @@ class AgentSandboxManager:
                 timeout=120,
             )
             raise AgentSandboxError("base_revision_race")
+        try:
+            self.authorizations.assert_revision(grant)
+        except RepositoryAuthorizationError as exc:
+            self._runner(
+                [
+                    "git",
+                    "-C",
+                    str(grant.repository.canonical_root),
+                    "worktree",
+                    "remove",
+                    "--force",
+                    str(target),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=120,
+            )
+            raise AgentSandboxError(exc.category, exc.evidence) from exc
         binding = AgentSessionBinding(
             session_id=identifier,
             user_id=user_id,
-            repo_id=repo_id,
+            repo_id=grant.repository.repo_id,
             canonical_repository_root=str(grant.repository.canonical_root),
             worktree_root=str(target.resolve(strict=True)),
             base_revision=grant.base_revision,
@@ -628,7 +644,13 @@ class AgentSandboxManager:
                     timeout=120,
                 )
                 raise AgentSandboxError("session_exists") from exc
-            self._event(connection, binding, "CREATED", "ACTIVE", {})
+            self._event(
+                connection,
+                binding,
+                "CREATED",
+                "ACTIVE",
+                {"revision_sync": prepared.revision_sync},
+            )
             self._sessions[identifier] = binding
         return binding
 
@@ -1002,6 +1024,10 @@ class AgentSandboxManager:
 
     @staticmethod
     def _public_record(row: sqlite3.Row, *, operator: bool) -> JsonObject:
+        changed_paths = json.loads(str(row["changed_paths_json"]))
+        clean = isinstance(changed_paths, list) and not changed_paths and row["diff_hash"] is None
+        state = str(row["state"])
+        physical_present = str(row["physical_state"]) == "PRESENT"
         value: JsonObject = {
             "session_id": str(row["session_id"]),
             "user_id": str(row["user_id"]) if operator else "self",
@@ -1013,12 +1039,12 @@ class AgentSandboxManager:
             "completed_at_utc": row["completed_at_utc"],
             "task_title": str(row["task_title"]),
             "instruction_digest": str(row["instruction_digest"]),
-            "state": str(row["state"]),
+            "state": state,
             "lane": row["lane"],
             "model_name": row["sanitized_model_name"],
             "tool_policy": json.loads(str(row["tool_policy_json"])),
             "command_count": int(row["command_count"]),
-            "changed_paths": json.loads(str(row["changed_paths_json"])),
+            "changed_paths": changed_paths,
             "diff_hash": row["diff_hash"],
             "verification_summary": row["verification_summary"],
             "export_state": str(row["export_state"]),
@@ -1026,11 +1052,23 @@ class AgentSandboxManager:
             "result_id": row["result_id"],
             "cleanup_eligible": bool(row["cleanup_eligible"]),
             "physical_state": str(row["physical_state"]),
+            "worktree_clean": clean,
+            "counts_against_quota": physical_present and state in _ACTIVE_QUOTA_STATES,
+            "safely_releasable": clean
+            and (
+                (
+                    state in _GC_TERMINAL_STATES
+                    and (bool(row["cleanup_eligible"]) or state.endswith("_LEGACY"))
+                )
+                or state == "FAILED"
+            ),
             "network_enabled": False,
         }
         if operator:
             value["canonical_repository_root"] = str(row["canonical_repository_root"])
             value["worktree_root"] = str(row["worktree_root"])
+        else:
+            value["worktree_path"] = str(row["worktree_root"])
         return value
 
     def start_task(
@@ -1640,6 +1678,10 @@ class AgentSandboxManager:
             "prior_state": state,
             "worktree_root": binding.worktree_root,
         }
+        if state == "CANCELLED_DIRTY":
+            return {**item, "action": "PROTECTED", "reason": "cancelled_dirty_preserved"}
+        if state == "STALE_GRANT":
+            return {**item, "action": "PROTECTED", "reason": "stale_grant_preserved"}
         if not self._marker_matches(row, binding):
             return {**item, "action": "PROTECTED", "reason": "ownership_proof_invalid"}
         registered, registration_reason = self._registered_worktree(binding)
@@ -1763,7 +1805,8 @@ class AgentSandboxManager:
             raise AgentSandboxError("worktree_reconcile_limit_invalid")
         clauses = [
             "physical_state='PRESENT'",
-            "state IN ('ACTIVE','RUNNING','FAILED','INTERRUPTED_RESUMABLE','STALE_DIRTY')",
+            "state IN ('ACTIVE','RUNNING','FAILED','INTERRUPTED_RESUMABLE','STALE_DIRTY',"
+            "'CANCELLED_DIRTY','STALE_GRANT')",
         ]
         values: list[object] = []
         if user_id is not None:

@@ -442,6 +442,43 @@ class ZetsuAgentCoordinator:
             unique_changed[:_MAX_CHANGED_PATHS],
         )
 
+    def _raise_materialization_failure_if_needed(
+        self, ctx: AgentRunContext, relative_path: str
+    ) -> None:
+        """Differentiate caller-only dirty files from an ordinary missing target."""
+
+        canonical = Path(ctx.binding.canonical_repository_root).resolve(strict=True)
+        try:
+            target = validate_workspace_path(canonical, relative_path)
+        except RepositoryAuthorizationError:
+            return
+        head = self._run_git(canonical, ["rev-parse", "--verify", "HEAD"])
+        status = self._run_git(
+            canonical, ["status", "--porcelain=v1", "--untracked-files=all"]
+        )
+        if head.returncode != 0 or status.returncode != 0:
+            return
+        current_head = head.stdout.strip()
+        working_tree_clean = not bool(status.stdout.strip())
+        if target.is_file() and (
+            not working_tree_clean or current_head != ctx.binding.base_revision
+        ):
+            category = (
+                "repository_state_not_materialized"
+                if not working_tree_clean
+                else "repository_revision_not_materialized"
+            )
+            raise ServiceTierError(
+                category,
+                {
+                    "canonical_root": str(canonical),
+                    "current_head": current_head,
+                    "granted_revision": ctx.binding.base_revision,
+                    "working_tree_clean": working_tree_clean,
+                    "path": relative_path,
+                },
+            )
+
     def _exact_patch(self, worktree: Path, changed_paths: Sequence[str]) -> str:
         tracked = self._run_git(
             worktree,
@@ -684,7 +721,10 @@ class ZetsuAgentCoordinator:
                         break
         return "\n".join(matches) if matches else "NO_MATCHES"
 
-    def _read(self, worktree: Path, action: Mapping[str, object]) -> str:
+    def _read(self, ctx: AgentRunContext | Path, action: Mapping[str, object]) -> str:
+        # Preserve the path-based helper contract used by older deterministic
+        # tests; materialization checks require the full run context.
+        worktree = ctx.worktree if isinstance(ctx, AgentRunContext) else ctx
         values = action.get("paths")
         if values is None:
             values = [action.get("path")]
@@ -700,6 +740,12 @@ class ZetsuAgentCoordinator:
         for value in values:
             target = self._relative_target(worktree, value)
             if not target.is_file() or target.stat().st_size > 2_000_000:
+                if (
+                    not target.exists()
+                    and isinstance(value, str)
+                    and isinstance(ctx, AgentRunContext)
+                ):
+                    self._raise_materialization_failure_if_needed(ctx, value)
                 raise ServiceTierError("zetsu_agent_read_target_unavailable")
             try:
                 content = target.read_text(encoding="utf-8")
@@ -778,6 +824,9 @@ class ZetsuAgentCoordinator:
             self._check_text(old, maximum=_MAX_NEW_FILE_CHARS)
             self._check_text(new, maximum=_MAX_NEW_FILE_CHARS)
             if not target.is_file():
+                self._raise_materialization_failure_if_needed(
+                    ctx, target.relative_to(ctx.worktree).as_posix()
+                )
                 raise ServiceTierError("zetsu_agent_edit_target_unavailable")
             if target not in originals:
                 try:
@@ -813,6 +862,10 @@ class ZetsuAgentCoordinator:
             raise ServiceTierError("zetsu_agent_create_invalid")
         self._check_text(content, maximum=_MAX_NEW_FILE_CHARS)
         if target.exists() or not target.parent.is_dir():
+            if not target.exists():
+                self._raise_materialization_failure_if_needed(
+                    ctx, target.relative_to(ctx.worktree).as_posix()
+                )
             raise ServiceTierError("zetsu_agent_create_target_invalid")
         try:
             with target.open("x", encoding="utf-8", newline="\n") as handle:
@@ -1600,6 +1653,25 @@ class ZetsuAgentCoordinator:
             # Preserve the original failure/cancellation category.
             pass
 
+    def _release_setup_session_best_effort(
+        self, *, user_id: str, session_id: str, creating: bool
+    ) -> None:
+        """Release only a fresh, untouched setup session after preflight failure."""
+
+        if not creating:
+            return
+        try:
+            inspect = self.tiered.sandboxes.inspect(session_id, user_id=user_id)
+            if (
+                inspect.get("state") == "ACTIVE"
+                and inspect.get("physical_state") == "PRESENT"
+                and inspect.get("changed_paths") == []
+            ):
+                self.tiered.sandboxes.close_if_clean(session_id, user_id=user_id)
+        except Exception:
+            # The original deterministic failure is more useful than cleanup noise.
+            pass
+
     def _finalize_terminal_failure_best_effort(
         self, ctx: AgentRunContext, state: AgentExecutionState, category: str
     ) -> None:
@@ -1774,6 +1846,11 @@ class ZetsuAgentCoordinator:
                     state=scheduler_state,
                     failure_category=str(category),
                 )
+            self._release_setup_session_best_effort(
+                user_id=user_id,
+                session_id=effective_session,
+                creating=creating,
+            )
             raise
         finally:
             lock.release()
@@ -2109,7 +2186,7 @@ class ZetsuAgentCoordinator:
                 elif action_name == "search":
                     observation = self._search(ctx, state, action)
                 elif action_name == "read":
-                    observation = self._read(worktree, action)
+                    observation = self._read(ctx, action)
                 elif action_name == "retrieve":
                     observation = self._retrieve(ctx, state, action)
                 elif action_name == "edit":

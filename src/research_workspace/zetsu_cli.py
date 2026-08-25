@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import urllib.error
@@ -24,6 +25,7 @@ from .zetsu_config import configure as configure_zetsu
 from .zetsu_config import remove as remove_zetsu
 from .zetsu_config import status as zetsu_status
 from .zetsu_runtime import (
+    bearer_token_file,
     default_state_root,
     load_local_plus_token,
     start_local_runtime,
@@ -77,6 +79,9 @@ def _parser() -> argparse.ArgumentParser:
     worktrees = sub.add_parser("worktrees")
     worktrees.add_argument("--state-root", type=Path, default=default_state_root())
     worktrees.add_argument("--json", action="store_true")
+    sessions = sub.add_parser("sessions")
+    sessions.add_argument("--state-root", type=Path, default=default_state_root())
+    sessions.add_argument("--json", action="store_true")
     gc = sub.add_parser("gc")
     gc.add_argument("--state-root", type=Path, default=default_state_root())
     gc.add_argument("--dry-run", action="store_true")
@@ -369,6 +374,64 @@ def _load_command_token(
     return True
 
 
+def _local_principal(state_root: Path, token_env_var: str = DEFAULT_TOKEN_ENV) -> str | None:
+    """Resolve the authenticated local bearer principal without exposing the token."""
+
+    token = os.environ.get(token_env_var)
+    if not token:
+        return None
+    path = bearer_token_file(state_root)
+    try:
+        if path.stat().st_mode & 0o077:
+            return None
+        raw: object = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    tokens = raw.get("tokens") if isinstance(raw, dict) else None
+    if not isinstance(tokens, dict):
+        return None
+    matches = [
+        str(binding.get("user_id"))
+        for candidate, binding in tokens.items()
+        if candidate == token
+        and isinstance(binding, dict)
+        and isinstance(binding.get("user_id"), str)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _repository_readiness(repository: Path, state_root: Path) -> dict[str, object]:
+    principal = _local_principal(state_root)
+    if principal is None:
+        return {
+            "principal_id": None,
+            "canonical_root": str(repository.resolve()),
+            "agent_task_ready": False,
+            "state": "authenticated_principal_unavailable",
+        }
+    try:
+        authorizations = RepositoryAuthorizationStore(
+            state_root.resolve() / "tiered_serving/repository_authorizations.sqlite3"
+        )
+        readiness = authorizations.readiness(principal, repository)
+    except sqlite3.Error:
+        state = "repository_authorization_state_unavailable"
+        return {
+            "principal_id": principal,
+            "canonical_root": str(repository.resolve()),
+            "agent_task_ready": False,
+            "state": state,
+        }
+    except (OSError, RepositoryAuthorizationError, ValueError) as exc:
+        return {
+            "principal_id": principal,
+            "canonical_root": str(repository.resolve()),
+            "agent_task_ready": False,
+            "state": str(getattr(exc, "category", type(exc).__name__)),
+        }
+    return {"principal_id": principal, **readiness}
+
+
 def _diagnostic_payload(
     repository: Path,
     *,
@@ -385,6 +448,7 @@ def _diagnostic_payload(
     online: dict[str, object] | None = None
     laplace: dict[str, object] | None = None
     readiness: dict[str, object] | None = None
+    repository_readiness = _repository_readiness(repository, state_root)
     detail = "offline"
     online_ok = True
     if not offline and local_ok and value.endpoint and value.token_env_var:
@@ -418,6 +482,14 @@ def _diagnostic_payload(
     elif not local_ok:
         online_ok = False
         detail = "configuration_incomplete_or_incompatible"
+    if (
+        not offline
+        and local_ok
+        and online_ok
+        and repository_readiness.get("agent_task_ready") is not True
+    ):
+        online_ok = False
+        detail = f"repository:{repository_readiness.get('state', 'not_ready')}"
     return {
         "ok": local_ok and online_ok,
         "action": command,
@@ -428,6 +500,7 @@ def _diagnostic_payload(
         "readiness": readiness,
         "detail": detail,
         **value.as_dict(),
+        "repository": repository_readiness,
         "codex": _codex_recognition(repository),
     }
 
@@ -585,6 +658,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "action": "worktrees",
                 "count": len(records),
                 "worktrees": records,
+            }
+        elif args.command == "sessions":
+            _load_command_token(DEFAULT_ENDPOINT, DEFAULT_TOKEN_ENV, args.state_root)
+            principal = _local_principal(args.state_root)
+            if principal is None:
+                raise ZetsuConfigError("authenticated_principal_unavailable")
+            manager = _worktree_manager(args.state_root)
+            records = manager.list_mine(principal)
+            payload = {
+                "ok": True,
+                "action": "sessions",
+                "principal_id": principal,
+                "count": len(records),
+                "sessions": records,
             }
         elif args.command == "gc":
             manager = _worktree_manager(args.state_root)

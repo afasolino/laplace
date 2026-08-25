@@ -65,10 +65,11 @@ def test_bare_zetsu_configures_then_runs_status_and_test(
         lambda _: {"recognized": True},
     )
 
-    assert zetsu_cli.main([]) == 0
+    assert zetsu_cli.main([]) == 2
     output = capsys.readouterr().out
     assert "action: ensure" in output
     assert "configured_now: True" in output
+    assert "repository:authenticated_principal_unavailable" in output
     assert retrieval_calls == [False, True]
     assert (repo / ".agents/skills/zetsu/SKILL.md").is_file()
 

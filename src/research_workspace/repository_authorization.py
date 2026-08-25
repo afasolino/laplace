@@ -44,6 +44,14 @@ class RepositoryGrant:
     base_revision: str
 
 
+@dataclass(frozen=True)
+class PreparedRepositoryGrant:
+    """An owner grant prepared for one new, exact-commit worktree."""
+
+    grant: RepositoryGrant
+    revision_sync: JsonObject
+
+
 def _identifier(value: str, *, label: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value):
         raise ValueError(f"invalid {label}")
@@ -104,6 +112,18 @@ class RepositoryAuthorizationStore:
                     base_revision TEXT NOT NULL,
                     updated_at_utc TEXT NOT NULL,
                     PRIMARY KEY(user_id, repo_id),
+                    FOREIGN KEY(repo_id) REFERENCES repositories(repo_id)
+                );
+                CREATE TABLE IF NOT EXISTS repository_revision_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    repo_id TEXT NOT NULL,
+                    canonical_root TEXT NOT NULL,
+                    old_base_revision TEXT NOT NULL,
+                    new_base_revision TEXT NOT NULL,
+                    old_grant_revision INTEGER NOT NULL,
+                    new_grant_revision INTEGER NOT NULL,
+                    timestamp_utc TEXT NOT NULL,
                     FOREIGN KEY(repo_id) REFERENCES repositories(repo_id)
                 );
                 """
@@ -284,6 +304,226 @@ class RepositoryAuthorizationStore:
                 },
             )
         return current
+
+    def prepare_new_session(self, user_id: str, repo_id: str) -> PreparedRepositoryGrant:
+        """Resolve an authorized grant and synchronize only to a clean HEAD.
+
+        The grant row is locked while the canonical repository state is observed and
+        any committed revision advance is recorded. If the checkout is dirty, retain
+        the previously granted commit: committed content at that exact revision
+        remains usable, while materialization checks report newer or caller-only
+        paths precisely instead of importing dirty state.
+        """
+
+        user = _identifier(user_id, label="user_id")
+        normalized_repo = _identifier(repo_id, label="repo_id")
+        with self._lock:
+            repository = self.repository(normalized_repo)
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    """
+                    SELECT active, revision, base_revision FROM repository_grants
+                    WHERE user_id=? AND repo_id=?
+                    """,
+                    (user, repository.repo_id),
+                ).fetchone()
+                if row is None or not bool(row["active"]):
+                    raise RepositoryAuthorizationError(
+                        "repository_not_authorized",
+                        {"user_id": user, "repo_id": repository.repo_id},
+                    )
+                old_grant_revision = int(row["revision"])
+                old_base_revision = str(row["base_revision"])
+                head_result = _git(
+                    repository.canonical_root,
+                    ("rev-parse", "--verify", "HEAD^{commit}"),
+                    runner=self._runner,
+                )
+                status_result = _git(
+                    repository.canonical_root,
+                    ("status", "--porcelain=v1", "--untracked-files=all"),
+                    runner=self._runner,
+                )
+                if head_result.returncode != 0:
+                    raise RepositoryAuthorizationError(
+                        "repository_head_unavailable",
+                        {"repo_id": repository.repo_id, "canonical_root": str(repository.canonical_root)},
+                    )
+                if status_result.returncode != 0:
+                    raise RepositoryAuthorizationError(
+                        "repository_state_unavailable",
+                        {"repo_id": repository.repo_id, "canonical_root": str(repository.canonical_root)},
+                    )
+                current_head = head_result.stdout.strip()
+                working_tree_clean = not bool(status_result.stdout.strip())
+                evidence: JsonObject = {
+                    "repo_id": repository.repo_id,
+                    "canonical_root": str(repository.canonical_root),
+                    "old_base_revision": old_base_revision,
+                    "new_base_revision": current_head,
+                    "old_grant_revision": old_grant_revision,
+                    "working_tree_clean": working_tree_clean,
+                    "synchronized": False,
+                }
+                if not working_tree_clean and current_head != old_base_revision:
+                    evidence.update(
+                        {
+                            "synchronization_blocked": True,
+                            "reason": "canonical HEAD advanced while caller checkout is dirty",
+                        }
+                    )
+                new_grant_revision = old_grant_revision
+                if working_tree_clean and current_head != old_base_revision:
+                    new_grant_revision += 1
+                    connection.execute(
+                        """
+                        UPDATE repository_grants
+                        SET revision=?, base_revision=?, updated_at_utc=?
+                        WHERE user_id=? AND repo_id=? AND active=1 AND revision=?
+                        """,
+                        (
+                            new_grant_revision,
+                            current_head,
+                            datetime.now(UTC).isoformat(),
+                            user,
+                            repository.repo_id,
+                            old_grant_revision,
+                        ),
+                    )
+                    if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                        raise RepositoryAuthorizationError(
+                            "repository_grant_changed",
+                            {"repo_id": repository.repo_id, "grant_revision": old_grant_revision},
+                        )
+                    timestamp = datetime.now(UTC).isoformat()
+                    connection.execute(
+                        """
+                        INSERT INTO repository_revision_events (
+                            user_id, repo_id, canonical_root, old_base_revision,
+                            new_base_revision, old_grant_revision, new_grant_revision,
+                            timestamp_utc
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            user,
+                            repository.repo_id,
+                            str(repository.canonical_root),
+                            old_base_revision,
+                            current_head,
+                            old_grant_revision,
+                            new_grant_revision,
+                            timestamp,
+                        ),
+                    )
+                    evidence.update(
+                        {
+                            "new_grant_revision": new_grant_revision,
+                            "synchronized": True,
+                            "synchronized_at_utc": timestamp,
+                        }
+                    )
+                grant = RepositoryGrant(
+                    user_id=user,
+                    repository=repository,
+                    active=True,
+                    revision=new_grant_revision,
+                    base_revision=current_head if working_tree_clean else old_base_revision,
+                )
+                return PreparedRepositoryGrant(grant=grant, revision_sync=evidence)
+
+    def readiness(self, user_id: str, root: Path) -> JsonObject:
+        """Report safe repository-bound readiness without inferring authorization."""
+
+        user = _identifier(user_id, label="user_id")
+        canonical = root.resolve(strict=True)
+        result: JsonObject = {
+            "canonical_root": str(canonical),
+            "repo_id": None,
+            "registered": False,
+            "authorized": False,
+            "granted_revision": None,
+            "grant_revision": None,
+            "current_head": None,
+            "working_tree_clean": None,
+            "agent_task_ready": False,
+            "revision_sync_required": False,
+            "state": "repository_not_registered",
+        }
+        top = _git(canonical, ("rev-parse", "--show-toplevel"), runner=self._runner)
+        if top.returncode != 0:
+            result["state"] = "repository_not_git"
+            return result
+        git_root = Path(top.stdout.strip()).resolve(strict=True)
+        if git_root != canonical:
+            result["state"] = "repository_root_mismatch"
+            return result
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT repo_id FROM repositories WHERE canonical_root=?",
+                (str(canonical),),
+            ).fetchone()
+        if row is None:
+            return result
+        repo_id = str(row["repo_id"])
+        result["repo_id"] = repo_id
+        result["registered"] = True
+        try:
+            repository = self.repository(repo_id)
+            head_result = _git(
+                repository.canonical_root,
+                ("rev-parse", "--verify", "HEAD^{commit}"),
+                runner=self._runner,
+            )
+            status_result = _git(
+                repository.canonical_root,
+                ("status", "--porcelain=v1", "--untracked-files=all"),
+                runner=self._runner,
+            )
+            if head_result.returncode != 0 or status_result.returncode != 0:
+                result["state"] = "repository_state_unavailable"
+                return result
+            current_head = head_result.stdout.strip()
+            clean = not bool(status_result.stdout.strip())
+            result["current_head"] = current_head
+            result["working_tree_clean"] = clean
+            try:
+                grant = self.require_grant(user, repo_id)
+            except RepositoryAuthorizationError as exc:
+                if exc.category == "repository_not_authorized":
+                    result["state"] = "repository_not_authorized"
+                    return result
+                raise
+            result["authorized"] = True
+            result["granted_revision"] = grant.base_revision
+            result["grant_revision"] = grant.revision
+            if current_head != grant.base_revision and not clean:
+                result["state"] = "repository_state_not_materialized"
+            else:
+                result["state"] = "ready"
+                result["agent_task_ready"] = True
+            result["revision_sync_required"] = current_head != grant.base_revision and clean
+            return result
+        except RepositoryAuthorizationError as exc:
+            if exc.category == "registered_repository_identity_changed":
+                result["state"] = exc.category
+                return result
+            raise
+
+    def revision_events(self, user_id: str, repo_id: str) -> list[JsonObject]:
+        """Return owner-scoped committed revision synchronization audit evidence."""
+
+        user = _identifier(user_id, label="user_id")
+        normalized = _identifier(repo_id, label="repo_id")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM repository_revision_events
+                WHERE user_id=? AND repo_id=? ORDER BY event_id ASC
+                """,
+                (user, normalized),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def authorized_for_user(self, user_id: str) -> list[dict[str, object]]:
         """Return only active logical grants; never infer authorization from a path."""

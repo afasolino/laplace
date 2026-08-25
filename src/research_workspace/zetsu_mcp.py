@@ -545,8 +545,11 @@ class ZetsuService:
         standard = self.tiered.lane_policy.routes[ModelLane.STANDARD]
         economy = self.tiered.lane_policy.routes[ModelLane.ECONOMY]
         build = version_record(self.repository_root)
+        repository = self.tiered.sandboxes.authorizations.readiness(
+            user_id, self.repository_root
+        )
         return {
-            "status": "READY",
+            "status": "READY" if repository.get("agent_task_ready") is True else "DEGRADED",
             "zetsu_schema_version": ZETSU_SCHEMA_VERSION,
             "skill_version": ZETSU_SKILL_VERSION,
             "mcp_protocol_versions": list(MCP_SUPPORTED_PROTOCOL_VERSIONS),
@@ -570,6 +573,7 @@ class ZetsuService:
                 ),
                 "policy": "bounded_policy_eligible_rtl_only",
             },
+            "repository": repository,
             "agent_scheduler": self._core().scheduler_status(user_id=user_id),
         }
 
