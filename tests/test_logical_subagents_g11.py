@@ -95,17 +95,20 @@ def test_running_cancellation_and_fifo_fairness() -> None:
     scheduler.close()
 
 
-def test_gpu_block_and_oom_recovery_are_typed_without_executor_or_slot_leak() -> None:
+def test_gpu_scarcity_queues_then_expires_without_executor_or_slot_leak() -> None:
     blocked_calls: list[str] = []
-    blocked = GpuAwareSubagentScheduler(gpu_probe=lambda: GpuAvailability.unavailable("uncertain-owner"))
+    blocked = GpuAwareSubagentScheduler(
+        policy=SubagentSchedulerPolicy(queue_timeout_seconds=0.03),
+        gpu_probe=lambda: GpuAvailability.unavailable("uncertain-owner"),
+    )
     try:
         def should_not_run(task: LogicalSubagentTask, _: threading.Event) -> dict[str, object]:
             blocked_calls.append(task.task_id)
             return {}
 
         outcome = blocked.run_batch((_task("blocked"),), should_not_run)[0]
-        assert outcome.state == "GPU_BLOCKED"
-        assert outcome.failure_category == "gpu_uncertain"
+        assert outcome.state == "FAILED"
+        assert outcome.failure_category == "subagent_queue_timeout"
         assert blocked_calls == []
     finally:
         blocked.close()

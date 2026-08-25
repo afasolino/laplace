@@ -121,6 +121,8 @@ class SubagentSchedulerPolicy:
     minimum_free_mib: int = 4_096
     max_spawn_depth: int = 1
     task_timeout_seconds: float = 600.0
+    queue_timeout_seconds: float = 600.0
+    gpu_headroom_mib: int = 512
     allow_real_concurrency: bool = False
     completed_cache_size: int = 64
 
@@ -134,6 +136,7 @@ class SubagentSchedulerPolicy:
             "minimum_free_mib",
             "max_spawn_depth",
             "completed_cache_size",
+            "gpu_headroom_mib",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -146,6 +149,12 @@ class SubagentSchedulerPolicy:
             or not 0.01 <= self.task_timeout_seconds <= 86_400
         ):
             raise LogicalSubagentError("subagent_timeout_invalid")
+        if (
+            isinstance(self.queue_timeout_seconds, bool)
+            or not isinstance(self.queue_timeout_seconds, (int, float))
+            or not 0.01 <= self.queue_timeout_seconds <= 86_400
+        ):
+            raise LogicalSubagentError("subagent_queue_timeout_invalid")
         if self.execution_mode is SubagentExecutionMode.REAL_CONCURRENT:
             if not self.allow_real_concurrency or self.max_gpu_concurrency < 2:
                 raise LogicalSubagentError("real_concurrency_not_certified")
@@ -167,6 +176,8 @@ class SubagentSchedulerPolicy:
             "minimum_free_mib": self.minimum_free_mib,
             "max_spawn_depth": self.max_spawn_depth,
             "task_timeout_seconds": float(self.task_timeout_seconds),
+            "queue_timeout_seconds": float(self.queue_timeout_seconds),
+            "gpu_headroom_mib": self.gpu_headroom_mib,
             "allow_real_concurrency": self.allow_real_concurrency,
             "completed_cache_size": self.completed_cache_size,
         }
@@ -294,6 +305,10 @@ class _QueuedTask:
     submitted_at: float
     cancellation: threading.Event
     done: threading.Event
+    queue_deadline: float
+    admitted_at: float | None = None
+    execution_deadline: float | None = None
+    reservation_mib: int = 0
     outcome: LogicalSubagentOutcome | None = None
 
 
@@ -328,6 +343,8 @@ class GpuAwareSubagentScheduler:
         self._condition = threading.Condition(threading.RLock())
         self._queue: list[_QueuedTask] = []
         self._active: dict[str, _QueuedTask] = {}
+        self._reservations: dict[str, int] = {}
+        self._reserved_gpu_mib = 0
         self._completed: OrderedDict[str, LogicalSubagentOutcome] = OrderedDict()
         self.result_store = result_store
         self._closed = False
@@ -382,6 +399,11 @@ class GpuAwareSubagentScheduler:
         self._completed.move_to_end(task_id)
         while len(self._completed) > self.policy.completed_cache_size:
             self._completed.popitem(last=False)
+
+    def _release_reservation_locked(self, queued: _QueuedTask) -> None:
+        reservation = self._reservations.pop(queued.task.task_id, 0)
+        self._reserved_gpu_mib = max(0, self._reserved_gpu_mib - reservation)
+        queued.reservation_mib = 0
 
     def _deliver_result(
         self, task: LogicalSubagentTask, result: JsonObject
@@ -447,6 +469,7 @@ class GpuAwareSubagentScheduler:
     def _finish(self, queued: _QueuedTask, outcome: LogicalSubagentOutcome) -> None:
         with self._condition:
             self._active.pop(queued.task.task_id, None)
+            self._release_reservation_locked(queued)
             queued.outcome = outcome
             self._remember_completed_locked(queued.task.task_id, outcome)
             queued.done.set()
@@ -521,8 +544,9 @@ class GpuAwareSubagentScheduler:
                 if not self._queue or len(self._active) >= self.policy.active_limit:
                     self._condition.wait(timeout=0.05)
                     continue
-                queued = self._queue.pop(0)
+                queued = self._queue[0]
                 if queued.cancellation.is_set():
+                    self._queue.pop(0)
                     gpu = GpuAvailability.unavailable("cancelled-before-gpu-probe")
                     outcome = self._make_outcome(
                         queued,
@@ -541,26 +565,30 @@ class GpuAwareSubagentScheduler:
                 gpu = self._probe()
             except LogicalSubagentError as exc:
                 gpu = GpuAvailability.unavailable(exc.category)
-            if gpu.status != "AVAILABLE" or gpu.free_mib < max(self.policy.minimum_free_mib, queued.task.required_free_mib):
-                outcome = self._make_outcome(
-                    queued,
-                    state="GPU_BLOCKED",
-                    result=None,
-                    failure_category=("gpu_uncertain" if gpu.status != "AVAILABLE" else "gpu_headroom_insufficient"),
-                    queue_wait_seconds=time.monotonic() - queued.submitted_at,
-                    elapsed_seconds=0.0,
-                    gpu=gpu,
-                )
-                with self._condition:
+            with self._condition:
+                if not self._queue or self._queue[0] is not queued:
+                    continue
+                now = time.monotonic()
+                if now >= queued.queue_deadline:
+                    self._queue.pop(0)
+                    outcome = self._make_outcome(
+                        queued,
+                        state="FAILED",
+                        result=None,
+                        failure_category="subagent_queue_timeout",
+                        queue_wait_seconds=now - queued.submitted_at,
+                        elapsed_seconds=0.0,
+                        gpu=gpu,
+                    )
                     queued.outcome = outcome
                     self._remember_completed_locked(queued.task.task_id, outcome)
                     queued.done.set()
                     self._condition.notify_all()
-                continue
-            with self._condition:
+                    continue
                 if self._closed:
                     queued.cancellation.set()
                 if queued.cancellation.is_set():
+                    self._queue.pop(0)
                     outcome = self._make_outcome(
                         queued,
                         state="CANCELLED",
@@ -575,13 +603,44 @@ class GpuAwareSubagentScheduler:
                     queued.done.set()
                     self._condition.notify_all()
                     continue
+                required = max(
+                    self.policy.minimum_free_mib,
+                    queued.task.required_free_mib,
+                ) + self.policy.gpu_headroom_mib
+                available = gpu.free_mib - self._reserved_gpu_mib
+                if gpu.status != "AVAILABLE" or available < required:
+                    self._condition.wait(timeout=0.05)
+                    continue
+                self._queue.pop(0)
+                queued.admitted_at = now
+                queued.execution_deadline = now + self.policy.task_timeout_seconds
+                queued.reservation_mib = required
+                self._reservations[queued.task.task_id] = required
+                self._reserved_gpu_mib += required
                 self._active[queued.task.task_id] = queued
-                threading.Thread(
-                    target=self._execute,
-                    args=(queued, gpu),
-                    name=f"laplace-subagent-{queued.task.task_id}",
-                    daemon=True,
-                ).start()
+                try:
+                    threading.Thread(
+                        target=self._execute,
+                        args=(queued, gpu),
+                        name=f"laplace-subagent-{queued.task.task_id}",
+                        daemon=True,
+                    ).start()
+                except Exception as exc:
+                    self._active.pop(queued.task.task_id, None)
+                    self._release_reservation_locked(queued)
+                    outcome = self._make_outcome(
+                        queued,
+                        state="FAILED",
+                        result=None,
+                        failure_category=f"subagent_start_{type(exc).__name__}",
+                        queue_wait_seconds=now - queued.submitted_at,
+                        elapsed_seconds=0.0,
+                        gpu=gpu,
+                    )
+                    queued.outcome = outcome
+                    self._remember_completed_locked(queued.task.task_id, outcome)
+                    queued.done.set()
+                    self._condition.notify_all()
 
     def run_batch(
         self,
@@ -617,24 +676,40 @@ class GpuAwareSubagentScheduler:
                     item.task.task_id == task.task_id for item in self._queue
                 ):
                     raise LogicalSubagentError("subagent_task_id_conflict")
+                submitted_at = time.monotonic()
                 entry = _QueuedTask(
                     task=task,
                     executor=executor,
                     queue_position=self._next_position,
-                    submitted_at=time.monotonic(),
+                    submitted_at=submitted_at,
                     cancellation=threading.Event(),
                     done=threading.Event(),
+                    queue_deadline=submitted_at + self.policy.queue_timeout_seconds,
                 )
                 self._next_position += 1
                 self._queue.append(entry)
                 entries.append(entry)
             self._condition.notify_all()
-        deadline = time.monotonic() + self.policy.task_timeout_seconds
-        for entry in entries:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or not entry.done.wait(timeout=remaining):
-                self.cancel(entry.task.task_id, owner_id=entry.task.owner_id)
-                raise LogicalSubagentError("subagent_task_timeout")
+        pending = list(entries)
+        while pending:
+            now = time.monotonic()
+            for entry in tuple(pending):
+                if entry.done.is_set():
+                    pending.remove(entry)
+                    continue
+                if entry.execution_deadline is not None and now >= entry.execution_deadline:
+                    self.cancel(entry.task.task_id, owner_id=entry.task.owner_id)
+                    raise LogicalSubagentError("subagent_task_timeout")
+            if pending:
+                deadlines = [
+                    entry.execution_deadline
+                    for entry in pending
+                    if entry.execution_deadline is not None
+                ]
+                wait_seconds = 0.05
+                if deadlines:
+                    wait_seconds = max(0.001, min(wait_seconds, min(deadlines) - now))
+                pending[0].done.wait(timeout=wait_seconds)
         return tuple(cast(LogicalSubagentOutcome, entry.outcome) for entry in entries)
 
     def cancel(self, task_id: str, *, owner_id: str) -> JsonObject:
@@ -689,6 +764,8 @@ class GpuAwareSubagentScheduler:
                 "queued_task_ids": [item.task.task_id for item in queued],
                 "running_task_ids": [item.task.task_id for item in active],
                 "completed_cache_size": self.policy.completed_cache_size,
+                "reserved_gpu_mib": self._reserved_gpu_mib,
+                "gpu_reservations": dict(self._reservations),
             }
 
     def page_result(
