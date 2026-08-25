@@ -13,11 +13,14 @@ import hashlib
 import json
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Literal, TypeAlias, cast
+
+from .zetsu_results import ZetsuResultError, ZetsuResultStore
 
 JsonObject: TypeAlias = dict[str, object]
 GpuStatus = Literal["AVAILABLE", "UNAVAILABLE", "UNCERTAIN"]
@@ -119,6 +122,7 @@ class SubagentSchedulerPolicy:
     max_spawn_depth: int = 1
     task_timeout_seconds: float = 600.0
     allow_real_concurrency: bool = False
+    completed_cache_size: int = 64
 
     def __post_init__(self) -> None:
         if not isinstance(self.execution_mode, SubagentExecutionMode):
@@ -129,6 +133,7 @@ class SubagentSchedulerPolicy:
             "max_gpu_concurrency",
             "minimum_free_mib",
             "max_spawn_depth",
+            "completed_cache_size",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -163,6 +168,7 @@ class SubagentSchedulerPolicy:
             "max_spawn_depth": self.max_spawn_depth,
             "task_timeout_seconds": float(self.task_timeout_seconds),
             "allow_real_concurrency": self.allow_real_concurrency,
+            "completed_cache_size": self.completed_cache_size,
         }
 
 
@@ -257,6 +263,10 @@ class LogicalSubagentOutcome:
     queue_wait_seconds: float
     elapsed_seconds: float
     gpu_observation: GpuAvailability
+    result_id: str | None = None
+    result_artifacts: JsonObject | None = None
+    delivery_status: Literal["INLINE", "PAGED", "FAILED", "UNAVAILABLE"] = "INLINE"
+    delivery_error: str | None = None
 
     def to_json(self) -> JsonObject:
         return {
@@ -269,6 +279,10 @@ class LogicalSubagentOutcome:
             "queue_wait_seconds": self.queue_wait_seconds,
             "elapsed_seconds": self.elapsed_seconds,
             "gpu_observation": self.gpu_observation.to_json(),
+            "result_id": self.result_id,
+            "result_artifacts": self.result_artifacts,
+            "delivery_status": self.delivery_status,
+            "delivery_error": self.delivery_error,
         }
 
 
@@ -287,8 +301,6 @@ def _validate_result(value: Mapping[str, object]) -> JsonObject:
     if not isinstance(value, Mapping):
         raise LogicalSubagentError("subagent_result_invalid")
     encoded = json.dumps(dict(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    if len(encoded.encode("utf-8")) > 128_000:
-        raise LogicalSubagentError("subagent_result_too_large")
     try:
         json.loads(encoded)
     except json.JSONDecodeError as exc:
@@ -309,13 +321,15 @@ class GpuAwareSubagentScheduler:
         *,
         policy: SubagentSchedulerPolicy | None = None,
         gpu_probe: GpuProbe | None = None,
+        result_store: ZetsuResultStore | None = None,
     ) -> None:
         self.policy = policy or SubagentSchedulerPolicy()
         self.gpu_probe = gpu_probe or GpuAvailability.unavailable
         self._condition = threading.Condition(threading.RLock())
         self._queue: list[_QueuedTask] = []
         self._active: dict[str, _QueuedTask] = {}
-        self._completed: dict[str, LogicalSubagentOutcome] = {}
+        self._completed: OrderedDict[str, LogicalSubagentOutcome] = OrderedDict()
+        self.result_store = result_store
         self._closed = False
         self._next_position = 0
         self._worker = threading.Thread(target=self._dispatch, name="laplace-subagent-scheduler", daemon=True)
@@ -340,6 +354,10 @@ class GpuAwareSubagentScheduler:
         queue_wait_seconds: float,
         elapsed_seconds: float,
         gpu: GpuAvailability,
+        result_id: str | None = None,
+        result_artifacts: JsonObject | None = None,
+        delivery_status: Literal["INLINE", "PAGED", "FAILED", "UNAVAILABLE"] = "INLINE",
+        delivery_error: str | None = None,
     ) -> LogicalSubagentOutcome:
         return LogicalSubagentOutcome(
             task_id=queued.task.task_id,
@@ -351,13 +369,86 @@ class GpuAwareSubagentScheduler:
             queue_wait_seconds=max(0.0, queue_wait_seconds),
             elapsed_seconds=max(0.0, elapsed_seconds),
             gpu_observation=gpu,
+            result_id=result_id,
+            result_artifacts=result_artifacts,
+            delivery_status=delivery_status,
+            delivery_error=delivery_error,
+        )
+
+    def _remember_completed_locked(
+        self, task_id: str, outcome: LogicalSubagentOutcome
+    ) -> None:
+        self._completed[task_id] = outcome
+        self._completed.move_to_end(task_id)
+        while len(self._completed) > self.policy.completed_cache_size:
+            self._completed.popitem(last=False)
+
+    def _deliver_result(
+        self, task: LogicalSubagentTask, result: JsonObject
+    ) -> tuple[JsonObject | None, str | None, JsonObject | None, Literal["INLINE", "PAGED", "FAILED", "UNAVAILABLE"], str | None]:
+        """Persist the exact result and return a bounded presentation envelope."""
+
+        encoded = json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        encoded_bytes = encoded.encode("utf-8")
+        if self.result_store is None:
+            if len(encoded_bytes) <= 128_000:
+                return result, None, None, "INLINE", None
+            return (
+                {
+                    "execution_status": "SUCCEEDED",
+                    "delivery_status": "UNAVAILABLE",
+                },
+                None,
+                None,
+                "UNAVAILABLE",
+                "logical_result_store_unconfigured",
+            )
+        try:
+            delivery = self.result_store.persist(
+                user_id=task.owner_id,
+                repo_id=task.project_id,
+                session_id=task.task_id,
+                status="SUCCEEDED",
+                summary=f"SUCCEEDED:{task.task_id}",
+                artifacts={"result.json": encoded_bytes},
+            )
+        except ZetsuResultError as exc:
+            if len(encoded_bytes) <= 128_000:
+                return result, None, None, "FAILED", exc.category
+            return (
+                {
+                    "execution_status": "SUCCEEDED",
+                    "delivery_status": "FAILED",
+                },
+                None,
+                None,
+                "FAILED",
+                exc.category,
+            )
+        result_id = str(delivery["result_id"])
+        artifacts = cast(JsonObject, delivery["artifacts"])
+        if len(encoded_bytes) <= 128_000:
+            return result, result_id, artifacts, "INLINE", None
+        return (
+            {
+                "execution_status": "SUCCEEDED",
+                "delivery_status": "PAGED",
+                "result_id": result_id,
+                "result_artifact": "result.json",
+                "result_bytes": len(encoded_bytes),
+                "result_sha256": hashlib.sha256(encoded_bytes).hexdigest(),
+            },
+            result_id,
+            artifacts,
+            "PAGED",
+            None,
         )
 
     def _finish(self, queued: _QueuedTask, outcome: LogicalSubagentOutcome) -> None:
         with self._condition:
             self._active.pop(queued.task.task_id, None)
             queued.outcome = outcome
-            self._completed[queued.task.task_id] = outcome
+            self._remember_completed_locked(queued.task.task_id, outcome)
             queued.done.set()
             self._condition.notify_all()
 
@@ -378,28 +469,31 @@ class GpuAwareSubagentScheduler:
                 ),
             )
             return
+        accepted: JsonObject | None = None
+        result_id: str | None = None
+        result_artifacts: JsonObject | None = None
+        delivery_status: Literal["INLINE", "PAGED", "FAILED", "UNAVAILABLE"] = "UNAVAILABLE"
+        delivery_error: str | None = None
         try:
             result = _validate_result(queued.executor(queued.task, queued.cancellation))
             if queued.cancellation.is_set():
                 state: SubagentOutcomeState = "CANCELLED"
                 category: str | None = "subagent_cancelled"
-                accepted: JsonObject | None = None
             else:
                 state = "SUCCEEDED"
                 category = None
-                accepted = result
+                accepted, result_id, result_artifacts, delivery_status, delivery_error = self._deliver_result(
+                    queued.task, result
+                )
         except SubagentOutOfMemoryError as exc:
             state = "RECOVERABLE"
             category = exc.category
-            accepted = None
         except LogicalSubagentError as exc:
             state = "FAILED"
             category = exc.category
-            accepted = None
         except Exception as exc:
             state = "FAILED"
             category = f"subagent_executor_{type(exc).__name__}"
-            accepted = None
         self._finish(
             queued,
             self._make_outcome(
@@ -410,6 +504,10 @@ class GpuAwareSubagentScheduler:
                 queue_wait_seconds=wait_seconds,
                 elapsed_seconds=time.monotonic() - started,
                 gpu=gpu,
+                result_id=result_id,
+                result_artifacts=result_artifacts,
+                delivery_status=delivery_status,
+                delivery_error=delivery_error,
             ),
         )
 
@@ -436,7 +534,7 @@ class GpuAwareSubagentScheduler:
                         gpu=gpu,
                     )
                     queued.outcome = outcome
-                    self._completed[queued.task.task_id] = outcome
+                    self._remember_completed_locked(queued.task.task_id, outcome)
                     queued.done.set()
                     continue
             try:
@@ -455,7 +553,7 @@ class GpuAwareSubagentScheduler:
                 )
                 with self._condition:
                     queued.outcome = outcome
-                    self._completed[queued.task.task_id] = outcome
+                    self._remember_completed_locked(queued.task.task_id, outcome)
                     queued.done.set()
                     self._condition.notify_all()
                 continue
@@ -473,7 +571,7 @@ class GpuAwareSubagentScheduler:
                         gpu=gpu,
                     )
                     queued.outcome = outcome
-                    self._completed[queued.task.task_id] = outcome
+                    self._remember_completed_locked(queued.task.task_id, outcome)
                     queued.done.set()
                     self._condition.notify_all()
                     continue
@@ -558,7 +656,7 @@ class GpuAwareSubagentScheduler:
                         gpu=gpu,
                     )
                     queued.outcome = outcome
-                    self._completed[task_id] = outcome
+                    self._remember_completed_locked(task_id, outcome)
                     queued.done.set()
                     self._condition.notify_all()
                     return {"task_id": task_id, "state": "CANCELLED", "queued": True}
@@ -590,7 +688,33 @@ class GpuAwareSubagentScheduler:
                 "real_concurrency_enabled": self.policy.execution_mode is SubagentExecutionMode.REAL_CONCURRENT,
                 "queued_task_ids": [item.task.task_id for item in queued],
                 "running_task_ids": [item.task.task_id for item in active],
+                "completed_cache_size": self.policy.completed_cache_size,
             }
+
+    def page_result(
+        self,
+        *,
+        task: LogicalSubagentTask,
+        result_id: str,
+        offset: int = 0,
+        max_bytes: int = 24_000,
+    ) -> JsonObject:
+        """Read a durable logical-subagent result under the task scope."""
+
+        if self.result_store is None:
+            raise LogicalSubagentError("logical_result_store_unconfigured")
+        try:
+            return self.result_store.page(
+                user_id=task.owner_id,
+                repo_id=task.project_id,
+                session_id=task.task_id,
+                result_id=result_id,
+                artifact="result.json",
+                offset=offset,
+                max_bytes=max_bytes,
+            )
+        except ZetsuResultError as exc:
+            raise LogicalSubagentError(exc.category) from exc
 
     def close(self, *, wait_timeout_seconds: float = 1.0) -> None:
         if not 0.01 <= wait_timeout_seconds <= 30:

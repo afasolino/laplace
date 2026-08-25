@@ -44,6 +44,7 @@ from .trajectory import (
 from .user_capabilities import Capability
 from .verification_gates import VerificationGateRegistry
 from .zetsu_agent import ZetsuAgentCoordinator
+from .zetsu_results import ZetsuResultStore
 
 JsonObject: TypeAlias = dict[str, object]
 VerificationDomain = Literal["python", "c", "verilog", "systemverilog"]
@@ -143,7 +144,11 @@ class LaplaceCore:
 
         with self._logical_subagents_lock:
             if self._logical_subagents is None:
-                self._logical_subagents = GpuAwareSubagentScheduler()
+                self._logical_subagents = GpuAwareSubagentScheduler(
+                    result_store=ZetsuResultStore(
+                        self.repository_root / ".laplace-state" / "logical-subagent-results"
+                    )
+                )
             return self._logical_subagents
 
     @property
