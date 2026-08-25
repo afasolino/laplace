@@ -1,0 +1,63 @@
+{
+  "phase": "C8",
+  "status": "BLOCKED",
+  "generated_at_utc": "2026-08-25T08:46:05Z",
+  "base_commit": "bcc8944",
+  "summary": "The mandatory CodeV-vs-SiliconMind RTL experiment is explicitly closed as BLOCKED because the candidate artifact and the certified full-topology vLLM executable are unavailable locally.",
+  "frozen_campaign": {
+    "task_count": "12-18_required",
+    "task_set": "NOT_RUN",
+    "identical_context_and_repair_budget": "NOT_RUN",
+    "metrics": "NOT_MEASURED"
+  },
+  "blocking_evidence": {
+    "candidate": {
+      "model": "SiliconMind-V1.2-Qwen3-4B-T-2507 BF16",
+      "search_command": "find /home/giando -maxdepth 5 ( -iname '*siliconmind*' -o -iname '*v1.2*' ) -print",
+      "result": "no output",
+      "checkpoint": false,
+      "config": false,
+      "tensors": false
+    },
+    "required_full_topology": {
+      "dry_run_command": "laplace zetsu start --repo /home/giando/work/laplace-v2 --dry-run --json",
+      "dry_run_status": "DRY_RUN",
+      "required_vllm_executable": "/home/giando/work/laplace-v2/.venv-vllm-cu129/bin/vllm",
+      "required_vllm_executable_present": false,
+      "full_runtime_started": false,
+      "reason": "A deterministic preflight cannot form the required Qwen-plus-CodeV topology without the certified vLLM executable."
+    },
+    "available_eda_tools": {
+      "verilator": "/usr/bin/verilator",
+      "iverilog": "/home/giando/.local/eda-tools/bin/iverilog",
+      "yosys": "/home/giando/.local/eda-tools/bin/yosys",
+      "eda_tools_are_sufficient_without_model_artifact": false
+    }
+  },
+  "decision": {
+    "codev_control_run": "NOT_RUN",
+    "siliconmind_candidate_run": "NOT_RUN",
+    "siliconmind_promotion": "NOT_ATTEMPTED",
+    "retain_certified_codev_rollback": true,
+    "runtime_topology_after_phase": "nocodev",
+    "human_promotion_decision_required": false
+  },
+  "tests": {
+    "focused_rtl_and_routing_regression": {
+      "command": "PYTHONPATH=src pytest -q tests/test_zetsu_mcp.py tests/test_logical_subagents_g11.py tests/test_model_servers.py tests/test_production_model_selection.py tests/test_rtl_worker_correction_evidence.py tests/test_rtl_worker_non_thinking.py tests/test_rtl_worker_routing_patch.py tests/test_paired_benchmark.py tests/test_dual_model_ablation.py",
+      "collected": 94,
+      "passed": 94,
+      "failed": 0
+    },
+    "security_and_negative": "Covered by the focused regression suite; no model route or authorization policy was changed.",
+    "production_checkout_modified": false
+  },
+  "limitations": [
+    "No correctness, pass-by-3, token, wall-time, throughput, VRAM, headroom, or co-residency metric is claimed.",
+    "The candidate must be supplied locally and the certified vLLM toolchain restored before a fair A/B can be rerun.",
+    "No 8B diagnostic was attempted because the required 4B candidate comparison could not be formed."
+  ],
+  "changed_paths": [
+    "docs/v2-corrective-roadmap/certifications/C8-g11-rtl-experiment.json"
+  ]
+}
