@@ -1,5 +1,25 @@
 # Laplace troubleshooting
 
+## v2 control-plane preflight
+
+Start the normal development topology explicitly:
+
+```bash
+laplace zetsu start --nocodev --repo /home/giando/work/laplace-v2
+laplace zetsu status --repo /home/giando/work/laplace-v2 --json
+laplace zetsu sessions --json
+```
+
+`--nocodev` means CodeV is intentionally disabled. It is not a readiness failure.
+Use the full topology only for an explicitly authorized RTL experiment, then stop
+it and return to `laplace zetsu start --nocodev`.
+
+The repository section of Zetsu status separately reports the canonical root,
+logical `repo_id`, registration, owner grant, granted revision, current HEAD,
+clean/dirty state, and `agent_task_ready`. A degraded model/MCP status must not be
+interpreted as repository readiness, and a registered repository without a grant
+must remain `repository_not_authorized`.
+
 ## The server refuses to start
 
 - `registry_path_required` or missing registry: run the bootstrap command in [QUICKSTART.md](QUICKSTART.md).
@@ -47,7 +67,17 @@ The client list is server-generated. Confirm both the repository authorization D
 
 Path failures for traversal, symlink, hard link, mount, nested Git, worktree, submodule, environment, or subprocess CWD are security decisions. Inspect the audit record without exposing protected paths to the user.
 
-For `per_user_worktree_quota`, close a clean worktree or export/download its patch and confirm discard. A dirty worktree is intentionally retained. `repository_grant_changed`/`STALE_GRANT` requires a fresh worktree after reauthorization.
+For `per_user_worktree_quota`, inspect `laplace zetsu sessions --json`. Clean
+failed, expired, or abandoned sessions are reconciled before a new admission;
+clean worktrees are released through lifecycle machinery. A dirty worktree is
+intentionally retained and is never silently deleted. `STALE_GRANT` or
+`repository_grant_changed` requires a fresh worktree after authorization remains
+valid.
+
+For `repository_state_not_materialized`, the target exists only in the caller's
+uncommitted checkout or otherwise is absent from the exact granted commit. Do not
+ask Zetsu to copy dirty files or auto-commit them. Create a normal checkpoint
+commit and delegate a new session.
 
 ## Personal corpus upload or indexing fails
 
@@ -97,9 +127,10 @@ Stop the Operator service, then only model PIDs whose ownership record and live 
 
 If a trace is needed for support, share the trace ID and sanitized failure category—not a password, activation code, cookie, raw registry, private path, or document content.
 
-For the v0.7 CPU/fixture release command, do not run provider or GPU diagnostics as a
-troubleshooting step. Its exact expected live status is
-`BLOCKED_BY_USER_CONSTRAINT_GPU_UNAVAILABLE`.
+CPU/fixture tests do not claim live-model quality. The C8 candidate comparison is
+explicitly `BLOCKED` when the SiliconMind artifact or certified full-topology
+vLLM executable is absent; see the C8 certification rather than inventing a
+metric or changing the CodeV route.
 
 ## v8 coordination statuses
 

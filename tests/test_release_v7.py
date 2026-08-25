@@ -18,14 +18,14 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_semantic_version_and_build_revision(monkeypatch: pytest.MonkeyPatch) -> None:
     revision = "a" * 40
     monkeypatch.setenv("LAPLACE_BUILD_REVISION", revision)
-    assert __version__ == "0.7.0"
+    assert __version__ == "2.0.0"
     record = version_record(ROOT)
     assert record == {
-        "application_version": "0.7.0",
+        "application_version": "2.0.0",
         "git_revision": revision,
-        "build_identity": "0.7.0+git.aaaaaaaaaaaa",
+        "build_identity": "2.0.0+git.aaaaaaaaaaaa",
     }
-    assert version_line(ROOT) == f"laplace 0.7.0 ({revision})"
+    assert version_line(ROOT) == f"laplace 2.0.0 ({revision})"
     monkeypatch.setenv("LAPLACE_BUILD_REVISION", "unsafe revision")
     assert git_revision(ROOT) == "unavailable"
 
@@ -37,7 +37,7 @@ def test_laplace_version_and_configuration_validation_commands(
 ) -> None:
     monkeypatch.setenv("LAPLACE_BUILD_REVISION", "b" * 40)
     assert laplace_main(["--version"]) == 0
-    assert capsys.readouterr().out.strip() == f"laplace 0.7.0 ({'b' * 40})"
+    assert capsys.readouterr().out.strip() == f"laplace 2.0.0 ({'b' * 40})"
     for name in tuple(os.environ):
         if name.startswith("LAPLACE_CONFIG_"):
             monkeypatch.delenv(name)
@@ -69,7 +69,7 @@ def test_dependency_light_packaged_version_entrypoint(
 ) -> None:
     monkeypatch.setenv("LAPLACE_BUILD_REVISION", "c" * 40)
     assert packaged_laplace_main(["--version"]) == 0
-    assert capsys.readouterr().out.strip() == f"laplace 0.7.0 ({'c' * 40})"
+    assert capsys.readouterr().out.strip() == f"laplace 2.0.0 ({'c' * 40})"
 
 
 def test_exported_schema_manifest_hashes_and_strictness() -> None:

@@ -1,9 +1,10 @@
 # Release policy
 
-Laplace v0.7.0 uses Semantic Versioning. Before 1.0, a minor release may add or deliberately
-change a documented API or state contract; patch releases preserve every supported
-schema and command. Breaking changes require a changelog entry, compatibility
-adapter or ordered migration, old-state fixtures and an explicit rollback boundary.
+Laplace v2.0.0 uses Semantic Versioning. The v2 release surface preserves the
+certified v1 control-plane contracts and adds explicitly versioned Core, Zetsu,
+repository-agent, worktree, result-delivery, ACI, memory, and lifecycle behavior.
+Breaking changes require a changelog entry, compatibility adapter or ordered
+migration, old-state fixtures and an explicit rollback boundary.
 
 Every build records the semantic version from package metadata and a 40-character
 Git revision. `laplace --version` and `/api/v1/version` report both. A release
@@ -22,11 +23,13 @@ license metadata is a review item, never silently assigned by Laplace.
 
 Branches are protected through required CI checks and review. Release automation has
 read-only repository permissions unless a separately approved tag/release job needs
-more. This v7 task does not push, tag or merge.
+more. The corrective branch does not merge, tag, or modify the immutable
+production checkout. Promotion remains a separate human decision.
 
 Live-model certification is a separate release annotation. CPU/fixture success must
-not be represented as model quality. For v7 its exact status is
-`BLOCKED_BY_USER_CONSTRAINT_GPU_UNAVAILABLE`.
+not be represented as model quality. The mandatory C8 SiliconMind-vs-CodeV RTL
+experiment is recorded as `BLOCKED` when its local candidate artifact or certified
+full-topology toolchain is absent; no model route is silently promoted.
 
 ## v8 decision boundary
 

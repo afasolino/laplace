@@ -1,36 +1,40 @@
 # Operating modes
 
-## Desktop/local mode
+## Standalone Core
 
-Desktop mode is for one OS user working in an explicitly selected FormalScience
-project. The `laplace` CLI and project GUI operate on project-owned sources,
-collections, attachments, conversations and artifacts. A configured local provider
-is optional; deterministic fixture configuration is available for tests only.
+Standalone Laplace constructs `LaplaceCore` directly and can use local retrieval,
+memory, rules, repository intelligence, trajectories, hooks, skills, bounded ACI,
+logical scheduling, and deterministic verification without MCP or Zetsu. A
+repository-agent implementation is injected through the neutral Core service
+boundary; absent authorization or a bound adapter fails closed.
 
-Desktop mode does not create server users, personal corpora or managed repository
-grants. A project is not a server repository registration.
+## Authenticated Operator/Zetsu mode
 
-## Server/multi-user mode
+The Operator provides registered-user authentication, owner-private Personal
+Corpus/RAG, canonical repository registrations and grants, isolated worktrees,
+model routing, quotas, lifecycle scheduling, and `/mcp`. Zetsu is an optional
+Codex adapter over those same Core services. It does not infer access to a client
+filesystem, shell, network, or remote folder.
 
-Server mode uses registered-email authentication, revision-bound sessions,
-independent capabilities, owner-private personal corpora, governed corpora,
-registered repositories and isolated Agent worktrees. Server state is outside Git
-and clients see logical IDs rather than canonical paths.
+## Runtime topology
 
-The Operator surface administers users, repositories, providers, routes, queues and
-governance. Provider invocation and model-process lifecycle remain separate.
+Quality and Standard use the certified Qwen3.8 P7/MTP serving route. CodeV is an
+optional Economy RTL/SystemVerilog specialist. The ordinary local topology is
+explicitly started with:
 
-## Shared contracts, distinct policy
+```bash
+laplace zetsu start --nocodev
+```
 
-Both modes share:
+CodeV absence in this mode is intentional. Full Qwen-plus-CodeV startup is
+reserved for an explicit RTL experiment or operator action and must be followed
+by a return to `--nocodev` when complete.
 
-- provider-neutral request/response records;
-- citation and progress presentation records;
-- corpus/source/artifact/provenance vocabulary;
-- configuration precedence and diagnostic redaction;
-- offline fixture evaluation and release gates.
+## Development and production
 
-Mode-specific authentication, storage ownership and administration remain explicit.
-There is no third GUI and no automatic state synchronization between modes. Desktop
-repository synchronization is a confirmed Git protocol described in
-[DESKTOP_REPOSITORY_SYNC.md](DESKTOP_REPOSITORY_SYNC.md), not a shared folder.
+The v2 development worktree is `/home/giando/work/laplace-v2` on
+`feature/laplace-v2`. The stable production checkout is
+`/home/giando/work/laplace` on `production/v1` and is read-only during v2 work.
+Runtime state, credentials, databases, worktrees, logs, and result artifacts live
+outside Git under the configured state root. There is no shared-folder shortcut
+between the development and production source trees.

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-research-workspace"
-version = "0.7.0"
+version = "2.0.0"
 description = "Private localhost-only research retrieval and analysis workspace"
 readme = "README.md"
 license = "LicenseRef-Proprietary"

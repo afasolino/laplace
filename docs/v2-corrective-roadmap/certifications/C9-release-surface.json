@@ -1,0 +1,90 @@
+{
+  "phase": "C9",
+  "status": "CERTIFIED",
+  "generated_at_utc": "2026-08-25T08:55:37Z",
+  "base_commit": "46760be",
+  "summary": "Package metadata, README, user, Zetsu, architecture, operations, troubleshooting, changelog, and release policy documentation now describe the actual v2 system and its explicit C8 limitation.",
+  "release_surface": {
+    "package_version": "2.0.0",
+    "runtime_version_source": "src/research_workspace/__init__.py",
+    "metadata_version_source": "pyproject.toml",
+    "standalone_core_documented": true,
+    "optional_zetsu_adapter_documented": true,
+    "qwen38_quality_standard_documented": true,
+    "codev_optional_and_nocodev_documented": true,
+    "repository_isolation_and_lifecycle_documented": true,
+    "queue_capacity_and_gpu_admission_documented": true,
+    "bounded_aci_documented": true,
+    "memory_vs_personal_corpus_documented": true,
+    "rules_repo_intelligence_trajectories_context_skills_hooks_consolidation_documented": true,
+    "logical_subagents_and_large_result_paging_documented": true,
+    "start_status_sessions_worktrees_stop_documented": true,
+    "development_production_boundary_and_rollback_documented": true,
+    "c8_blocked_nonpromotion_documented": true
+  },
+  "documentation_checks": {
+    "command": "PYTHONPATH=src python scripts/check_documentation.py",
+    "status": "PASS",
+    "markdown_files_checked": 116,
+    "screenshot_manifests_checked": 2,
+    "screenshot_files_verified": 24,
+    "broken_links": 0,
+    "stale_script_commands": 0,
+    "external_links_fetched": false
+  },
+  "tests": {
+    "focused_release_surface": {
+      "command": "PYTHONPATH=src pytest -q tests/test_corrective_c9_release_surface.py tests/test_release_v7.py",
+      "passed": 9,
+      "failed": 0
+    },
+    "previous_phase_regression": {
+      "command": "C8 RTL/routing/model regression suite",
+      "passed": 94,
+      "failed": 0
+    },
+    "combined_c8_c9_release_gate": {
+      "command": "C8 RTL/routing/model regression plus C9 release-surface tests",
+      "collected": 103,
+      "passed": 103,
+      "failed": 0
+    },
+    "ruff": {
+      "passed": true
+    },
+    "mypy": {
+      "passed": true,
+      "scope": "versioning.py"
+    },
+    "compileall": {
+      "passed": true
+    },
+    "git_diff_check": {
+      "passed": true
+    }
+  },
+  "schema_changes": false,
+  "security_notes": [
+    "Documentation now states that CodeV is intentionally absent in --nocodev mode and does not equate it with degraded operation.",
+    "Examples preserve canonical repository registration, owner grants, isolated worktrees, no dirty-file import, and no arbitrary filesystem roots.",
+    "The release policy preserves explicit human promotion and immutable production rollback boundaries.",
+    "No model route, authentication behavior, serving stack, or production checkout was changed."
+  ],
+  "changed_paths": [
+    "pyproject.toml",
+    "src/research_workspace/__init__.py",
+    "tests/test_release_v7.py",
+    "README.md",
+    "CHANGELOG.md",
+    "docs/ARCHITECTURE.md",
+    "docs/OPERATING_MODES.md",
+    "docs/RELEASE_POLICY.md",
+    "docs/TROUBLESHOOTING.md",
+    "docs/USER_GUIDE.md",
+    "docs/ZETSU.md",
+    "scripts/check_documentation.py",
+    "tests/test_corrective_c9_release_surface.py",
+    "docs/v2-corrective-roadmap/certifications/C9-release-surface.json"
+  ],
+  "production_checkout_modified": false
+}

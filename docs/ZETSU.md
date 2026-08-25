@@ -4,24 +4,23 @@ Zetsu is the authenticated Laplace↔Codex pairing layer. It is served at `/mcp`
 by the existing loopback-bound Laplace Operator process. HTTPS terminates at the
 normal Laplace ingress; Qwen, CodeV, databases, and control ports remain private.
 
-Zetsu schema version is 1.3 and Skill version is 1.3.0. The tool set is
+Zetsu schema version is 1.5 and Skill version is 1.5.0. The tool set is
 `search`, `get_evidence`, `project_context`, `experiment_context`, `delegate`,
-`agent_task`, `rtl_task`, and `verify`. Normal Laplace capabilities determine
-which tools each identity sees.
+`agent_task`, `agent_task_status`, `cancel_agent_task`, `rtl_task`, `verify`, and
+`get_result`. Normal Laplace capabilities determine which tools each identity sees.
 
 ## Configure Codex
 
-Start the complete local production stack with one idempotent command from the
-Laplace checkout:
+Start the normal local development stack with CodeV intentionally disabled:
 
 ```bash
-laplace zetsu start
+laplace zetsu start --nocodev
 ```
 
-The command starts owned supervisors in the certified CodeV → Qwen → Operator
-order, explicitly selects `.venv-vllm-cu129`, waits for exact model identities,
-checks authenticated Zetsu availability, and leaves the services running in the
-background. Private logs and PID ownership records are stored below
+The command starts the owned Qwen → Operator supervisors, explicitly selects the
+configured vLLM executable, waits for exact model identities, checks authenticated
+Zetsu availability, and leaves the services running in the background. CodeV
+absence is intentional in this topology. Private logs and PID ownership records are stored below
 `$LAPLACE_STATE_ROOT` or `~/.local/state/laplace`. If a later service fails to
 start, only supervisors created by that invocation are stopped. Use
 `laplace zetsu stop` for the matching ownership-safe shutdown. `--dry-run` prints
@@ -70,7 +69,7 @@ policy that teaches Codex when to use it. The bearer value is referenced through
 an environment variable and is never written to either file.
 
 The installed Codex CLI automatically defers MCP tool schemas until tool search
-selects the server. All eight capabilities remain registered, but unused Zetsu
+selects the server. All registered capabilities remain available, but unused Zetsu
 does not eagerly serialize their full schemas into the model context.
 
 Run `configure` from a new project repository to install or refresh its managed
@@ -95,10 +94,29 @@ and simple local tasks. Use the Zetsu surfaces according to the work required:
 CodeV remains the RTL specialist. `agent_task` uses only Quality or Standard and
 must not replace the existing `rtl_task` path.
 
+Before repository-bound work, run `laplace zetsu status --json`. The repository
+object must report the canonical registered root, logical ID, owner grant,
+granted revision, current HEAD, clean state, and `agent_task_ready: true`.
+`repository_not_registered` and `repository_not_authorized` are explicit security
+states; Zetsu never silently authorizes a client path.
+
+Inspect owned lifecycle state without querying SQLite:
+
+```bash
+laplace zetsu sessions --json
+laplace zetsu worktrees --json
+```
+
+Clean failed or expired sessions are reconciled before quota denial. Dirty
+worktrees remain recoverable and are never automatically deleted. A committed
+canonical HEAD advance is synchronized for a new session. Caller-only dirty files
+are not copied; when a target is absent from the exact committed session revision,
+the deterministic remediation is to checkpoint/commit and delegate again.
+
 ## Qwen repository agent
 
 `agent_task` binds a Qwen session to the authenticated owner, logical repository
-ID, server-authorized isolated worktree, base revision, and bounded tool policy.
+ID, server-authorized isolated worktree, exact committed base revision, and bounded tool policy.
 It can search/read the worktree, request compact owner-authorized retrieval,
 edit existing text files, create bounded new text files, and execute only the
 verification allowlist. It has no generic shell, network access, `.git` access,
@@ -113,6 +131,9 @@ any patch/postcondition mismatch fails closed. The eager result contains only
 status, changed paths, verifier result, unresolved failures, evidence/checkpoint
 references, patch identity, and promotion state. `verify` with `include_patch`
 expands the exact persisted handoff only when an anomaly requires it.
+
+Large successful results use durable bounded paging through `get_result`; they are
+not execution failures or unbounded context injections.
 
 Mutating tasks cannot finish successfully until deterministic verification has
 passed after the latest mutation. Cancellation, command limits, step limits, and
@@ -195,8 +216,26 @@ in the protected Operator token file and client process environment.
   do not bypass a failed resume check.
 - `zetsu_agent_compaction_*`: preserve the checkpoint and diagnose serving/context
   behavior before resuming.
+- `repository_not_registered` or `repository_not_authorized`: ask an administrator
+  to register/grant the logical repository; never provide an arbitrary client path.
+- `repository_state_not_materialized`: commit the caller's intended change and
+  delegate a new session; Zetsu never copies dirty files or auto-commits.
+- `per_user_worktree_quota`: inspect `laplace zetsu sessions --json`; clean stale
+  sessions are reclaimed, while dirty sessions remain protected.
 - model readiness false: inspect `/api/v1/readiness`; MCP reachability does not
   certify Qwen or CodeV.
+
+For the local development deployment, `laplace zetsu start --nocodev` starts the
+selected Qwen profile and Operator and waits for both to become ready. Thereafter,
+bare `laplace zetsu` from any project performs configure-if-needed, status, and
+the authenticated retrieval test. The matching `laplace zetsu stop` command stops
+only supervisors recorded with matching owned process identities.
+
+The full CodeV topology is reserved for an explicit RTL experiment or operator
+action. If it is used, stop it and return to `laplace zetsu start --nocodev` when
+the experiment ends. C8 currently records the SiliconMind comparison as BLOCKED
+because its candidate artifact and certified full-topology vLLM executable are
+absent; no model route was promoted.
 
 See [QWEN38_PRODUCTION_MIGRATION.md](QWEN38_PRODUCTION_MIGRATION.md) for Qwen3.8
 preparation, certification, promotion, MTP, and rollback.

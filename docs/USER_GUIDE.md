@@ -4,6 +4,36 @@ Laplace is a private research and engineering workspace. Its normal browser logi
 
 The screenshots below contain synthetic fixture data. They contain no live credentials, activation codes, private paths, or unrelated user information.
 
+## v2 developer and Codex workflow
+
+The standalone `LaplaceCore` can run without MCP. For authenticated repository
+work, Zetsu is the optional Codex adapter over the same Core services. The normal
+development topology intentionally disables CodeV:
+
+```bash
+cd /home/giando/work/laplace-v2
+laplace zetsu start --nocodev
+laplace zetsu status --json
+laplace zetsu sessions --json
+```
+
+From a canonical administrator-registered and authorized project, use:
+
+```bash
+cd <registered-project>
+laplace zetsu
+laplace zetsu codex
+```
+
+Status separates MCP/model readiness from repository readiness. A repository
+must be registered and granted to the authenticated principal before
+`agent_task_ready` becomes true. The precise authorization errors are
+`repository_not_registered` and `repository_not_authorized`. A committed canonical HEAD advance is safely
+synchronized for a new isolated session; caller-only dirty files are never copied.
+Clean failed/expired sessions are reclaimed before quota denial, while dirty
+worktrees remain recoverable. See [ZETSU.md](ZETSU.md) and
+[AGENT_WORKTREES.md](AGENT_WORKTREES.md).
+
 ## 1. Open Laplace
 
 For local use, open `http://127.0.0.1:8765`. Through an SSH tunnel, open the same URL on your client. For production HTTPS, use the exact URL supplied by the administrator.
@@ -214,12 +244,17 @@ start a Qwen repository `agent_task`, or use CodeV `rtl_task` for eligible
 RTL/SystemVerilog work. The process that starts Codex must still receive the
 configured bearer-token environment variable.
 
-For the local production deployment, `laplace zetsu start` starts CodeV, the
-selected Qwen profile, and the Operator in the certified order and waits for all
-three to become ready. Thereafter, bare `laplace zetsu` from any project performs
+For the local development deployment, `laplace zetsu start --nocodev` starts the
+selected Qwen profile and the Operator and waits for both to become ready. Thereafter,
+bare `laplace zetsu` from any project performs
 configure-if-needed, status, and the authenticated retrieval test. The matching
 `laplace zetsu stop` command stops only supervisors recorded with matching owned
 process identities.
+
+The full CodeV topology is reserved for an explicit RTL experiment or operator
+action. C8 currently records the SiliconMind comparison as `BLOCKED` because its
+candidate artifact and certified full-topology vLLM executable are absent; no model
+route was promoted.
 
 Use `laplace zetsu codex` to start a new Codex session after the same live
 preflight. It loads the loopback bearer credential from the protected Operator

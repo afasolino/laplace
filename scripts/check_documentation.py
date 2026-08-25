@@ -169,13 +169,14 @@ def check_documentation() -> dict[str, object]:
 
     required_phrases = {
         "docs/RELEASE_POLICY.md": (
-            "0.7.0",
-            "BLOCKED_BY_USER_CONSTRAINT_GPU_UNAVAILABLE",
+            "2.0.0",
+            "C8",
+            "`BLOCKED`",
         ),
         "docs/MIGRATIONS.md": ("--dry-run", "--rollback-backup-id"),
         "docs/CONFIGURATION_REFERENCE.md": ("--validate-config",),
         "docs/CI.md": ("run_release_candidate_v8_certification.py",),
-        "docs/OPERATING_MODES.md": ("desktop", "server"),
+        "docs/OPERATING_MODES.md": ("standalone Core", "Operator/Zetsu"),
         "docs/SPECDEC_GPU_COORDINATION.md": (
             "BLOCKED_BY_SPECDEC_ACTIVE",
             "YIELDED_TO_SPECDEC",
