@@ -1,11 +1,14 @@
 """Deterministic, advisory structural context for local repositories.
 
-This is a small native RepoMap implementation.  It deliberately keeps exact
-file reads and mutation tools outside this service: the output is a bounded
-hint about symbols and relationships, never an authority about file content.
-Tree-sitter language packs were evaluated as an optional upstream reference,
-but the baseline has no parser dependency and uses conservative standard
-library extraction for the languages required by Laplace.
+This is a lightweight advisory RepoMap implementation, not a complete parser.
+It deliberately keeps exact file reads and mutation tools outside this service:
+the output is a bounded hint about symbols and relationships, never an
+authority about file content.  Python uses ``ast``; C/C++ and Verilog/SystemVerilog
+use conservative line-oriented extraction.  Multiline declarations, templates,
+preprocessor expansion, generate elaboration, and other grammar-dependent
+constructs are explicitly outside this contract.  A maintained tree-sitter
+runtime is not a dependency of the local v2 environment, so callers must never
+represent this map as complete semantic parsing.
 """
 
 from __future__ import annotations
@@ -271,6 +274,14 @@ class RepoMap:
             "token_budget": self.token_budget,
             "entries": list(self.entries),
             "authority": "advisory",
+            "parser_contract": "lightweight_advisory_regex_v1",
+            "complete_semantic_parsing": False,
+            "known_unsupported_constructs": [
+                "multiline_c_cpp_declarations",
+                "c_cpp_template_and_preprocessor_expansion",
+                "rtl_generate_elaboration",
+                "rtl_complex_parameterized_ports",
+            ],
             "exact_file_reads_required_for_mutation_or_verification": True,
         }
 
@@ -431,7 +442,7 @@ def _rtl_analysis(path: str, language: Language, content: str, digest: str, size
 
 
 class RepositoryContextService:
-    """Build and cache a content-addressed structural repository index."""
+    """Build/cache a hash-backed lightweight advisory structural index."""
 
     def __init__(self, repository_root: Path, *, max_file_bytes: int = 2_000_000) -> None:
         self.repository_root = repository_root.resolve()
