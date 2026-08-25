@@ -1,0 +1,143 @@
+{
+  "phase": "C10",
+  "status": "CERTIFIED",
+  "final_verdict": "RESEARCH_READY",
+  "generated_at_utc": "2026-08-25T09:11:39Z",
+  "branch": "feature/laplace-v2",
+  "base_commit": "c1ba04f0bd4bb5e880a75051c062465554af4101",
+  "remote": "git@github.com:afasolino/laplace.git",
+  "previous_phase": "docs/v2-corrective-roadmap/certifications/C9-release-surface.json",
+  "integration": {
+    "standalone_core": {
+      "status": "PASS",
+      "evidence": "tests/test_corrective_c7_adapter.py and tests/test_laplace_core_g1.py; LaplaceCore imports and constructs without Zetsu-specific imports."
+    },
+    "zetsu_adapter_same_core": {
+      "status": "PASS",
+      "evidence": "tests/test_corrective_c7_adapter.py and tests/test_zetsu_agent_mcp.py; Zetsu binds the neutral Core service boundary."
+    },
+    "nocodev_runtime": {
+      "status": "PASS",
+      "command": "laplace zetsu status --repo /home/giando/work/laplace-v2 --json",
+      "observed": {
+        "reachable": true,
+        "readiness": "READY",
+        "qwen_ready": true,
+        "codev_state": "intentionally_disabled",
+        "repository_registered": true,
+        "repository_authorized": true,
+        "working_tree_clean": true,
+        "agent_task_ready": true,
+        "revision_sync_required": true
+      },
+      "note": "The supported start path was exercised with explicit existing local vLLM/FFmpeg inputs because the v2 checkout has no certified vLLM executable at its default path. The protected production-owned runtime was not stopped."
+    },
+    "full_runtime": {
+      "status": "INHERITED_CERTIFIED_NOT_RERUN",
+      "evidence": "Existing G0 serving/runtime certification and C8 focused routing/model regression remain intact; C10 did not redo G0 or disrupt the protected --nocodev production topology.",
+      "limitation": "The C8 CodeV-vs-SiliconMind campaign remains BLOCKED by the absent SiliconMind artifact and v2 full-topology toolchain evidence."
+    },
+    "shutdown": {
+      "status": "INHERITED_CERTIFIED_NOT_RERUN",
+      "evidence": "Production hotfix lifecycle/shutdown certification plus tests/test_zetsu_runtime.py and tests/test_zetsu_hotfix_lifecycle.py; no stop was issued against the production-owned runtime."
+    },
+    "live_repository_agent": {
+      "status": "BLOCKED_BY_PRODUCTION_VERSION_BOUNDARY",
+      "command": "bounded read-only mcp__zetsu__agent_task(repo_id=laplace-v2, telemetry=false)",
+      "observed_error": "zetsu_agent_read_target_unavailable",
+      "evidence": {
+        "live_server_revision": "62b3ecd838129fde4ca3d19ae5fbcfc67e84638e",
+        "live_server_repository": "/home/giando/work/laplace",
+        "live_grant_revision": "eeb29f2ce67f4d58f90dbdccd625ead94da13405",
+        "live_current_head": "c1ba04f0bd4bb5e880a75051c062465554af4101",
+        "live_sessions_counts_against_quota": 0,
+        "v2_revision_sync_tests": "PASS"
+      },
+      "interpretation": "The protected production control plane predates the v2 revision-synchronization implementation; the failure is not evidence that the v2 unit-tested synchronization path is incorrect."
+    },
+    "production_checkout": {
+      "status": "PASS",
+      "path": "/home/giando/work/laplace",
+      "branch": "production/v1",
+      "commit": "62b3ecd838129fde4ca3d19ae5fbcfc67e84638e",
+      "working_tree_clean": true,
+      "modified": false
+    }
+  },
+  "scenario_evidence": {
+    "1_standalone_core": "PASS",
+    "2_zetsu_same_core": "PASS",
+    "3_nocodev_ready": "PASS",
+    "4_full_runtime": "INHERITED_CERTIFIED_NOT_RERUN",
+    "5_shutdown": "INHERITED_CERTIFIED_NOT_RERUN",
+    "6_sequential_repository_agents": "PASS_UNIT_AND_LIFECYCLE; live sessions count 0",
+    "7_concurrent_saturation_queueing": "PASS_UNIT",
+    "8_concurrent_gpu_reservation": "PASS_UNIT",
+    "9_oversized_repository_result": "PASS_UNIT_EXACT_PAGING",
+    "10_oversized_logical_result": "PASS_UNIT_EXACT_PAGING",
+    "11_aci_continuation": "PASS_UNIT",
+    "12_memory_fail_closed": "PASS_UNIT",
+    "13_complex_repository_intelligence": "PASS_TESTED_ADVISORY_CONTRACT",
+    "14_hook_timeout_cancellation": "PASS_UNIT_COOPERATIVE_SEMANTICS",
+    "15_idle_consolidation": "PASS_REGRESSION",
+    "16_skill_governance": "PASS_REGRESSION",
+    "17_rollback": "PASS_REGRESSION",
+    "18_production_untouched": "PASS"
+  },
+  "tests": {
+    "full_pytest": {
+      "command": "PYTHONPATH=src pytest -q",
+      "collected": 562,
+      "passed": 562,
+      "failed": 0,
+      "errors": 0,
+      "result": "PASS",
+      "socket_note": "The first sandboxed run hit EPERM in two existing local HTTP/GUI tests; the same exact tests and then the full suite passed with required localhost socket permission."
+    },
+    "security_focused": {
+      "command": "PYTHONPATH=src pytest -q -rA tests/test_auth_provenance_security.py tests/test_capabilities_domains_worktrees_v6.py tests/test_repository_lifecycle_fix.py tests/test_zetsu_agent_checkpoint.py tests/test_zetsu_client_api.py tests/test_zetsu_cli.py tests/test_security_fuzz_v7.py",
+      "collected": 71,
+      "passed": 71,
+      "failed": 0,
+      "errors": 0,
+      "result": "PASS"
+    },
+    "static": {
+      "ruff": "PASS",
+      "mypy": "PASS; 112 source files",
+      "compileall": "PASS",
+      "documentation": "PASS; 116 Markdown files and 24 screenshots",
+      "git_diff_check": "PASS"
+    },
+    "packaging_import_cli": {
+      "wheel": "PASS; local_research_workspace-2.0.0-py3-none-any.whl",
+      "import": "PASS; research_workspace 2.0.0 and LaplaceCore",
+      "cli_help": "PASS; laplace, zetsu, zetsu start, zetsu sessions",
+      "version": "PASS; laplace 2.0.0"
+    }
+  },
+  "security_review": {
+    "status": "PASS",
+    "notes": [
+      "Authorization, canonical repository identity, owner binding, exact revision binding, and dirty-worktree preservation remain fail-closed.",
+      "Revision synchronization is limited to an authorized registered repository with a clean canonical checkout and never imports dirty files.",
+      "Quota reconciliation is owner-scoped and never reclaims genuine active or dirty work.",
+      "No production source, serving route, bearer-token policy, MCP transport, or CodeV policy was changed by C10."
+    ]
+  },
+  "performance": {
+    "status": "NO_UNEXPLAINED_REGRESSION_IN_DETERMINISTIC_SUITE",
+    "live_metrics": "Not measured; no throughput, latency, VRAM, OOM, or token claim is fabricated.",
+    "worktree_quota_observation": "20 inspected authenticated sessions; all reported counts_against_quota=false and clean/removed terminal state."
+  },
+  "limitations": [
+    "C8 mandatory CodeV-vs-SiliconMind RTL A/B remains BLOCKED: no local SiliconMind-V1.2-Qwen3-4B-T-2507 artifact/config/tensors and no v2 default certified full-topology vLLM executable.",
+    "The protected production control plane is still commit 62b3ecd and therefore cannot live-execute the v2 revision-synchronization implementation until a separate human-controlled promotion/cutover.",
+    "Full-runtime stop and full-topology readiness were not re-run against the protected production-owned runtime."
+  ],
+  "promotion_recommendation": "Do not merge or promote to production/v1 yet. The v2 branch is research-ready with deterministic corrective coverage; promote only after the v2 control plane is deployed in a controlled window and C8 is either completed with the required artifact/toolchain or explicitly waived by the responsible human authority.",
+  "changed_paths": [
+    "docs/v2-corrective-roadmap/certifications/FINAL.json"
+  ],
+  "production_source_modified": false
+}
