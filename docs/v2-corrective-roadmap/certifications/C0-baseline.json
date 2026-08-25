@@ -1,0 +1,161 @@
+{
+  "phase": "C0",
+  "status": "CERTIFIED",
+  "certification_kind": "corrective_baseline_and_defect_freeze",
+  "certified_at_utc": "2026-08-25T07:54:35Z",
+  "branch": "feature/laplace-v2",
+  "baseline_commit": "a443ea87c266f8951c033da5034279412f4d3040",
+  "resulting_commit": "a443ea87c266f8951c033da5034279412f4d3040",
+  "remote": "git@github.com:afasolino/laplace.git",
+  "production_checkout": {
+    "path": "/home/giando/work/laplace",
+    "branch": "production/v1",
+    "commit": "62b3ecd838129fde4ca3d19ae5fbcfc67e84638e",
+    "working_tree_clean": true,
+    "modified": false
+  },
+  "development_checkout": {
+    "path": "/home/giando/work/laplace-v2",
+    "working_tree_clean_before_artifact": true,
+    "working_tree_clean_after_artifact": false,
+    "artifact_only_change": true
+  },
+  "worktree_observations": {
+    "primary_worktrees_verified": [
+      "/home/giando/work/laplace",
+      "/home/giando/work/laplace-v2"
+    ],
+    "preexisting_prunable_worktree_observed": "/tmp/laplace-quality-async-smoke/Data/AgentTeam/worktrees/py_safe_async_job-898eebd2c037",
+    "preexisting_prunable_worktree_modified": false,
+    "new_tmp_worktrees_created": false
+  },
+  "existing_certifications": {
+    "directory": "docs/v2-roadmap/certifications",
+    "artifacts": [
+      "G0-v1-freeze.json",
+      "G1-shared-core.json",
+      "G1-zetsu-repository-lifecycle-hotfix.json",
+      "G2-memory.json",
+      "G3-rules.json",
+      "G4-repository-intelligence.json",
+      "G5-events-trajectories.json",
+      "G6-bounded-aci.json",
+      "G7-context-planner.json",
+      "G8-skills.json",
+      "G9-hooks.json",
+      "G10-idle-consolidation.json",
+      "G11-subagents-models-scheduling.json",
+      "final-integrated-verification.json"
+    ],
+    "g0_redone": false,
+    "g11_qualification": "Mandatory RTL A/B is separately blocked by absent candidate artifact and certified vLLM toolchain; no replacement was promoted."
+  },
+  "audit_items": [
+    {
+      "id": 1,
+      "status": "CONFIRMED",
+      "finding": "Logical-subagent JSON results over 128000 UTF-8 bytes raise subagent_result_too_large; _execute maps LogicalSubagentError to FAILED.",
+      "evidence": ["src/research_workspace/logical_subagents.py:286-296", "src/research_workspace/logical_subagents.py:384-401"],
+      "reproduction": {"result": "subagent_result_too_large", "observed_outcome": "FAILED"},
+      "planned_phase": "C1"
+    },
+    {
+      "id": 2,
+      "status": "CONFIRMED",
+      "finding": "A non-available or insufficient GPU observation immediately completes a task as GPU_BLOCKED and the dispatcher does not requeue or wait for capacity.",
+      "evidence": ["src/research_workspace/logical_subagents.py:442-461"],
+      "reproduction": {"result": "GPU_BLOCKED", "failure_category": "gpu_uncertain", "probe_calls": 1},
+      "planned_phase": "C2"
+    },
+    {
+      "id": 3,
+      "status": "CONFIRMED",
+      "finding": "REAL_CONCURRENT admission is limited by active count and a shared GPU observation; there is no race-safe aggregate VRAM reservation ledger.",
+      "evidence": ["src/research_workspace/logical_subagents.py:113-166", "src/research_workspace/logical_subagents.py:416-483"],
+      "reproduction": {"started_tasks": ["t1", "t2"], "observed_free_mib": 6000, "combined_required_mib": 10000, "reservation_accounting": false},
+      "planned_phase": "C2"
+    },
+    {
+      "id": 4,
+      "status": "CONFIRMED",
+      "finding": "Completed outcomes are retained in an unbounded in-process _completed dictionary; no retention bound or durable externalization is present in this scheduler.",
+      "evidence": ["src/research_workspace/logical_subagents.py:299-322"],
+      "reproduction": {"completed_count_after_one_task": 1, "retention_bound_present": false},
+      "planned_phase": "C1"
+    },
+    {
+      "id": 5,
+      "status": "CONFIRMED",
+      "finding": "run_batch establishes one common deadline before waiting entries, so queue delay consumed by earlier tasks reduces later task wall budget.",
+      "evidence": ["src/research_workspace/logical_subagents.py:534-540"],
+      "planned_phase": "C2"
+    },
+    {
+      "id": 6,
+      "status": "CONFIRMED",
+      "finding": "Bounded ACI rejects reads beyond 400 lines or 32000 output characters and performs one-shot bounded edits/files without continuation cursors or chunk transactions.",
+      "evidence": ["src/research_workspace/bounded_aci.py:45-51", "src/research_workspace/bounded_aci.py:222-241", "src/research_workspace/bounded_aci.py:340-359"],
+      "planned_phase": "C3"
+    },
+    {
+      "id": 7,
+      "status": "CONFIRMED",
+      "finding": "SQLite memory initialization overwrites an existing schema marker with the current version, including a newer unsupported version, rather than negotiating or failing closed.",
+      "evidence": ["src/research_workspace/memory.py:34", "src/research_workspace/memory.py:296-349"],
+      "reproduction": {"existing_schema_version": 99, "open_result": "opened", "stored_version_after_open": 1},
+      "planned_phase": "C4"
+    },
+    {
+      "id": 8,
+      "status": "CONFIRMED",
+      "finding": "C/C++ and Verilog/SystemVerilog repository intelligence uses line-oriented regular expressions; multiline C declarations and parameterized RTL constructs are not parsed as production grammar.",
+      "evidence": ["src/research_workspace/repository_context.py:1-8", "src/research_workspace/repository_context.py:368-430"],
+      "reproduction": {"complex_fixture_symbols": [], "complex_fixture_edges": [["instantiates", "parameterize"]]},
+      "planned_phase": "C5"
+    },
+    {
+      "id": 9,
+      "status": "CONFIRMED",
+      "finding": "Hook timeout cancels the Future and returns hook_timeout, but an already-running Python callback remains executable in its worker thread.",
+      "evidence": ["src/research_workspace/hooks.py:477-500"],
+      "reproduction": {"timeout_result": "hook_timeout", "callback_finished_after_return": true},
+      "planned_phase": "C6"
+    },
+    {
+      "id": 10,
+      "status": "CONFIRMED",
+      "finding": "LaplaceCore imports and constructs ZetsuAgentCoordinator and directly calls its private _verify_argv implementation.",
+      "evidence": ["src/research_workspace/laplace_core.py:35-46", "src/research_workspace/laplace_core.py:158-165", "src/research_workspace/laplace_core.py:558-564"],
+      "planned_phase": "C7"
+    },
+    {
+      "id": 11,
+      "status": "CONFIRMED_BLOCKED",
+      "finding": "The prior G11 certification records the mandatory CodeV-vs-SiliconMind RTL A/B as blocked by absent candidate artifact/config/tensors and missing certified vLLM toolchain; no replacement result was promoted.",
+      "evidence": ["docs/v2-roadmap/certifications/G11-subagents-models-scheduling.json:qualification", "docs/v2-roadmap/certifications/G11-subagents-models-scheduling.json:limitations"],
+      "planned_phase": "C8"
+    },
+    {
+      "id": 12,
+      "status": "CONFIRMED",
+      "finding": "Package metadata remains version 0.7.0 and the README still presents the v0.7/Ollama-era product description rather than the actual v2 system.",
+      "evidence": ["pyproject.toml:5-12", "README.md:1-30"],
+      "planned_phase": "C9"
+    }
+  ],
+  "smoke_regression": {
+    "command": "PYTHONPATH=src pytest -q tests/test_logical_subagents_g11.py tests/test_bounded_aci_g6.py tests/test_memory_g2.py tests/test_repository_context_g4.py tests/test_hooks_g9.py tests/test_laplace_core_g1.py tests/test_zetsu_hotfix_lifecycle.py tests/test_release_v7.py",
+    "collected": 54,
+    "passed": 54,
+    "failed": 0,
+    "result": "PASS",
+    "additional_check": "git diff --check",
+    "additional_check_result": "PASS"
+  },
+  "unresolved_items": [
+    "Confirmed corrective defects are intentionally frozen for C1-C7 and C9.",
+    "C8 must either complete the explicitly authorized RTL experiment with its required artifact/toolchain or close it BLOCKED with exact evidence; no unsupported model claim is permitted."
+  ],
+  "changed_paths": ["docs/v2-corrective-roadmap/certifications/C0-baseline.json"],
+  "production_source_modified": false
+}
