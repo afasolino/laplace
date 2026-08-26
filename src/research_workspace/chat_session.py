@@ -23,8 +23,8 @@ if os.name == "nt":
 else:
     import fcntl
 
-_SCHEMA_VERSION = 3
-_READABLE_SCHEMA_VERSIONS = frozenset({2, _SCHEMA_VERSION})
+_SCHEMA_VERSION = 4
+_READABLE_SCHEMA_VERSIONS = frozenset({2, 3, _SCHEMA_VERSION})
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _DOMAIN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
 _MAX_MESSAGES = 4096
@@ -52,6 +52,7 @@ class ChatSession:
     interaction_mode: str
     access_mode: str
     remote_agent_session_id: str | None
+    active_turn_id: str | None
     messages: tuple[StoredMessage, ...]
     created_at_unix: float
     updated_at_unix: float
@@ -173,6 +174,11 @@ class ChatSessionStore:
                     if payload.get("remote_agent_session_id")
                     else None
                 ),
+                active_turn_id=(
+                    str(payload["active_turn_id"])
+                    if payload.get("active_turn_id")
+                    else None
+                ),
                 messages=tuple(messages),
                 created_at_unix=float(payload["created_at_unix"]),
                 updated_at_unix=float(payload["updated_at_unix"]),
@@ -183,6 +189,8 @@ class ChatSessionStore:
         _validate_id(session.repo_id, "repo_id")
         if session.remote_agent_session_id:
             _validate_id(session.remote_agent_session_id, "remote_agent_session_id")
+        if session.active_turn_id:
+            _validate_id(session.active_turn_id, "active_turn_id")
         if session.lane not in {"quality", "standard", "economy"}:
             raise ChatSessionError("chat_session_lane_invalid")
         if _DOMAIN_RE.fullmatch(session.domain) is None:
@@ -212,6 +220,7 @@ class ChatSessionStore:
             "interaction_mode": session.interaction_mode,
             "access_mode": session.access_mode,
             "remote_agent_session_id": session.remote_agent_session_id,
+            "active_turn_id": session.active_turn_id,
             "messages": [asdict(message) for message in session.messages],
             "created_at_unix": session.created_at_unix,
             "updated_at_unix": session.updated_at_unix,
@@ -246,6 +255,7 @@ class ChatSessionStore:
             interaction_mode=interaction_mode,
             access_mode=access_mode,
             remote_agent_session_id=None,
+            active_turn_id=None,
             messages=(),
             created_at_unix=now,
             updated_at_unix=now,
@@ -334,6 +344,7 @@ class ChatSessionStore:
             "interaction_mode",
             "access_mode",
             "remote_agent_session_id",
+            "active_turn_id",
             "messages",
         }
         unknown = set(changes) - allowed

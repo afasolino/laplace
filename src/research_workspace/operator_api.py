@@ -58,7 +58,7 @@ from .personal_corpus import (
 from .request_state import RequestStateError, RequestStateStore
 from .rules import RuleService, SQLiteRuleBackend
 from .trajectory import TrajectoryService
-from .agent_sandbox import AgentSandboxError, AgentToolPolicy
+from .agent_sandbox import AgentSandboxError, AgentSessionBinding, AgentToolPolicy
 from .research_models import ResearchJobRequest
 from .research_admission import ResearchAdmissionError, ResearchAdmissionStore
 from .research_plane import DeepResearchService, ResearchPlaneError
@@ -210,6 +210,35 @@ class AgentRunRequest(BaseModel):
     max_chars: int = Field(default=8_000, ge=512, le=24_000)
     verification_argv: list[str] | None = Field(default=None, min_length=1, max_length=64)
     wait_timeout_seconds: int = Field(default=1_800, ge=1, le=3_600)
+
+
+class AgentAsyncRunRequest(AgentRunRequest):
+    """Idempotent durable-turn submission for clients that cannot hold a long POST."""
+
+    turn_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{7,159}$")
+
+
+def _agent_async_request_sha256(body: AgentAsyncRunRequest) -> str:
+    """Bind one durable turn ID to the exact normalized API request."""
+
+    payload = {
+        "instruction": body.instruction,
+        "lane": body.lane,
+        "domain": body.domain,
+        "retrieval_selection": body.retrieval_selection,
+        "personal_corpus_id": body.personal_corpus_id,
+        "max_steps": body.max_steps,
+        "max_chars": body.max_chars,
+        "verification_argv": body.verification_argv,
+        "wait_timeout_seconds": body.wait_timeout_seconds,
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class TierUserRequest(BaseModel):
@@ -604,6 +633,8 @@ def create_operator_app(
         redoc_url=None,
         openapi_url="/api/v1/openapi.json",
     )
+    agent_turn_tasks: dict[tuple[str, str], tuple[str, asyncio.Task[None]]] = {}
+    agent_turn_lock = asyncio.Lock()
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.allowed_origins),
@@ -3033,14 +3064,15 @@ def create_operator_app(
             )
         return result
 
-    @app.post("/api/v1/agent/sessions/{session_id}/run")
-    @app.post("/api/v1/agent/sessions/{session_id}/messages")
-    async def run_agent_session(
+    def _prepare_agent_turn(
+        *,
         session_id: str,
         body: AgentRunRequest,
-        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
-    ) -> dict[str, object]:
-        require_tiered()
+        authenticated: AuthPrincipal,
+    ) -> tuple[AgentSessionBinding, str, JsonObject]:
+        """Apply the identical policy/retrieval preflight for both turn routes."""
+
+        service = require_tiered()
         _require_named(authenticated, Capability.AGENT)
         instruction = body.instruction
         retrieval: JsonObject = {
@@ -3094,10 +3126,104 @@ def create_operator_app(
                 )[:100_000]
         elif body.personal_corpus_id is not None:
             raise CorpusError("personal_corpus_id_without_selection")
-        service = require_tiered()
         binding = service.sandboxes.require_active(
             session_id,
             user_id=authenticated.user_id,
+        )
+        return binding, instruction, retrieval
+
+    async def _execute_prepared_agent_turn(
+        *,
+        session_id: str,
+        body: AgentRunRequest,
+        authenticated: AuthPrincipal,
+        repo_id: str,
+        instruction: str,
+        retrieval: JsonObject,
+        background: bool = False,
+    ) -> JsonObject:
+        if zetsu_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="repository_agent_conversation_unavailable",
+            )
+        zetsu_service.repository_agent_service()
+        if settings.fixture_mode and not background:
+            result = require_core().repository_agent_turn(
+                user_id=authenticated.user_id,
+                repo_id=repo_id,
+                session_id=session_id,
+                lane=ModelLane(body.lane),
+                instruction=instruction,
+                max_steps=body.max_steps,
+                max_chars=body.max_chars,
+                verification_argv=body.verification_argv,
+                wait_timeout_seconds=body.wait_timeout_seconds,
+            )
+        else:
+            result = await run_in_threadpool(
+                require_core().repository_agent_turn,
+                user_id=authenticated.user_id,
+                repo_id=repo_id,
+                session_id=session_id,
+                lane=ModelLane(body.lane),
+                instruction=instruction,
+                max_steps=body.max_steps,
+                max_chars=body.max_chars,
+                verification_argv=body.verification_argv,
+                wait_timeout_seconds=body.wait_timeout_seconds,
+            )
+        result["retrieval"] = retrieval
+        return result
+
+    def _persist_agent_turn_result(
+        *,
+        session_id: str,
+        authenticated: AuthPrincipal,
+        result: JsonObject,
+        turn_id: str | None = None,
+    ) -> JsonObject:
+        if conversation_store is not None:
+            try:
+                metadata = {
+                    key: result.get(key)
+                    for key in (
+                        "status",
+                        "result_id",
+                        "delivery_status",
+                        "verification_status",
+                        "changed_paths",
+                    )
+                }
+                if turn_id is not None:
+                    metadata["turn_id"] = turn_id
+                message = conversation_store.append_agent_message(
+                    authenticated.user_id,
+                    session_id,
+                    role="assistant",
+                    content=_agent_result_content(result),
+                    metadata=metadata,
+                )
+                result["agent_conversation_message_id"] = message["message_id"]
+            except Exception:
+                LOGGER.exception(
+                    "agent conversation result persistence failed",
+                    extra={"session_id": session_id},
+                )
+                result["agent_conversation_persistence"] = "FAILED_AFTER_DURABLE_RESULT"
+        return _public_agent_result(result)
+
+    @app.post("/api/v1/agent/sessions/{session_id}/run")
+    @app.post("/api/v1/agent/sessions/{session_id}/messages")
+    async def run_agent_session(
+        session_id: str,
+        body: AgentRunRequest,
+        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
+    ) -> dict[str, object]:
+        binding, instruction, retrieval = _prepare_agent_turn(
+            session_id=session_id,
+            body=body,
+            authenticated=authenticated,
         )
         if conversation_store is not None:
             conversation_store.append_agent_message(
@@ -3111,64 +3237,190 @@ def create_operator_app(
                     "retrieval_selection": body.retrieval_selection,
                 },
             )
+        result = await _execute_prepared_agent_turn(
+            session_id=session_id,
+            body=body,
+            authenticated=authenticated,
+            repo_id=binding.repo_id,
+            instruction=instruction,
+            retrieval=retrieval,
+        )
+        return _persist_agent_turn_result(
+            session_id=session_id,
+            authenticated=authenticated,
+            result=result,
+        )
+
+    @app.post("/api/v1/agent/sessions/{session_id}/messages/async", status_code=202)
+    async def submit_agent_session(
+        session_id: str,
+        body: AgentAsyncRunRequest,
+        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
+    ) -> JsonObject:
+        if conversation_store is None:
+            raise HTTPException(status_code=503, detail="agent_conversation_store_unavailable")
         if zetsu_service is None:
             raise HTTPException(
                 status_code=503,
                 detail="repository_agent_conversation_unavailable",
             )
-        zetsu_service.repository_agent_service()
-        if settings.fixture_mode:
-            result = require_core().repository_agent_turn(
-                user_id=authenticated.user_id,
-                repo_id=binding.repo_id,
-                session_id=session_id,
-                lane=ModelLane(body.lane),
-                instruction=instruction,
-                max_steps=body.max_steps,
-                max_chars=body.max_chars,
-                verification_argv=body.verification_argv,
-                wait_timeout_seconds=body.wait_timeout_seconds,
+        _require_named(authenticated, Capability.AGENT)
+        request_sha256 = _agent_async_request_sha256(body)
+
+        def replay_response(existing: JsonObject) -> JsonObject:
+            submitted = existing.get("submitted_message")
+            metadata = submitted.get("metadata") if isinstance(submitted, Mapping) else None
+            if (
+                not isinstance(metadata, Mapping)
+                or metadata.get("request_sha256") != request_sha256
+            ):
+                raise HTTPException(status_code=409, detail="agent_turn_id_conflict")
+            return {
+                "status": str(existing["status"]),
+                "session_id": session_id,
+                "turn_id": body.turn_id,
+                "event_cursor": 0,
+                "idempotent_replay": True,
+            }
+
+        existing = conversation_store.agent_turn(
+            authenticated.user_id,
+            session_id,
+            body.turn_id,
+        )
+        if existing is not None:
+            return replay_response(existing)
+
+        binding, instruction, retrieval = _prepare_agent_turn(
+            session_id=session_id,
+            body=body,
+            authenticated=authenticated,
+        )
+        key = (authenticated.user_id, session_id)
+        async with agent_turn_lock:
+            # Recheck under the per-session admission lock.  A client retry can
+            # arrive between the first durable lookup and this critical section;
+            # it must replay the original turn rather than append another user
+            # message or schedule a second execution.
+            existing = conversation_store.agent_turn(
+                authenticated.user_id,
+                session_id,
+                body.turn_id,
             )
-        else:
-            result = await run_in_threadpool(
-                require_core().repository_agent_turn,
-                user_id=authenticated.user_id,
-                repo_id=binding.repo_id,
-                session_id=session_id,
-                lane=ModelLane(body.lane),
-                instruction=instruction,
-                max_steps=body.max_steps,
-                max_chars=body.max_chars,
-                verification_argv=body.verification_argv,
-                wait_timeout_seconds=body.wait_timeout_seconds,
+            if existing is not None:
+                return replay_response(existing)
+            active = agent_turn_tasks.get(key)
+            if active is not None and not active[1].done() and active[0] != body.turn_id:
+                raise HTTPException(status_code=409, detail="agent_session_turn_in_progress")
+            conversation_store.append_agent_message(
+                authenticated.user_id,
+                session_id,
+                role="user",
+                content=body.instruction,
+                metadata={
+                    "turn_id": body.turn_id,
+                    "request_sha256": request_sha256,
+                    "lane": body.lane,
+                    "domain": body.domain,
+                    "retrieval_selection": body.retrieval_selection,
+                },
             )
-        result["retrieval"] = retrieval
-        if conversation_store is not None:
-            try:
-                message = conversation_store.append_agent_message(
-                    authenticated.user_id,
-                    session_id,
-                    role="assistant",
-                    content=_agent_result_content(result),
-                    metadata={
-                        key: result.get(key)
-                        for key in (
-                            "status",
-                            "result_id",
-                            "delivery_status",
-                            "verification_status",
-                            "changed_paths",
+            submitted = require_tiered().sandboxes.record_progress(
+                session_id,
+                user_id=authenticated.user_id,
+                event="TURN_SUBMITTED",
+                details={"turn_id": body.turn_id, "lane": body.lane},
+            )
+
+            async def run_submitted_turn() -> None:
+                try:
+                    require_tiered().sandboxes.record_progress(
+                        session_id,
+                        user_id=authenticated.user_id,
+                        event="TURN_STARTED",
+                        details={"turn_id": body.turn_id},
+                    )
+                    result = await _execute_prepared_agent_turn(
+                        session_id=session_id,
+                        body=body,
+                        authenticated=authenticated,
+                        repo_id=binding.repo_id,
+                        instruction=instruction,
+                        retrieval=retrieval,
+                        background=True,
+                    )
+                    _persist_agent_turn_result(
+                        session_id=session_id,
+                        authenticated=authenticated,
+                        result=result,
+                        turn_id=body.turn_id,
+                    )
+                    status = str(result.get("status", "UNKNOWN"))
+                    require_tiered().sandboxes.record_progress(
+                        session_id,
+                        user_id=authenticated.user_id,
+                        event=(
+                            "TURN_YIELDED_RESUMABLE"
+                            if status == "INCOMPLETE"
+                            else "TURN_COMPLETED"
+                        ),
+                        details={
+                            "turn_id": body.turn_id,
+                            "status": status,
+                            "result_id": result.get("result_id"),
+                        },
+                    )
+                except Exception as exc:
+                    category = str(getattr(exc, "category", type(exc).__name__))
+                    event = (
+                        "TURN_CANCELLED"
+                        if category == "agent_session_cancelled"
+                        else "TURN_FAILED"
+                    )
+                    try:
+                        conversation_store.append_agent_message(
+                            authenticated.user_id,
+                            session_id,
+                            role="assistant",
+                            content=f"Agent turn ended: {category}",
+                            metadata={"turn_id": body.turn_id, "status": category},
                         )
-                    },
-                )
-                result["agent_conversation_message_id"] = message["message_id"]
-            except Exception:
-                LOGGER.exception(
-                    "agent conversation result persistence failed",
-                    extra={"session_id": session_id},
-                )
-                result["agent_conversation_persistence"] = "FAILED_AFTER_DURABLE_RESULT"
-        return _public_agent_result(result)
+                    except Exception:
+                        LOGGER.exception(
+                            "asynchronous agent turn transcript persistence failed",
+                            extra={"session_id": session_id},
+                        )
+                    try:
+                        require_tiered().sandboxes.record_progress(
+                            session_id,
+                            user_id=authenticated.user_id,
+                            event=event,
+                            details={"turn_id": body.turn_id, "category": category},
+                        )
+                    except AgentSandboxError:
+                        # The coordinator may have safely released a clean
+                        # terminal worktree after recording its own TASK_* event.
+                        # The durable conversation message above remains the
+                        # UI-level terminal record.
+                        pass
+                    except Exception:
+                        LOGGER.exception(
+                            "asynchronous agent turn event persistence failed",
+                            extra={"session_id": session_id},
+                        )
+                finally:
+                    async with agent_turn_lock:
+                        active = agent_turn_tasks.get(key)
+                        if active is not None and active[0] == body.turn_id:
+                            agent_turn_tasks.pop(key, None)
+
+            agent_turn_tasks[key] = (body.turn_id, asyncio.create_task(run_submitted_turn()))
+        return {
+            "status": "SUBMITTED",
+            "session_id": session_id,
+            "turn_id": body.turn_id,
+            "event_cursor": submitted["sequence"],
+        }
 
     @app.get("/api/v1/agent/sessions/{session_id}/messages")
     async def agent_session_messages(
@@ -3194,6 +3446,58 @@ def create_operator_app(
                 limit=limit,
             ),
         }
+
+    @app.get("/api/v1/agent/sessions/{session_id}/events")
+    async def agent_session_events(
+        session_id: str,
+        authenticated: AuthPrincipal = Depends(agent_principal),
+        after_sequence: int = Query(default=0, ge=0),
+        once: bool = Query(default=False),
+        last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+    ) -> StreamingResponse:
+        cursor = after_sequence
+        if last_event_id is not None:
+            try:
+                parsed = int(last_event_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="agent_event_cursor_invalid") from exc
+            if parsed < 0:
+                raise HTTPException(status_code=400, detail="agent_event_cursor_invalid")
+            cursor = max(cursor, parsed)
+        service = require_tiered()
+        service.sandboxes.inspect(session_id, user_id=authenticated.user_id)
+
+        async def stream() -> AsyncIterator[str]:
+            nonlocal cursor
+            iterations = 1 if once else 240
+            for _ in range(iterations):
+                records = service.sandboxes.events(
+                    session_id,
+                    user_id=authenticated.user_id,
+                    after_sequence=cursor,
+                    limit=200,
+                )
+                if records:
+                    for record in records:
+                        sequence = record.get("sequence")
+                        if not isinstance(sequence, int):
+                            continue
+                        cursor = sequence
+                        yield (
+                            "event: agent_event\n"
+                            f"id: {cursor}\n"
+                            f"data: {json.dumps(record, sort_keys=True)}\n\n"
+                        )
+                elif once:
+                    yield "event: heartbeat\ndata: {}\n\n"
+                if not once:
+                    await asyncio.sleep(0.25)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"X-Accel-Buffering": "no"},
+        )
 
     @app.get("/api/v1/agent/sessions/{session_id}/status")
     async def agent_session_status(

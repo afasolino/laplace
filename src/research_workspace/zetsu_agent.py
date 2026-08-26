@@ -323,6 +323,28 @@ class ZetsuAgentCoordinator:
         with self._target_locks_guard:
             return self._target_locks.setdefault(key, threading.Lock())
 
+    def _progress(
+        self,
+        ctx: AgentRunContext,
+        event: str,
+        details: Mapping[str, object] | None = None,
+    ) -> None:
+        """Record exact execution boundaries without exposing model reasoning."""
+
+        reporter = getattr(self.tiered.sandboxes, "record_progress", None)
+        if not callable(reporter):
+            return
+        try:
+            reporter(
+                ctx.session_id,
+                user_id=ctx.user_id,
+                event=event,
+                details=dict(details or {}),
+            )
+        except Exception:
+            # Progress telemetry must never change the authoritative task outcome.
+            pass
+
     @staticmethod
     def _system_prompt() -> str:
         return (
@@ -975,6 +997,7 @@ class ZetsuAgentCoordinator:
         if "run_tests" not in ctx.binding.tool_policy.allowed_tools:
             raise ServiceTierError("zetsu_agent_verify_not_allowed")
         argv = self._verify_argv(ctx.worktree, action.get("argv"))
+        self._progress(ctx, "VERIFICATION_STARTED")
         env = AgentSandboxManager.fixed_environment(ctx.binding)
         executable = shutil.which(argv[0], path=env.get("PATH"))
         if executable is None:
@@ -1064,6 +1087,11 @@ class ZetsuAgentCoordinator:
         state.validation_history.append(record)
         state.validation_history = state.validation_history[-16:]
         state.telemetry.verification_calls += 1
+        self._progress(
+            ctx,
+            "VERIFICATION_COMPLETED",
+            {"passed": passed, "returncode": returncode},
+        )
 
         if passed:
             self._remove_resolved_verification_failures(state, command_id)
@@ -2148,6 +2176,14 @@ class ZetsuAgentCoordinator:
                     break
 
                 self._consume_tool_budget(ctx, state)
+                if action_name in {"repo_map", "find_symbol", "find_references", "read_region", "read", "inspect_diff", "git_state"}:
+                    self._progress(ctx, "REPOSITORY_READ_STARTED", {"action": action_name})
+                elif action_name in {"search_text", "search"}:
+                    self._progress(ctx, "REPOSITORY_SEARCH_STARTED", {"action": action_name})
+                elif action_name == "retrieve":
+                    self._progress(ctx, "RETRIEVAL_STARTED")
+                else:
+                    self._progress(ctx, "TOOL_STARTED", {"action": action_name})
                 if action_name in {
                     "repo_map",
                     "find_symbol",

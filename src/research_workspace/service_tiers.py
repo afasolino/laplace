@@ -1103,14 +1103,14 @@ class TieredServingService:
         }
 
     def cancel_agent_session(self, *, user_id: str, session_id: str) -> JsonObject:
-        """Cancel future work and release only a clean owned worktree."""
+        """Request cancellation without reclaiming a worktree still in use."""
 
         self.users.require_capability(user_id, Capability.AGENT)
         binding = self.sandboxes.require_active(session_id, user_id=user_id)
-        result = self.sandboxes.cancel(session_id, user_id=user_id)
         with self._session_lock:
             self._cancelled_sessions[session_id] = binding.repo_id
             last_result = self._session_results.get(session_id)
+        result = self.sandboxes.cancel(session_id, user_id=user_id)
         return {
             **result,
             "cancelled": True,

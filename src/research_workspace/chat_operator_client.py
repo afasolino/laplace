@@ -7,7 +7,9 @@ only to the already-existing Operator routes:
     POST /api/v1/agent/sessions
     POST /api/v1/agent/sessions/{session_id}/run
     POST /api/v1/agent/sessions/{session_id}/messages
+    POST /api/v1/agent/sessions/{session_id}/messages/async
     GET  /api/v1/agent/sessions/{session_id}/status
+    GET  /api/v1/agent/sessions/{session_id}/events
     POST /api/v1/agent/sessions/{session_id}/cancel
 
 The request schemas are read from the Operator's own OpenAPI document at
@@ -38,7 +40,9 @@ SESSION_PATH = "/api/v1/session"
 AGENT_CREATE_PATH = "/api/v1/agent/sessions"
 AGENT_RUN_PATH = "/api/v1/agent/sessions/{session_id}/run"
 AGENT_MESSAGES_PATH = "/api/v1/agent/sessions/{session_id}/messages"
+AGENT_ASYNC_MESSAGES_PATH = "/api/v1/agent/sessions/{session_id}/messages/async"
 AGENT_STATUS_PATH = "/api/v1/agent/sessions/{session_id}/status"
+AGENT_EVENTS_PATH = "/api/v1/agent/sessions/{session_id}/events"
 AGENT_CANCEL_PATH = "/api/v1/agent/sessions/{session_id}/cancel"
 AGENT_RESULT_PATH = "/api/v1/agent/sessions/{session_id}/results/{result_id}"
 CAPABILITIES_PATH = "/api/v1/capabilities"
@@ -73,7 +77,9 @@ class OperatorContract:
     chat_path: str
     agent_create_path: str
     agent_turn_path: str
+    agent_async_turn_path: str | None
     agent_status_path: str
+    agent_events_path: str | None
     agent_cancel_path: str
     auth_kind: str
     auth_header: str | None
@@ -82,6 +88,14 @@ class OperatorContract:
 @dataclass(frozen=True)
 class AgentTurnResult:
     session_id: str
+    payload: JsonObject
+
+
+@dataclass(frozen=True)
+class AgentTurnSubmission:
+    session_id: str
+    turn_id: str
+    event_cursor: int
     payload: JsonObject
 
 
@@ -520,7 +534,25 @@ class OperatorClient:
             chat_path=CHAT_PATH,
             agent_create_path=AGENT_CREATE_PATH,
             agent_turn_path=turn_path,
+            agent_async_turn_path=(
+                AGENT_ASYNC_MESSAGES_PATH
+                if isinstance(paths.get(AGENT_ASYNC_MESSAGES_PATH), Mapping)
+                and "post" in _as_object(
+                    paths.get(AGENT_ASYNC_MESSAGES_PATH),
+                    label="openapi_agent_async_messages_path",
+                )
+                else None
+            ),
             agent_status_path=AGENT_STATUS_PATH,
+            agent_events_path=(
+                AGENT_EVENTS_PATH
+                if isinstance(paths.get(AGENT_EVENTS_PATH), Mapping)
+                and "get" in _as_object(
+                    paths.get(AGENT_EVENTS_PATH),
+                    label="openapi_agent_events_path",
+                )
+                else None
+            ),
             agent_cancel_path=AGENT_CANCEL_PATH,
             auth_kind=auth_kind,
             auth_header=auth_header,
@@ -617,6 +649,66 @@ class OperatorClient:
         )
         return self._request("POST", path, body=body)
 
+    def submit_agent_turn(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        instruction: str,
+        lane: str,
+        domain: str,
+        retrieval_selection: str = "none",
+        personal_corpus_id: str | None = None,
+        max_steps: int | None = None,
+        max_chars: int | None = None,
+        verification_argv: Sequence[str] | None = None,
+        wait_timeout_seconds: int | None = None,
+    ) -> AgentTurnSubmission | None:
+        """Submit one idempotent durable turn when the Operator exposes it.
+
+        ``None`` preserves compatibility with a pre-async Operator, whose
+        existing synchronous ``/messages`` route remains the caller fallback.
+        """
+
+        contract = self.contract_check()
+        if contract.agent_async_turn_path is None:
+            return None
+        if _REMOTE_ID_RE.fullmatch(turn_id) is None:
+            raise OperatorClientError("invalid_agent_turn_id")
+        path = self._format_path(contract.agent_async_turn_path, session_id)
+        body = self._build_body(
+            "post",
+            contract.agent_async_turn_path,
+            {
+                "turn_id": turn_id,
+                "instruction": instruction,
+                "lane": lane,
+                "domain": domain,
+                "retrieval_selection": retrieval_selection,
+                "personal_corpus_id": personal_corpus_id,
+                "max_steps": max_steps,
+                "max_chars": max_chars,
+                "verification_argv": (
+                    list(verification_argv) if verification_argv is not None else None
+                ),
+                "wait_timeout_seconds": wait_timeout_seconds,
+            },
+        )
+        payload = self._request("POST", path, body=body)
+        returned_session = _extract_session_id(payload)
+        returned_turn = payload.get("turn_id")
+        cursor = payload.get("event_cursor")
+        if returned_session != session_id or returned_turn != turn_id:
+            raise OperatorClientError("agent_async_submission_identity_invalid")
+        if not isinstance(cursor, int) or cursor < 0:
+            raise OperatorClientError("agent_async_submission_cursor_invalid")
+        return AgentTurnSubmission(
+            session_id=session_id,
+            turn_id=turn_id,
+            event_cursor=cursor,
+            payload=payload,
+        )
+
     def agent_status(self, session_id: str) -> JsonObject:
         path = self._format_path(AGENT_STATUS_PATH, session_id)
         return self._request("GET", path)
@@ -624,6 +716,58 @@ class OperatorClient:
     def agent_messages(self, session_id: str) -> JsonObject:
         path = self._format_path(AGENT_MESSAGES_PATH, session_id)
         return self._request("GET", path)
+
+    def agent_events(
+        self,
+        session_id: str,
+        *,
+        after_sequence: int,
+    ) -> list[JsonObject]:
+        """Read one bounded SSE page, reconnecting with the durable sequence cursor."""
+
+        if not 0 <= after_sequence <= 2**63 - 1:
+            raise OperatorClientError("invalid_agent_event_cursor")
+        contract = self.contract_check()
+        if contract.agent_events_path is None:
+            raise OperatorClientError("operator_agent_events_route_missing")
+        path = self._format_path(contract.agent_events_path, session_id)
+        query = urllib.parse.urlencode({"after_sequence": after_sequence, "once": "true"})
+        headers = {"Accept": "text/event-stream", "Last-Event-ID": str(after_sequence)}
+        headers.update(self._auth_headers())
+        request = urllib.request.Request(
+            f"{self.base_url}{path}?{query}",
+            headers=headers,
+            method="GET",
+        )
+        try:
+            with self._opener.open(request, timeout=self.timeout_seconds) as response:
+                raw = response.read(1024 * 1024 + 1)
+                if len(raw) > 1024 * 1024:
+                    raise OperatorClientError("operator_event_response_too_large")
+        except OperatorClientError:
+            raise
+        except urllib.error.HTTPError as exc:
+            detail = exc.read(64 * 1024).decode("utf-8", errors="replace")
+            raise OperatorClientError(f"operator_http_error:{exc.code}:{detail[:4000]}") from exc
+        except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
+            raise OperatorClientError(f"operator_unreachable:{exc}") from exc
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise OperatorClientError("operator_event_response_invalid") from exc
+        records: list[JsonObject] = []
+        for block in text.split("\n\n"):
+            lines = block.splitlines()
+            if not any(line == "event: agent_event" for line in lines):
+                continue
+            data = next((line[5:].strip() for line in lines if line.startswith("data:")), None)
+            if data is None:
+                raise OperatorClientError("operator_event_response_invalid")
+            try:
+                records.append(_as_object(json.loads(data), label="operator_agent_event"))
+            except json.JSONDecodeError as exc:
+                raise OperatorClientError("operator_event_response_invalid") from exc
+        return records
 
     def agent_result_page(
         self,

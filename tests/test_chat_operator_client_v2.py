@@ -7,7 +7,9 @@ import pytest
 
 from research_workspace.chat_operator_client import (
     AGENT_CANCEL_PATH,
+    AGENT_ASYNC_MESSAGES_PATH,
     AGENT_CREATE_PATH,
+    AGENT_EVENTS_PATH,
     AGENT_MESSAGES_PATH,
     AGENT_STATUS_PATH,
     CHAT_PATH,
@@ -32,6 +34,11 @@ class FakeResponse:
 
     def read(self, _limit=-1):
         return self._raw
+
+
+class SseResponse(FakeResponse):
+    def __init__(self, payload: str):
+        self._raw = payload.encode("utf-8")
 
 
 class FakeOpener:
@@ -125,6 +132,25 @@ def openapi():
                     }
                 }
             },
+            AGENT_ASYNC_MESSAGES_PATH: {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    **run_schema,
+                                    "required": [*run_schema["required"], "turn_id"],
+                                    "properties": {
+                                        **run_schema["properties"],
+                                        "turn_id": {"type": "string"},
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            AGENT_EVENTS_PATH: {"get": {}},
             AGENT_STATUS_PATH: {"get": {}},
             AGENT_CANCEL_PATH: {"post": {}},
         },
@@ -216,6 +242,67 @@ def test_agent_create_and_turn_use_openapi_contract():
     ]
     assert len(mutation_requests) == 2
     assert all(r.get_header("X-csrf-token") == "csrf-test-token" for r in mutation_requests)
+
+
+def test_async_agent_submission_uses_the_discovered_schema() -> None:
+    opener = FakeOpener(
+        openapi(),
+        replies=[
+            {
+                "status": "SUBMITTED",
+                "session_id": "remote-a",
+                "turn_id": "turn-00000001",
+                "event_cursor": 7,
+            }
+        ],
+    )
+    client = OperatorClient(token="secret", opener=opener)
+    submitted = client.submit_agent_turn(
+        session_id="remote-a",
+        turn_id="turn-00000001",
+        instruction="inspect it",
+        lane="quality",
+        domain="software_engineering",
+    )
+    assert submitted is not None
+    assert submitted.event_cursor == 7
+    request = opener.requests[-1]
+    assert request.full_url.endswith("/remote-a/messages/async")
+    assert json.loads(request.data.decode()) == {
+        "turn_id": "turn-00000001",
+        "instruction": "inspect it",
+        "lane": "quality",
+        "domain": "software_engineering",
+        "retrieval_selection": "none",
+    }
+
+
+def test_agent_events_are_a_read_only_cursor_page() -> None:
+    class EventOpener(FakeOpener):
+        def open(self, request, timeout):
+            if "/events?" in request.full_url:
+                self.requests.append(request)
+                return SseResponse(
+                    "event: agent_event\n"
+                    "id: 8\n"
+                    'data: {"details":{"turn_id":"turn-00000001"},"event":"TURN_STARTED","sequence":8}\n\n'
+                )
+            return super().open(request, timeout)
+
+    opener = EventOpener(openapi())
+    client = OperatorClient(token="secret", opener=opener)
+    events = client.agent_events("remote-a", after_sequence=7)
+    assert events == [
+        {
+            "details": {"turn_id": "turn-00000001"},
+            "event": "TURN_STARTED",
+            "sequence": 8,
+        }
+    ]
+    request = opener.requests[-1]
+    assert request.method == "GET"
+    assert request.get_header("X-csrf-token") is None
+    assert request.get_header("Last-event-id") == "7"
 
 
 def test_missing_csrf_token_fails_closed_before_mutation():

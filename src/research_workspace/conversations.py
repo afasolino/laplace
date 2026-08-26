@@ -439,3 +439,54 @@ class ConversationStore:
                 for row in reversed(rows)
             ],
         }
+
+    def agent_turn(
+        self,
+        owner_user_id: str,
+        agent_session_id: str,
+        turn_id: str,
+    ) -> JsonObject | None:
+        """Find one durable submitted turn without exposing another owner's data."""
+
+        if not turn_id or len(turn_id) > 160:
+            raise ConversationError("invalid_agent_turn_id")
+        binding = self._require_agent_binding(owner_user_id, agent_session_id)
+        conversation_id = str(binding["conversation_id"])
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT message_id, ordinal, role, metadata_json, created_at_utc
+                FROM conversation_messages
+                WHERE conversation_id=? AND owner_user_id=?
+                ORDER BY ordinal
+                """,
+                (conversation_id, owner_user_id),
+            ).fetchall()
+        submitted: JsonObject | None = None
+        completed: JsonObject | None = None
+        for row in rows:
+            try:
+                metadata = json.loads(str(row["metadata_json"]))
+            except json.JSONDecodeError as exc:
+                raise ConversationError("agent_conversation_message_invalid") from exc
+            if not isinstance(metadata, dict) or metadata.get("turn_id") != turn_id:
+                continue
+            message = {
+                "message_id": str(row["message_id"]),
+                "ordinal": int(row["ordinal"]),
+                "role": str(row["role"]),
+                "created_at_utc": str(row["created_at_utc"]),
+                "metadata": metadata,
+            }
+            if message["role"] == "user" and submitted is None:
+                submitted = message
+            elif message["role"] == "assistant":
+                completed = message
+        if submitted is None:
+            return None
+        return {
+            "turn_id": turn_id,
+            "submitted_message": submitted,
+            "completed_message": completed,
+            "status": "COMPLETED" if completed is not None else "SUBMITTED",
+        }

@@ -132,3 +132,58 @@ def test_mutating_turn_confirmation_fails_closed_before_remote_call(
         chat._agent_turn("change component")
     assert client.create_calls == 0
     assert client.model_calls == 0
+
+
+def test_async_agent_turn_uses_events_instead_of_waiting_for_sync_http(tmp_path: Path):
+    class AsyncClient(Client):
+        def submit_agent_turn(self, *, session_id, turn_id, **_kwargs):
+            self.turn_sessions.append(session_id)
+
+            class Submitted:
+                event_cursor = 0
+
+            return Submitted()
+
+        def agent_events(self, session_id, *, after_sequence):
+            assert session_id == "remote-a"
+            assert after_sequence == 0
+            return [
+                {
+                    "sequence": 1,
+                    "event": "TURN_COMPLETED",
+                    "details": {"turn_id": self.turn_id},
+                }
+            ]
+
+        def agent_messages(self, session_id):
+            return {
+                "conversation": {
+                    "agent_session_id": session_id,
+                    "repo_id": "repo-a",
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": "completed without a long HTTP wait",
+                            "metadata": {"turn_id": self.turn_id},
+                        }
+                    ],
+                }
+            }
+
+        def run_agent_turn(self, **_kwargs):
+            raise AssertionError("synchronous /messages fallback must not run")
+
+    chat, _client = shell(tmp_path)
+    client = AsyncClient()
+    chat.client = client  # type: ignore[assignment]
+    original = client.submit_agent_turn
+
+    def submit_with_turn_id(*, turn_id, **kwargs):
+        client.turn_id = turn_id
+        return original(turn_id=turn_id, **kwargs)
+
+    client.submit_agent_turn = submit_with_turn_id  # type: ignore[method-assign]
+    chat._agent_turn("inspect component")
+    assert client.model_calls == 0
+    assert chat.session.active_turn_id is None
+    assert chat.session.messages[-1].content == "completed without a long HTTP wait"

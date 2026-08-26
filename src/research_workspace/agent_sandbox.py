@@ -696,8 +696,8 @@ class AgentSandboxManager:
         event: str,
         state: str,
         details: JsonObject,
-    ) -> None:
-        connection.execute(
+    ) -> int:
+        cursor = connection.execute(
             """
             INSERT INTO worktree_events (
                 session_id, user_id, event, state, timestamp_utc, details_json
@@ -712,6 +712,71 @@ class AgentSandboxManager:
                 json.dumps(details, sort_keys=True, separators=(",", ":")),
             ),
         )
+        if cursor.lastrowid is None:
+            raise AgentSandboxError("agent_event_sequence_unavailable")
+        return int(cursor.lastrowid)
+
+    def record_progress(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        event: str,
+        details: JsonObject,
+    ) -> JsonObject:
+        """Append bounded, owner-scoped execution progress without changing state.
+
+        This is deliberately an internal lifecycle boundary, not a general event
+        logger. Callers provide only deterministic event names and compact public
+        metadata; the durable worktree event sequence is the reconnect cursor.
+        """
+
+        if event not in {
+            "TURN_SUBMITTED",
+            "TURN_STARTED",
+            "TASK_STARTED",
+            "REPOSITORY_READ_STARTED",
+            "REPOSITORY_SEARCH_STARTED",
+            "RETRIEVAL_STARTED",
+            "TOOL_STARTED",
+            "VERIFICATION_STARTED",
+            "VERIFICATION_COMPLETED",
+            "TASK_YIELDED_RESUMABLE",
+            "TASK_COMPLETED",
+            "TASK_FAILED",
+            "TASK_CANCELLED",
+            "TURN_COMPLETED",
+            "TURN_FAILED",
+            "TURN_CANCELLED",
+            "TURN_YIELDED_RESUMABLE",
+        }:
+            raise AgentSandboxError("agent_progress_event_invalid")
+        try:
+            encoded = json.dumps(details, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError) as exc:
+            raise AgentSandboxError("agent_progress_details_invalid") from exc
+        if len(encoded.encode("utf-8")) > 4_096:
+            raise AgentSandboxError("agent_progress_details_invalid")
+        binding = self.require_active(session_id, user_id=user_id)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT state FROM worktree_sessions WHERE session_id=? AND user_id=?",
+                (binding.session_id, binding.user_id),
+            ).fetchone()
+            if row is None:
+                raise AgentSandboxError("unknown_agent_session")
+            sequence = self._event(
+                connection,
+                binding,
+                event,
+                str(row["state"]),
+                dict(details),
+            )
+        return {
+            "sequence": sequence,
+            "event": event,
+            "state": str(row["state"]),
+        }
 
     def require_active(self, session_id: str, *, user_id: str) -> AgentSessionBinding:
         identifier = _session_identifier(session_id)
@@ -1320,6 +1385,14 @@ class AgentSandboxManager:
 
     def cancel(self, session_id: str, *, user_id: str) -> JsonObject:
         binding = self.require_active(session_id, user_id=user_id)
+        if binding.session_id in self._live_executors:
+            # A running coordinator owns this worktree.  Cancellation is
+            # cooperative and must be observed by the coordinator before the
+            # normal clean-worktree lifecycle may reclaim it.
+            return {
+                "status": "CANCELLATION_REQUESTED",
+                "session_id": binding.session_id,
+            }
         result = self.close_if_clean(session_id, user_id=user_id)
         if result["status"] == "PRESERVED_DIRTY_WORKTREE":
             self._set_state(binding, "CANCELLED_DIRTY", "CANCELLED_DIRTY", {})
@@ -2343,7 +2416,10 @@ class AgentSandboxManager:
         return patch.encode("utf-8")
 
     def history(self, session_id: str, *, user_id: str) -> list[JsonObject]:
-        self.inspect(session_id, user_id=user_id)
+        # A clean terminal worktree can be released before a reconnecting CLI
+        # fetches its final event.  Keep the durable event feed readable for the
+        # original owner without reviving the released worktree.
+        self.status(session_id, user_id=user_id)
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -2363,6 +2439,48 @@ class AgentSandboxManager:
             }
             for row in rows
         ]
+
+    def events(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        after_sequence: int = 0,
+        limit: int = 200,
+    ) -> list[JsonObject]:
+        """Return a bounded ordered owner-only worktree event page."""
+
+        if not 0 <= after_sequence <= 2**63 - 1 or not 1 <= limit <= 200:
+            raise AgentSandboxError("agent_event_cursor_invalid")
+        self.inspect(session_id, user_id=user_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT sequence, event, state, timestamp_utc, details_json
+                FROM worktree_events
+                WHERE session_id=? AND user_id=? AND sequence>?
+                ORDER BY sequence LIMIT ?
+                """,
+                (session_id, user_id, after_sequence, limit),
+            ).fetchall()
+        records: list[JsonObject] = []
+        for row in rows:
+            try:
+                details = json.loads(str(row["details_json"]))
+            except json.JSONDecodeError as exc:
+                raise AgentSandboxError("agent_event_details_invalid") from exc
+            if not isinstance(details, dict):
+                raise AgentSandboxError("agent_event_details_invalid")
+            records.append(
+                {
+                    "sequence": int(row["sequence"]),
+                    "event": str(row["event"]),
+                    "state": str(row["state"]),
+                    "timestamp_utc": str(row["timestamp_utc"]),
+                    "details": details,
+                }
+            )
+        return records
 
     @staticmethod
     def fixed_environment(binding: AgentSessionBinding) -> dict[str, str]:

@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Sequence
@@ -199,6 +200,8 @@ class ChatShell:
         )
 
     def _agent_turn(self, text: str) -> None:
+        if self.session.active_turn_id is not None:
+            raise ChatCLIError("agent_turn_active:use_/watch_or_/cancel")
         self._confirm_agent_turn()
         remote = self._ensure_remote_agent(task_title=text)
         self.session = self.store.append_message(
@@ -207,6 +210,45 @@ class ChatShell:
             content=text,
             mode="agent",
         )
+        turn_id = f"turn-{uuid.uuid4().hex}"
+        self.session = self.store.update(self.session, active_turn_id=turn_id)
+        submit = getattr(self.client, "submit_agent_turn", None)
+        submission = (
+            submit(
+                session_id=remote,
+                turn_id=turn_id,
+                instruction=text,
+                lane=self.session.lane,
+                domain=self.session.domain,
+                max_steps=self.max_steps,
+                max_chars=self.max_chars,
+                verification_argv=self.verification_argv,
+                wait_timeout_seconds=self.wait_timeout_seconds,
+            )
+            if callable(submit)
+            else None
+        )
+        if submission is not None:
+            print(f"[agent turn {sanitize_terminal(turn_id, maximum=160)} submitted]")
+            try:
+                rendered = self._watch_agent_turn(
+                    remote,
+                    turn_id,
+                    after_sequence=submission.event_cursor,
+                )
+            except KeyboardInterrupt:
+                print(sanitize_terminal(self.client.cancel_agent(remote)))
+                print("[agent cancellation requested; use /watch to reconnect]")
+                return
+            self.session = self.store.update(self.session, active_turn_id=None)
+            print(sanitize_terminal(rendered))
+            self.session = self.store.append_message(
+                self.session,
+                role="assistant",
+                content=rendered[:128_000],
+                mode="agent",
+            )
+            return
         payload = self.client.run_agent_turn(
             session_id=remote,
             instruction=text,
@@ -217,6 +259,7 @@ class ChatShell:
             verification_argv=self.verification_argv,
             wait_timeout_seconds=self.wait_timeout_seconds,
         )
+        self.session = self.store.update(self.session, active_turn_id=None)
         response = extract_display_text(payload)
         rendered = response if response else sanitize_terminal(payload)
         print(sanitize_terminal(rendered))
@@ -226,6 +269,65 @@ class ChatShell:
             content=rendered[:128_000],
             mode="agent",
         )
+
+    def _watch_agent_turn(self, remote: str, turn_id: str, *, after_sequence: int) -> str:
+        """Render durable server events; no model call is used for monitoring."""
+
+        cursor = after_sequence
+        turn_started = False
+        terminal_observed = False
+        terminal_wait_deadline: float | None = None
+        while True:
+            records = self.client.agent_events(remote, after_sequence=cursor)
+            for record in records:
+                sequence = record.get("sequence")
+                if isinstance(sequence, int) and sequence > cursor:
+                    cursor = sequence
+                details = record.get("details")
+                event_turn = details.get("turn_id") if isinstance(details, dict) else None
+                if event_turn not in {None, turn_id}:
+                    continue
+                event = record.get("event")
+                if isinstance(event, str):
+                    print(f"[agent {sanitize_terminal(event, maximum=120)}]")
+                    if event == "TURN_STARTED" and event_turn == turn_id:
+                        turn_started = True
+                    if event in {
+                        "TURN_COMPLETED",
+                        "TURN_FAILED",
+                        "TURN_CANCELLED",
+                        "TURN_YIELDED_RESUMABLE",
+                    } and event_turn == turn_id:
+                        terminal_observed = True
+                    # Coordinator lifecycle events omit a UI turn ID.  Only one
+                    # turn may be admitted to a remote session, and this watcher
+                    # starts after TURN_SUBMITTED, so these are authoritative
+                    # terminal boundaries for the current submitted turn.
+                    if turn_started and event_turn is None and event in {
+                        "TASK_COMPLETED",
+                        "TASK_FAILED",
+                        "TASK_CANCELLED",
+                        "TASK_YIELDED_RESUMABLE",
+                    }:
+                        terminal_observed = True
+            if terminal_observed:
+                transcript = self.client.agent_messages(remote)
+                conversation = transcript.get("conversation")
+                messages = conversation.get("messages") if isinstance(conversation, dict) else None
+                if isinstance(messages, list):
+                    for message in reversed(messages):
+                        if not isinstance(message, dict) or message.get("role") != "assistant":
+                            continue
+                        metadata = message.get("metadata")
+                        if isinstance(metadata, dict) and metadata.get("turn_id") == turn_id:
+                            content = message.get("content")
+                            if isinstance(content, str) and content:
+                                return content
+                if terminal_wait_deadline is None:
+                    terminal_wait_deadline = time.monotonic() + 15.0
+                if time.monotonic() >= terminal_wait_deadline:
+                    raise ChatCLIError("agent_turn_terminal_result_pending:use_/watch")
+            time.sleep(0.20)
 
     def _require_remote(self) -> str:
         if not self.session.remote_agent_session_id:
@@ -276,6 +378,7 @@ class ChatShell:
                 "/tests\n"
                 "/result <artifact> [offset]\n"
                 "/cancel\n"
+                "/watch\n"
                 "/contract\n"
                 "/context\n"
                 "/history\n"
@@ -332,6 +435,20 @@ class ChatShell:
         if command == "/cancel":
             print(sanitize_terminal(self.client.cancel_agent(self._require_remote())))
             return True
+        if command == "/watch":
+            if args:
+                raise ChatCLIError("usage:/watch")
+            if self.session.active_turn_id is None:
+                raise ChatCLIError("no_active_agent_turn")
+            remote = self._require_remote()
+            rendered = self._watch_agent_turn(
+                remote,
+                self.session.active_turn_id,
+                after_sequence=0,
+            )
+            self.session = self.store.update(self.session, active_turn_id=None)
+            print(sanitize_terminal(rendered))
+            return True
         if command == "/contract":
             print(sanitize_terminal(self.client.contract_check().__dict__))
             return True
@@ -341,6 +458,7 @@ class ChatShell:
                     {
                         "local_session_id": self.session.session_id,
                         "remote_agent_session_id": self.session.remote_agent_session_id,
+                        "active_turn_id": self.session.active_turn_id,
                         "repo_id": self.session.repo_id,
                         "repository_root": self.session.repository_root,
                         "lane": self.session.lane,
@@ -436,6 +554,8 @@ class ChatShell:
             f"Operator {contract.openapi_version or '?'} @ {contract.base_url} | "
             f"agent_turn={contract.agent_turn_path}"
         )
+        if self.session.active_turn_id is not None:
+            print(f"[active agent turn {sanitize_terminal(self.session.active_turn_id, maximum=160)}; use /watch]")
         while True:
             try:
                 line = input("laplace> ")

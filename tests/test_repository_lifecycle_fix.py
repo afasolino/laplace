@@ -263,6 +263,24 @@ def test_clean_successful_session_releases_safely(tmp_path: Path) -> None:
     assert record["physical_state"] == "REMOVED"
 
 
+def test_owner_events_remain_readable_after_clean_release(tmp_path: Path) -> None:
+    manager, _, _, _ = _manager(tmp_path)
+    _binding(manager, "event-release")
+    manager.record_progress(
+        "event-release",
+        user_id="owner",
+        event="TURN_CANCELLED",
+        details={"turn_id": "turn-00000001"},
+    )
+    assert manager.close_if_clean("event-release", user_id="owner")["status"] == (
+        "RELEASED_CLEAN_WORKTREE"
+    )
+    events = manager.events("event-release", user_id="owner", after_sequence=0)
+    assert any(item["event"] == "TURN_CANCELLED" for item in events)
+    with pytest.raises(AgentSandboxError, match="unknown_agent_session"):
+        manager.events("event-release", user_id="other", after_sequence=0)
+
+
 def test_clean_failed_session_is_reclaimed_before_quota_denial(tmp_path: Path) -> None:
     manager, _, _, _ = _manager(tmp_path, quota=1)
     root = _binding(manager, "failed-clean")
