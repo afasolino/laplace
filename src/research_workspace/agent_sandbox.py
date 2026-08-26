@@ -741,6 +741,7 @@ class AgentSandboxManager:
             "TOOL_STARTED",
             "VERIFICATION_STARTED",
             "VERIFICATION_COMPLETED",
+            "QUANTUM_CONTINUING",
             "TASK_YIELDED_RESUMABLE",
             "TASK_COMPLETED",
             "TASK_FAILED",

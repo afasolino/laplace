@@ -281,6 +281,28 @@ def test_owner_events_remain_readable_after_clean_release(tmp_path: Path) -> Non
         manager.events("event-release", user_id="other", after_sequence=0)
 
 
+def test_quantum_continuing_progress_event_is_state_neutral(tmp_path: Path) -> None:
+    manager, _, _, _ = _manager(tmp_path)
+    _binding(manager, "quantum-progress")
+    before = manager.status("quantum-progress", user_id="owner")
+    manager.record_progress(
+        "quantum-progress",
+        user_id="owner",
+        event="QUANTUM_CONTINUING",
+        details={
+            "quantum": 1,
+            "cumulative_steps": 12,
+            "progress": True,
+            "directive": "reassess_finish",
+        },
+    )
+    after = manager.status("quantum-progress", user_id="owner")
+    assert after["lifecycle_state"] == before["lifecycle_state"]
+    events = manager.events("quantum-progress", user_id="owner", after_sequence=0)
+    assert events[-1]["event"] == "QUANTUM_CONTINUING"
+    assert events[-1]["details"]["cumulative_steps"] == 12
+
+
 def test_clean_failed_session_is_reclaimed_before_quota_denial(tmp_path: Path) -> None:
     manager, _, _, _ = _manager(tmp_path, quota=1)
     root = _binding(manager, "failed-clean")

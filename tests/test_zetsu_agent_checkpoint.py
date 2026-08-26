@@ -158,6 +158,12 @@ def test_checkpoint_resume_restores_exact_and_semantic_state(tmp_path: Path, mon
         mutation_epoch=2,
         last_verified_epoch=1,
         command_count=3,
+        continuation_count=2,
+        stagnation_count=1,
+        exploration_only_quanta=2,
+        recent_action_fingerprints=["a" * 64],
+        quantum_action_fingerprints=["b" * 64],
+        quantum_exploration_only=False,
         telemetry=AgentTelemetry(tool_calls=3),
     )
     coordinator._checkpoint(ctx, state)
@@ -171,6 +177,50 @@ def test_checkpoint_resume_restores_exact_and_semantic_state(tmp_path: Path, mon
     assert restored.mutation_epoch == 2
     assert restored.last_verified_epoch == 1
     assert restored.command_count == 3
+    assert restored.continuation_count == 2
+    assert restored.stagnation_count == 1
+    assert restored.exploration_only_quanta == 2
+    assert restored.recent_action_fingerprints == ["a" * 64]
+    assert restored.quantum_action_fingerprints == ["b" * 64]
+    assert restored.quantum_exploration_only is False
+
+
+def test_pre_adaptive_schema3_checkpoint_resumes_at_quantum_boundary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    tiered = _Tiered(tmp_path)
+    coordinator = ZetsuAgentCoordinator(
+        tiered, checkpoint_store=AgentCheckpointStore(tmp_path / "checkpoints")
+    )
+    monkeypatch.setattr(
+        coordinator,
+        "_worktree_state",
+        lambda _root: ("a" * 40, "0" * 64, []),
+    )
+    ctx = _ctx(tmp_path, session="legacy-session", user="user-a")
+    state = AgentExecutionState(objective="objective", step=12)
+    coordinator._checkpoint(ctx, state)
+    raw = coordinator.checkpoints.read(ctx.session_id)
+    assert raw is not None
+    for key in (
+        "continuation_count",
+        "stagnation_count",
+        "exploration_only_quanta",
+        "recent_action_fingerprints",
+        "quantum_action_fingerprints",
+        "quantum_exploration_only",
+        "quantum_step_limit",
+        "absolute_step_limit",
+    ):
+        raw.pop(key, None)
+    coordinator.checkpoints.write(ctx.session_id, raw)
+
+    restored = coordinator._restore(ctx, "objective")
+    assert restored.step == 12
+    assert restored.continuation_count == 0
+    assert restored.stagnation_count == 0
+    assert len(restored.quantum_action_fingerprints) == 1
+    assert restored.quantum_exploration_only is False
 
 
 def test_checkpoint_resume_rejects_worktree_drift(tmp_path: Path, monkeypatch) -> None:
@@ -927,6 +977,322 @@ def test_verify_argv_rejects_executable_path_alias(tmp_path: Path) -> None:
         ZetsuAgentCoordinator._verify_argv(tmp_path, ["../pytest", "tests/test_x.py", "-q"])
 
 
+def test_quantum_progress_requires_new_action_or_host_state() -> None:
+    coordinator = object.__new__(ZetsuAgentCoordinator)
+    state = AgentExecutionState(objective="x", worktree_status_sha256="0" * 64)
+    action = {"action": "search", "query": "needle", "glob": "*.py"}
+
+    coordinator._record_action_progress(state, "search", action)
+    first = coordinator._assess_quantum(state)
+    assert first["progress"] is True
+    assert first["novel_actions"] == 1
+    assert state.stagnation_count == 0
+
+    coordinator._record_action_progress(state, "search", action)
+    second = coordinator._assess_quantum(state)
+    assert second["progress"] is False
+    assert second["novel_actions"] == 0
+    assert state.stagnation_count == 1
+
+    state.worktree_status_sha256 = "1" * 64
+    coordinator._record_action_progress(state, "search", action)
+    third = coordinator._assess_quantum(state)
+    assert third["progress"] is True
+    assert third["novel_actions"] == 1
+    assert state.stagnation_count == 0
+
+
+def test_adaptive_quantum_continues_same_objective_to_finish(tmp_path: Path) -> None:
+    repository = tmp_path / "adaptive-repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    (repository / "component.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "component.py"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "base",
+        ],
+        check=True,
+    )
+    head = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    binding = AgentSessionBinding(
+        session_id="adaptive-session",
+        user_id="user-a",
+        repo_id="repo",
+        canonical_repository_root=str(repository),
+        worktree_root=str(repository),
+        base_revision=head,
+        grant_revision=1,
+        tool_policy=AgentToolPolicy(
+            policy_id="adaptive-test",
+            allowed_tools=("read_file",),
+            max_commands=20,
+            max_wall_seconds=1_800,
+        ),
+        environment={},
+        created_at_utc="2026-08-26T00:00:00+00:00",
+    )
+
+    class Sandboxes:
+        sandbox_root = tmp_path / "adaptive-sandboxes"
+
+        def __init__(self) -> None:
+            self.events: list[tuple[str, dict[str, object]]] = []
+            self.results: list[dict[str, object]] = []
+
+        @staticmethod
+        def require_active(_session_id: str, *, user_id: str) -> AgentSessionBinding:
+            assert user_id == "user-a"
+            return binding
+
+        @staticmethod
+        def start_task(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        def record_progress(self, _session_id: str, **kwargs: object) -> dict[str, object]:
+            details = kwargs.get("details", {})
+            assert isinstance(details, dict)
+            self.events.append((str(kwargs["event"]), dict(details)))
+            return {"sequence": len(self.events)}
+
+        def record_result(self, *_args: object, **kwargs: object) -> dict[str, object]:
+            self.results.append(dict(kwargs))
+            return {"status": "ACTIVE_CLEAN"}
+
+    class Tiered:
+        sandboxes = Sandboxes()
+        lane_policy = LanePolicy(
+            {
+                lane: ModelRoute(
+                    lane,
+                    f"test-{lane.value}",
+                    "http://127.0.0.1:1",
+                    0,
+                    131_072,
+                    4_096,
+                )
+                for lane in ModelLane
+            }
+        )
+
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+            self.actions = iter(
+                (
+                    {"action": "search", "query": "VALUE", "glob": "*.py"},
+                    {"action": "search", "query": "component", "glob": "*.py"},
+                    {"action": "finish", "result": "inspection complete"},
+                )
+            )
+
+        @staticmethod
+        def agent_session_status(**_kwargs: object) -> dict[str, object]:
+            return {"status": "ACTIVE"}
+
+        def chat(self, **kwargs: object) -> dict[str, object]:
+            messages = kwargs["messages"]
+            assert isinstance(messages, list | tuple)
+            self.prompts.append(json.dumps(messages))
+            return {
+                "response": {
+                    "content": json.dumps(next(self.actions)),
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 10},
+                }
+            }
+
+    tiered = Tiered()
+    coordinator = ZetsuAgentCoordinator(
+        tiered,
+        checkpoint_store=AgentCheckpointStore(tmp_path / "adaptive-checkpoints"),
+    )
+    result = coordinator.run_turn(
+        user_id="user-a",
+        repo_id="repo",
+        instruction="Inspect component.py and report VALUE",
+        lane=ModelLane.QUALITY,
+        session_id="adaptive-session",
+        max_steps=2,
+        max_chars=2_000,
+        verification_argv=None,
+        wait_timeout_seconds=30,
+    )
+
+    assert result["status"] == "SUCCESS"
+    assert result["content"] == "inspection complete"
+    assert result["cumulative_steps"] == 3
+    assert result["continuation_count"] == 1
+    assert result["failure_category"] is None
+    continuing = [item for item in tiered.sandboxes.events if item[0] == "QUANTUM_CONTINUING"]
+    assert len(continuing) == 1
+    assert continuing[0][1]["cumulative_steps"] == 2
+    assert continuing[0][1]["progress"] is True
+    assert continuing[0][1]["directive"] == "reassess_finish"
+    assert len(tiered.sandboxes.results) == 1
+    assert tiered.sandboxes.results[0]["resumable"] is False
+    assert "reassess_finish" in tiered.prompts[2]
+
+    checkpoint = coordinator.checkpoints.read("adaptive-session")
+    assert checkpoint is not None
+    assert checkpoint["objective"] == "Inspect component.py and report VALUE"
+    assert checkpoint["step"] == 3
+    assert checkpoint["continuation_count"] == 1
+    assert checkpoint["next_state"] == "finished"
+
+
+def test_standalone_agent_uses_independent_command_budget_across_quantum(tmp_path: Path) -> None:
+    repository = tmp_path / "standalone-repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    (repository / "component.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "component.py"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "base",
+        ],
+        check=True,
+    )
+    head = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    class Sandboxes:
+        sandbox_root = tmp_path / "standalone-sandboxes"
+
+        def __init__(self) -> None:
+            self.binding: AgentSessionBinding | None = None
+            self.results: list[dict[str, object]] = []
+
+        @staticmethod
+        def has_session(_session_id: str, *, user_id: str) -> bool:
+            assert user_id == "user-a"
+            return False
+
+        def require_active(self, session_id: str, *, user_id: str) -> AgentSessionBinding:
+            assert user_id == "user-a"
+            assert self.binding is not None
+            assert self.binding.session_id == session_id
+            return self.binding
+
+        @staticmethod
+        def start_task(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        @staticmethod
+        def record_progress(*_args: object, **_kwargs: object) -> dict[str, object]:
+            return {"sequence": 1}
+
+        def record_result(self, *_args: object, **kwargs: object) -> dict[str, object]:
+            self.results.append(dict(kwargs))
+            return {"status": "SUCCEEDED"}
+
+    class Tiered:
+        sandboxes = Sandboxes()
+        lane_policy = LanePolicy(
+            {
+                lane: ModelRoute(
+                    lane,
+                    f"test-{lane.value}",
+                    "http://127.0.0.1:1",
+                    0,
+                    131_072,
+                    4_096,
+                )
+                for lane in ModelLane
+            }
+        )
+
+        def __init__(self) -> None:
+            self.created_policy: AgentToolPolicy | None = None
+            self.actions = iter(
+                (
+                    {"action": "search", "query": "VALUE", "glob": "*.py"},
+                    {"action": "search", "query": "component", "glob": "*.py"},
+                    {"action": "finish", "result": "standalone complete"},
+                )
+            )
+
+        def create_agent_session(self, **kwargs: object) -> None:
+            policy = kwargs["tool_policy"]
+            assert isinstance(policy, AgentToolPolicy)
+            self.created_policy = policy
+            session_id = str(kwargs["session_id"])
+            self.sandboxes.binding = AgentSessionBinding(
+                session_id=session_id,
+                user_id="user-a",
+                repo_id="repo",
+                canonical_repository_root=str(repository),
+                worktree_root=str(repository),
+                base_revision=head,
+                grant_revision=1,
+                tool_policy=policy,
+                environment={},
+                created_at_utc="2026-08-26T00:00:00+00:00",
+            )
+
+        @staticmethod
+        def agent_session_status(**_kwargs: object) -> dict[str, object]:
+            return {"status": "ACTIVE"}
+
+        def chat(self, **_kwargs: object) -> dict[str, object]:
+            return {
+                "response": {
+                    "content": json.dumps(next(self.actions)),
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 10},
+                }
+            }
+
+    tiered = Tiered()
+    coordinator = ZetsuAgentCoordinator(
+        tiered,
+        checkpoint_store=AgentCheckpointStore(tmp_path / "standalone-checkpoints"),
+    )
+    result = coordinator.run(
+        user_id="user-a",
+        repo_id="repo",
+        instruction="Inspect component.py and report VALUE",
+        lane=ModelLane.QUALITY,
+        max_steps=2,
+        max_chars=2_000,
+        verification_argv=None,
+        wait_timeout_seconds=30,
+    )
+
+    assert tiered.created_policy is not None
+    assert tiered.created_policy.max_commands == 100
+    assert result["status"] == "SUCCESS"
+    assert result["content"] == "standalone complete"
+    assert result["cumulative_steps"] == 3
+    assert result["continuation_count"] == 1
+    assert len(tiered.sandboxes.results) == 1
+    assert tiered.sandboxes.results[0]["terminal"] is True
+
+
 def test_persistent_agent_turn_reuses_worktree_and_carries_verified_summary(
     tmp_path: Path,
 ) -> None:
@@ -1088,15 +1454,21 @@ def test_persistent_agent_turn_reuses_worktree_and_carries_verified_summary(
     assert second["worktree_release"] == {"action": "PRESERVED_FOR_CONTINUATION"}
     assert third["worktree_release"] == {"action": "PRESERVED_FOR_CONTINUATION"}
     assert third["status"] == "INCOMPLETE"
-    assert third["content"] == "Maximum bounded agent steps reached before verified finish."
+    assert third["failure_category"] == "agent_stagnation_exhausted"
+    assert third["content"] == "Adaptive continuation stopped after repeated stagnant quanta."
+    assert third["cumulative_steps"] == 12
+    assert third["continuation_count"] == 2
+    assert third["stagnation_count"] == 2
     assert tiered.sandboxes.terminal_flags == [False, False, False]
     assert tiered.sandboxes.resumable_flags == [False, False, True]
     assert "first inspected result" in tiered.prompts[1]
+    assert len(tiered.prompts) == 14
 
     checkpoint = coordinator.checkpoints.read("chat-agent-session")
     assert checkpoint is not None
     assert checkpoint["required_verification_argv"] == ["pytest", "-q"]
-    assert checkpoint["next_state"] == "choose_action"
+    assert checkpoint["next_state"] == "stagnation_exhausted"
+    assert checkpoint["step"] == 12
 
 
 def test_checkpoint_resume_binds_route_and_required_verifier(tmp_path: Path, monkeypatch) -> None:

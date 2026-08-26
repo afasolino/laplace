@@ -57,6 +57,25 @@ _MAX_CHECKPOINT_BYTES = 2 * 1024 * 1024
 _MAX_VERIFY_CAPTURE_BYTES = 32 * 1024
 _CHECKPOINT_SCHEMA = 3
 _MAX_OUTPUT_CAP_CONTINUATIONS = 4
+_MAX_TOTAL_AGENT_STEPS = 128
+_MAX_AUTOMATIC_CONTINUATIONS = 16
+_MAX_STAGNANT_QUANTA = 2
+_MAX_PROGRESS_FINGERPRINTS = 64
+_DEFAULT_STANDALONE_MAX_COMMANDS = 100
+_EXPLORATION_ACTIONS = frozenset(
+    {
+        "repo_map",
+        "find_symbol",
+        "find_references",
+        "search_text",
+        "read_region",
+        "read",
+        "inspect_diff",
+        "git_state",
+        "search",
+        "retrieve",
+    }
+)
 
 
 def _rough_tokens(value: str) -> int:
@@ -209,6 +228,12 @@ class AgentExecutionState:
     target_applied_status_sha256: str = ""
     applied_patch_sha256: str = ""
     output_cap_continuations: int = 0
+    continuation_count: int = 0
+    stagnation_count: int = 0
+    exploration_only_quanta: int = 0
+    recent_action_fingerprints: list[str] = field(default_factory=list)
+    quantum_action_fingerprints: list[str] = field(default_factory=list)
+    quantum_exploration_only: bool = True
     telemetry: AgentTelemetry = field(default_factory=AgentTelemetry)
 
 
@@ -372,6 +397,11 @@ class ZetsuAgentCoordinator:
             "caller verifier, and stop immediately when it passes with no unresolved failure. "
             "Use small exact edits for large files; never emit an entire large file when bounded "
             "read/edit operations can complete it safely. "
+            "Honor exact_state.next_state. When it is reassess_finish, decide whether accumulated "
+            "evidence already supports finish before exploring further. When it is "
+            "synthesize_or_replan, either finish from accumulated evidence or choose a materially "
+            "different action that addresses a specific unresolved gap; do not repeat equivalent "
+            "searches or reads. "
             "Do not narrate. "
             "Use only the supplied worktree and compact retrieval interface. Never request shell, "
             "network, Git mutation, .git access, unrestricted corpus access, or paths outside the worktree. "
@@ -952,6 +982,76 @@ class ZetsuAgentCoordinator:
         state.telemetry.tool_calls += 1
 
     @staticmethod
+    def _action_progress_fingerprint(
+        state: AgentExecutionState,
+        action: Mapping[str, object],
+    ) -> str:
+        latest_validation = state.validation_history[-1] if state.validation_history else None
+        structural = {
+            "changed_paths": state.changed_paths,
+            "worktree_status_sha256": state.worktree_status_sha256,
+            "mutation_epoch": state.mutation_epoch,
+            "last_verified_epoch": state.last_verified_epoch,
+            "unresolved_failures": state.unresolved_failures,
+            "evidence_refs": state.evidence_refs,
+            "latest_validation_passed": (
+                latest_validation.get("passed")
+                if isinstance(latest_validation, Mapping)
+                else None
+            ),
+        }
+        payload = {"action": dict(action), "structural": structural}
+        encoded = json.dumps(
+            payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @classmethod
+    def _record_action_progress(
+        cls,
+        state: AgentExecutionState,
+        action_name: str,
+        action: Mapping[str, object],
+    ) -> None:
+        state.quantum_action_fingerprints.append(
+            cls._action_progress_fingerprint(state, action)
+        )
+        if action_name not in _EXPLORATION_ACTIONS:
+            state.quantum_exploration_only = False
+
+    @staticmethod
+    def _assess_quantum(state: AgentExecutionState) -> JsonObject:
+        current = list(state.quantum_action_fingerprints)
+        prior = set(state.recent_action_fingerprints)
+        unique_current = list(dict.fromkeys(current))
+        novel_actions = sum(1 for fingerprint in unique_current if fingerprint not in prior)
+        meaningful_progress = novel_actions > 0
+        if meaningful_progress:
+            state.stagnation_count = 0
+        else:
+            state.stagnation_count += 1
+
+        exploration_only = bool(current) and state.quantum_exploration_only
+        if exploration_only:
+            state.exploration_only_quanta += 1
+        else:
+            state.exploration_only_quanta = 0
+
+        state.recent_action_fingerprints = list(
+            dict.fromkeys([*state.recent_action_fingerprints, *unique_current])
+        )[-_MAX_PROGRESS_FINGERPRINTS:]
+        state.quantum_action_fingerprints = []
+        state.quantum_exploration_only = True
+        return {
+            "progress": meaningful_progress,
+            "novel_actions": novel_actions,
+            "tool_actions": len(current),
+            "exploration_only": exploration_only,
+            "stagnation_count": state.stagnation_count,
+            "exploration_only_quanta": state.exploration_only_quanta,
+        }
+
+    @staticmethod
     def _stop_process_tree(process: subprocess.Popen[bytes]) -> None:
         if process.poll() is not None:
             return
@@ -1150,6 +1250,9 @@ class ZetsuAgentCoordinator:
             "last_verified_epoch": state.last_verified_epoch,
             "command_count": state.command_count,
             "output_cap_continuations": state.output_cap_continuations,
+            "continuation_count": state.continuation_count,
+            "stagnation_count": state.stagnation_count,
+            "exploration_only_quanta": state.exploration_only_quanta,
         }
         return json.dumps(exact, sort_keys=True, ensure_ascii=False)
 
@@ -1272,13 +1375,24 @@ class ZetsuAgentCoordinator:
             "last_verified_epoch": state.last_verified_epoch,
             "command_count": state.command_count,
             "output_cap_continuations": state.output_cap_continuations,
+            "continuation_count": state.continuation_count,
+            "stagnation_count": state.stagnation_count,
+            "exploration_only_quanta": state.exploration_only_quanta,
+            "recent_action_fingerprints": state.recent_action_fingerprints[
+                -_MAX_PROGRESS_FINGERPRINTS:
+            ],
+            "quantum_action_fingerprints": state.quantum_action_fingerprints[-32:],
+            "quantum_exploration_only": state.quantum_exploration_only,
             "consumed_wall_seconds": round(consumed, 6),
             "apply_to_repository": ctx.apply_to_repository,
             "target_initial_head": state.target_initial_head,
             "target_initial_status_sha256": state.target_initial_status_sha256,
             "target_applied_status_sha256": state.target_applied_status_sha256,
             "applied_patch_sha256": state.applied_patch_sha256,
+            # step_limit is retained for schema-3 checkpoint compatibility.
             "step_limit": ctx.max_steps,
+            "quantum_step_limit": ctx.max_steps,
+            "absolute_step_limit": _MAX_TOTAL_AGENT_STEPS,
             "max_chars": ctx.max_chars,
             "compaction_ratio": ctx.compaction_ratio,
             "tool_policy": {
@@ -1310,7 +1424,9 @@ class ZetsuAgentCoordinator:
         if raw.get("objective") != instruction:
             raise ServiceTierError("zetsu_agent_resume_objective_mismatch")
         if (
-            raw.get("step_limit") != ctx.max_steps
+            raw.get("quantum_step_limit", raw.get("step_limit")) != ctx.max_steps
+            or raw.get("absolute_step_limit", _MAX_TOTAL_AGENT_STEPS)
+            != _MAX_TOTAL_AGENT_STEPS
             or raw.get("max_chars") != ctx.max_chars
             or raw.get("compaction_ratio") != ctx.compaction_ratio
             or raw.get("apply_to_repository", False) is not ctx.apply_to_repository
@@ -1368,8 +1484,14 @@ class ZetsuAgentCoordinator:
                 raise ServiceTierError("zetsu_agent_checkpoint_state_invalid")
             return value
 
-        def strings(name: str, *, maximum_items: int, maximum_chars: int) -> list[str]:
-            value = raw.get(name)
+        def strings(
+            name: str,
+            *,
+            maximum_items: int,
+            maximum_chars: int,
+            default: list[str] | None = None,
+        ) -> list[str]:
+            value = raw.get(name) if default is None else raw.get(name, default)
             if (
                 not isinstance(value, list)
                 or len(value) > maximum_items
@@ -1427,6 +1549,51 @@ class ZetsuAgentCoordinator:
             or not 0 <= output_cap_continuations_raw <= _MAX_OUTPUT_CAP_CONTINUATIONS
         ):
             raise ServiceTierError("zetsu_agent_checkpoint_state_invalid")
+        continuation_count_raw = raw.get("continuation_count", 0)
+        stagnation_count_raw = raw.get("stagnation_count", 0)
+        exploration_only_quanta_raw = raw.get("exploration_only_quanta", 0)
+        if (
+            isinstance(continuation_count_raw, bool)
+            or not isinstance(continuation_count_raw, int)
+            or not 0 <= continuation_count_raw <= _MAX_AUTOMATIC_CONTINUATIONS
+            or isinstance(stagnation_count_raw, bool)
+            or not isinstance(stagnation_count_raw, int)
+            or not 0 <= stagnation_count_raw <= _MAX_STAGNANT_QUANTA
+            or isinstance(exploration_only_quanta_raw, bool)
+            or not isinstance(exploration_only_quanta_raw, int)
+            or not 0 <= exploration_only_quanta_raw <= _MAX_AUTOMATIC_CONTINUATIONS + 1
+        ):
+            raise ServiceTierError("zetsu_agent_checkpoint_state_invalid")
+        recent_action_fingerprints = strings(
+            "recent_action_fingerprints",
+            maximum_items=_MAX_PROGRESS_FINGERPRINTS,
+            maximum_chars=64,
+            default=[],
+        )
+        quantum_action_fingerprints = strings(
+            "quantum_action_fingerprints",
+            maximum_items=32,
+            maximum_chars=64,
+            default=[],
+        )
+        for fingerprint in [*recent_action_fingerprints, *quantum_action_fingerprints]:
+            if len(fingerprint) != 64 or any(
+                char not in "0123456789abcdef" for char in fingerprint
+            ):
+                raise ServiceTierError("zetsu_agent_checkpoint_state_invalid")
+        quantum_exploration_only_raw = raw.get("quantum_exploration_only", True)
+        if not isinstance(quantum_exploration_only_raw, bool):
+            raise ServiceTierError("zetsu_agent_checkpoint_state_invalid")
+        # Schema-3 checkpoints written before adaptive continuation have no action
+        # fingerprints. Treat their already-completed work as one novel non-exploration
+        # signal so a valid resumable boundary is not immediately penalized as stagnant.
+        if "quantum_action_fingerprints" not in raw and step > 0:
+            quantum_action_fingerprints = [
+                hashlib.sha256(
+                    f"legacy-quantum:{ctx.session_id}:{step}".encode()
+                ).hexdigest()
+            ]
+            quantum_exploration_only_raw = False
         consumed_wall_seconds = number("consumed_wall_seconds")
         target_initial_head = optional_string("target_initial_head", maximum=128)
         target_initial_status_sha256 = optional_string("target_initial_status_sha256", maximum=64)
@@ -1480,6 +1647,12 @@ class ZetsuAgentCoordinator:
             last_verified_epoch=last_verified_raw,
             command_count=command_count,
             output_cap_continuations=output_cap_continuations_raw,
+            continuation_count=continuation_count_raw,
+            stagnation_count=stagnation_count_raw,
+            exploration_only_quanta=exploration_only_quanta_raw,
+            recent_action_fingerprints=recent_action_fingerprints,
+            quantum_action_fingerprints=quantum_action_fingerprints,
+            quantum_exploration_only=quantum_exploration_only_raw,
             consumed_wall_seconds=consumed_wall_seconds,
             target_initial_head=target_initial_head,
             target_initial_status_sha256=target_initial_status_sha256,
@@ -1488,7 +1661,7 @@ class ZetsuAgentCoordinator:
             telemetry=AgentTelemetry.from_mapping(raw.get("telemetry")),
         )
         if not (
-            0 <= state.step <= ctx.max_steps
+            0 <= state.step <= _MAX_TOTAL_AGENT_STEPS
             and 0 <= state.command_count <= ctx.binding.tool_policy.max_commands
             and 0.0 <= state.consumed_wall_seconds <= ctx.binding.tool_policy.max_wall_seconds
             and -1 <= state.last_verified_epoch <= state.mutation_epoch
@@ -1959,7 +2132,7 @@ class ZetsuAgentCoordinator:
                     policy_id="zetsu-qwen-agent-v2",
                     allowed_tools=("apply_patch", "run_tests"),
                     network_enabled=False,
-                    max_commands=max_steps * 2,
+                    max_commands=_DEFAULT_STANDALONE_MAX_COMMANDS,
                     max_wall_seconds=1_800,
                 ),
                 task_title="Zetsu Qwen delegated task",
@@ -2092,8 +2265,20 @@ class ZetsuAgentCoordinator:
         resume_verified_finish = (
             not creating and state.next_state == "finished" and self._finish_allowed(state)
         )
-        if state.step >= max_steps and not resume_verified_finish:
-            raise ServiceTierError("zetsu_agent_step_budget_exhausted")
+        safety_resume_category = {
+            "stagnation_exhausted": "agent_stagnation_exhausted",
+            "continuation_budget_exhausted": "agent_continuation_budget_exhausted",
+            "absolute_step_budget_exhausted": "agent_absolute_step_budget_exhausted",
+        }.get(state.next_state)
+        if (
+            not creating
+            and not restart_objective
+            and not resume_verified_finish
+            and safety_resume_category is not None
+        ):
+            raise ServiceTierError(safety_resume_category)
+        if state.step >= _MAX_TOTAL_AGENT_STEPS and not resume_verified_finish:
+            raise ServiceTierError("agent_absolute_step_budget_exhausted")
 
         self.tiered.sandboxes.start_task(
             effective_session,
@@ -2112,8 +2297,46 @@ class ZetsuAgentCoordinator:
         )
         failure_category: str | None = None
         try:
-            pending_steps = () if resume_verified_finish else range(state.step + 1, max_steps + 1)
+            pending_steps = (
+                ()
+                if resume_verified_finish
+                else range(state.step + 1, _MAX_TOTAL_AGENT_STEPS + 1)
+            )
             for step in pending_steps:
+                if state.step > 0 and state.step % max_steps == 0:
+                    self._ensure_active(ctx, state)
+                    assessment = self._assess_quantum(state)
+                    if state.stagnation_count >= _MAX_STAGNANT_QUANTA:
+                        failure_category = "agent_stagnation_exhausted"
+                        state.next_state = "stagnation_exhausted"
+                        self._checkpoint(ctx, state)
+                        break
+                    if state.continuation_count >= _MAX_AUTOMATIC_CONTINUATIONS:
+                        failure_category = "agent_continuation_budget_exhausted"
+                        state.next_state = "continuation_budget_exhausted"
+                        self._checkpoint(ctx, state)
+                        break
+                    state.continuation_count += 1
+                    if not bool(assessment["progress"]) or state.exploration_only_quanta >= 2:
+                        directive = "synthesize_or_replan"
+                    elif state.exploration_only_quanta == 1:
+                        directive = "reassess_finish"
+                    else:
+                        directive = "choose_action"
+                    state.next_state = directive
+                    self._checkpoint(ctx, state)
+                    self._progress(
+                        ctx,
+                        "QUANTUM_CONTINUING",
+                        {
+                            "quantum": state.continuation_count,
+                            "cumulative_steps": state.step,
+                            "progress": assessment["progress"],
+                            "novel_actions": assessment["novel_actions"],
+                            "stagnation_count": state.stagnation_count,
+                            "directive": directive,
+                        },
+                    )
                 state.step = step
                 self._ensure_active(ctx, state)
                 messages = self._messages(state, ctx)
@@ -2308,6 +2531,7 @@ class ZetsuAgentCoordinator:
                     f"STEP {step} ACTION {action_name}\n{observation[-_MAX_OBSERVATION_CHARS:]}"
                 )
                 state.recent_observations = state.recent_observations[-_MAX_RECENT_OBSERVATIONS:]
+                self._record_action_progress(state, action_name, action)
                 state.next_state = "choose_action"
                 self._checkpoint(ctx, state)
                 if (
@@ -2320,12 +2544,10 @@ class ZetsuAgentCoordinator:
                     state.next_state = "finished"
                     self._checkpoint(ctx, state)
                     break
-            if status != "SUCCESS":
-                failure_category = (
-                    "output_cap_continuation_budget_exhausted"
-                    if state.output_cap_continuations
-                    else "max_steps_exhausted"
-                )
+            if status != "SUCCESS" and failure_category is None:
+                failure_category = "agent_absolute_step_budget_exhausted"
+                state.next_state = "absolute_step_budget_exhausted"
+                self._checkpoint(ctx, state)
         except (KeyboardInterrupt, SystemExit):
             try:
                 self._checkpoint(ctx, state)
@@ -2390,7 +2612,22 @@ class ZetsuAgentCoordinator:
         state.worktree_status_sha256 = worktree_status_sha256
         state.changed_paths = changed
         if not final_result:
-            final_result = "Maximum bounded agent steps reached before verified finish."
+            final_result = {
+                "agent_stagnation_exhausted": (
+                    "Adaptive continuation stopped after repeated stagnant quanta."
+                ),
+                "agent_continuation_budget_exhausted": (
+                    "Adaptive continuation reached the automatic continuation safety limit "
+                    "before verified finish."
+                ),
+                "agent_absolute_step_budget_exhausted": (
+                    "Adaptive continuation reached the absolute agent step safety limit "
+                    "before verified finish."
+                ),
+            }.get(
+                failure_category or "",
+                "Agent execution ended before verified finish.",
+            )
         authoritative_content = final_result
         truncated = len(authoritative_content) > max_chars
         if truncated:
@@ -2431,6 +2668,10 @@ class ZetsuAgentCoordinator:
             "validation_history": state.validation_history,
             "unresolved_failures": state.unresolved_failures,
             "evidence_refs": state.evidence_refs,
+            "failure_category": failure_category,
+            "cumulative_steps": state.step,
+            "continuation_count": state.continuation_count,
+            "stagnation_count": state.stagnation_count,
             "checkpoint_path": str(self.checkpoints.path(effective_session)),
             "handoff": handoff,
             "promotion": promotion,
