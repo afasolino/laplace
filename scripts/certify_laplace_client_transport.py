@@ -21,16 +21,29 @@ from research_workspace.client_bridge import (
 )
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint", required=True)
     parser.add_argument("--token-env-var", default=DEFAULT_TOKEN_ENV)
+    parser.add_argument(
+        "--work-root",
+        type=Path,
+        default=ROOT / "outputs" / "certification" / "client-transport",
+        help="Repository-local parent for disposable certification workspaces.",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
-    with tempfile.TemporaryDirectory(prefix="laplace-client-transport-", dir="/tmp") as raw:
+    work_root = arguments.work_root.expanduser().resolve()
+    work_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="laplace-client-transport-", dir=work_root
+    ) as raw:
         root = Path(raw) / "project"
         root.mkdir()
         (root / "input.txt").write_text("transport evidence\n", encoding="utf-8")

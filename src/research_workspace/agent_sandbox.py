@@ -906,6 +906,8 @@ class AgentSandboxManager:
             "grant_revision": binding.grant_revision,
             "changed_paths": list(changed_paths),
             "diff_hash": diff_hash,
+            "verification_summary": historical["verification_summary"],
+            "result_id": historical["result_id"],
         }
 
     def has_session(self, session_id: str, *, user_id: str) -> bool:
@@ -1168,7 +1170,10 @@ class AgentSandboxManager:
         verification_summary: str,
         failed: bool = False,
         terminal: bool = False,
+        result_id: str | None = None,
     ) -> JsonObject:
+        if result_id is not None and re.fullmatch(r"res_[a-f0-9]{32}", result_id) is None:
+            raise AgentSandboxError("result_id_invalid")
         binding = self.require_active(session_id, user_id=user_id)
         changed_paths, diff_hash = self._diff_summary(binding)
         state = (
@@ -1182,7 +1187,7 @@ class AgentSandboxManager:
                 """
                 UPDATE worktree_sessions
                 SET state=?, command_count=?, changed_paths_json=?, diff_hash=?,
-                    verification_summary=?, updated_at_utc=?,
+                    verification_summary=?, result_id=COALESCE(?, result_id), updated_at_utc=?,
                     completed_at_utc=CASE WHEN ? THEN ? ELSE completed_at_utc END,
                     executor_pid=NULL, executor_start_ticks=NULL,
                     executor_boot_id=NULL, last_heartbeat_utc=NULL
@@ -1194,6 +1199,7 @@ class AgentSandboxManager:
                     json.dumps(list(changed_paths), separators=(",", ":")),
                     diff_hash,
                     verification_summary[:2_000],
+                    result_id,
                     now,
                     int(terminal),
                     now,
@@ -1206,7 +1212,11 @@ class AgentSandboxManager:
                 binding,
                 "TASK_FAILED" if failed else "TASK_COMPLETED",
                 state,
-                {"changed_paths": list(changed_paths), "diff_hash": diff_hash},
+                {
+                    "changed_paths": list(changed_paths),
+                    "diff_hash": diff_hash,
+                    "result_id": result_id,
+                },
             )
         self._live_executors.discard(session_id)
         return self.inspect(session_id, user_id=user_id)

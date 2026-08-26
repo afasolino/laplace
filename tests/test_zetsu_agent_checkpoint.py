@@ -927,6 +927,147 @@ def test_verify_argv_rejects_executable_path_alias(tmp_path: Path) -> None:
         ZetsuAgentCoordinator._verify_argv(tmp_path, ["../pytest", "tests/test_x.py", "-q"])
 
 
+def test_persistent_agent_turn_reuses_worktree_and_carries_verified_summary(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    (repository / "component.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "component.py"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "base",
+        ],
+        check=True,
+    )
+    head = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    binding = AgentSessionBinding(
+        session_id="chat-agent-session",
+        user_id="user-a",
+        repo_id="repo",
+        canonical_repository_root=str(repository),
+        worktree_root=str(repository),
+        base_revision=head,
+        grant_revision=1,
+        tool_policy=AgentToolPolicy(
+            policy_id="chat-test",
+            allowed_tools=("read_file", "apply_patch", "run_validation"),
+            max_commands=24,
+            max_wall_seconds=1_800,
+        ),
+        environment={},
+        created_at_utc="2026-08-25T00:00:00+00:00",
+    )
+
+    class Sandboxes:
+        sandbox_root = tmp_path / "sandboxes"
+
+        def __init__(self) -> None:
+            self.terminal_flags: list[bool] = []
+
+        @staticmethod
+        def require_active(_session_id: str, *, user_id: str) -> AgentSessionBinding:
+            assert user_id == "user-a"
+            return binding
+
+        @staticmethod
+        def start_task(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        def record_result(self, *_args: object, **kwargs: object) -> dict[str, object]:
+            self.terminal_flags.append(bool(kwargs["terminal"]))
+            return {"status": "ACTIVE_CLEAN"}
+
+    class Tiered:
+        sandboxes = Sandboxes()
+        lane_policy = LanePolicy(
+            {
+                lane: ModelRoute(
+                    lane,
+                    f"test-{lane.value}",
+                    "http://127.0.0.1:1",
+                    0,
+                    131_072,
+                    4_096,
+                )
+                for lane in ModelLane
+            }
+        )
+
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+            self.results = iter(("first inspected result", "second follow-up result"))
+
+        @staticmethod
+        def agent_session_status(**_kwargs: object) -> dict[str, object]:
+            return {"status": "ACTIVE"}
+
+        def chat(self, **kwargs: object) -> dict[str, object]:
+            messages = kwargs["messages"]
+            assert isinstance(messages, list | tuple)
+            prompt = json.dumps(messages)
+            self.prompts.append(prompt)
+            result = next(self.results)
+            return {
+                "response": {
+                    "content": json.dumps({"action": "finish", "result": result}),
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 10},
+                }
+            }
+
+    tiered = Tiered()
+    coordinator = ZetsuAgentCoordinator(
+        tiered,
+        checkpoint_store=AgentCheckpointStore(tmp_path / "checkpoints"),
+    )
+    first = coordinator.run_turn(
+        user_id="user-a",
+        repo_id="repo",
+        instruction="Inspect component.py",
+        lane=ModelLane.QUALITY,
+        session_id="chat-agent-session",
+        max_steps=4,
+        max_chars=2_000,
+        verification_argv=None,
+        wait_timeout_seconds=30,
+    )
+    second = coordinator.run_turn(
+        user_id="user-a",
+        repo_id="repo",
+        instruction="Follow up on that result",
+        lane=ModelLane.QUALITY,
+        session_id="chat-agent-session",
+        max_steps=4,
+        max_chars=2_000,
+        verification_argv=("pytest", "-q"),
+        wait_timeout_seconds=30,
+    )
+
+    assert first["session_id"] == second["session_id"] == "chat-agent-session"
+    assert first["worktree_release"] == {"action": "PRESERVED_FOR_CONTINUATION"}
+    assert second["worktree_release"] == {"action": "PRESERVED_FOR_CONTINUATION"}
+    assert tiered.sandboxes.terminal_flags == [False, False]
+    assert "first inspected result" in tiered.prompts[1]
+    assert coordinator.checkpoints.read("chat-agent-session")[
+        "required_verification_argv"
+    ] == ["pytest", "-q"]
+
+
 def test_checkpoint_resume_binds_route_and_required_verifier(tmp_path: Path, monkeypatch) -> None:
     tiered = _Tiered(tmp_path)
     coordinator = ZetsuAgentCoordinator(

@@ -1554,7 +1554,12 @@ class ZetsuAgentCoordinator:
         return True
 
     def _record_failure_best_effort(
-        self, ctx: AgentRunContext, state: AgentExecutionState, category: str
+        self,
+        ctx: AgentRunContext,
+        state: AgentExecutionState,
+        category: str,
+        *,
+        terminal: bool = True,
     ) -> None:
         try:
             self.tiered.sandboxes.record_result(
@@ -1563,7 +1568,7 @@ class ZetsuAgentCoordinator:
                 command_count=state.command_count,
                 verification_summary=f"FAILED:{category}",
                 failed=True,
-                terminal=True,
+                terminal=terminal,
             )
         except Exception:
             # Preserve the original failure/cancellation category.
@@ -1589,9 +1594,14 @@ class ZetsuAgentCoordinator:
             pass
 
     def _finalize_terminal_failure_best_effort(
-        self, ctx: AgentRunContext, state: AgentExecutionState, category: str
+        self,
+        ctx: AgentRunContext,
+        state: AgentExecutionState,
+        category: str,
+        *,
+        terminal: bool = True,
     ) -> None:
-        """Persist diagnostics first, then release only when exact evidence is complete."""
+        """Persist diagnostics first and release only an explicitly terminal task."""
 
         try:
             head, status_sha256, changed = self._worktree_state(ctx.worktree)
@@ -1642,10 +1652,10 @@ class ZetsuAgentCoordinator:
                 command_count=state.command_count,
                 verification_summary=f"FAILED:{category}",
                 failed=True,
-                terminal=True,
+                terminal=terminal,
             )
             cleanup = getattr(self.tiered.sandboxes, "authorize_terminal_cleanup", None)
-            if callable(cleanup):
+            if terminal and callable(cleanup):
                 cleanup(
                     ctx.session_id,
                     user_id=ctx.user_id,
@@ -1653,7 +1663,7 @@ class ZetsuAgentCoordinator:
                 )
             self.results.clear_staging(ctx.session_id)
         except Exception:
-            self._record_failure_best_effort(ctx, state, category)
+            self._record_failure_best_effort(ctx, state, category, terminal=terminal)
 
     def run(
         self,
@@ -1669,6 +1679,8 @@ class ZetsuAgentCoordinator:
         verification_argv: Sequence[str] | None = None,
         apply_to_repository: bool = False,
         wait_timeout_seconds: float = 1_800.0,
+        persistent_session: bool = False,
+        restart_objective: bool = False,
     ) -> JsonObject:
         self._validate_run_request(
             instruction=instruction,
@@ -1679,6 +1691,10 @@ class ZetsuAgentCoordinator:
             verification_argv=verification_argv,
             apply_to_repository=apply_to_repository,
         )
+        if restart_objective and not persistent_session:
+            raise ServiceTierError("repository_agent_turn_mode_invalid")
+        if persistent_session and apply_to_repository:
+            raise ServiceTierError("repository_agent_turn_canonical_apply_forbidden")
         effective_session = session_id or f"zetsu-{uuid.uuid4().hex}"
         has_session = getattr(self.tiered.sandboxes, "has_session", None)
         creating = session_id is None or (
@@ -1713,6 +1729,8 @@ class ZetsuAgentCoordinator:
                 compaction_ratio=compaction_ratio,
                 verification_argv=verification_argv,
                 apply_to_repository=apply_to_repository,
+                persistent_session=persistent_session,
+                restart_objective=restart_objective,
             )
             if admission is not None and self.scheduler is not None:
                 terminal = "SUCCEEDED" if result.get("status") == "SUCCESS" else "FAILED"
@@ -1770,6 +1788,60 @@ class ZetsuAgentCoordinator:
             raise
         finally:
             lock.release()
+
+    def run_turn(
+        self,
+        *,
+        user_id: str,
+        repo_id: str,
+        instruction: str,
+        lane: ModelLane,
+        session_id: str,
+        max_steps: int = 12,
+        max_chars: int = 8_000,
+        verification_argv: Sequence[str] | None = None,
+        wait_timeout_seconds: float = 1_800.0,
+    ) -> JsonObject:
+        """Run one bounded turn while preserving the owned worktree for continuation."""
+
+        return self.run(
+            user_id=user_id,
+            repo_id=repo_id,
+            instruction=instruction,
+            lane=lane,
+            session_id=session_id,
+            max_steps=max_steps,
+            max_chars=max_chars,
+            verification_argv=verification_argv,
+            apply_to_repository=False,
+            wait_timeout_seconds=wait_timeout_seconds,
+            persistent_session=True,
+            restart_objective=True,
+        )
+
+    def result_page(
+        self,
+        *,
+        user_id: str,
+        repo_id: str,
+        session_id: str,
+        result_id: str,
+        artifact: str,
+        offset: int,
+        max_bytes: int,
+    ) -> JsonObject:
+        try:
+            return self.results.page(
+                user_id=user_id,
+                repo_id=repo_id,
+                session_id=session_id,
+                result_id=result_id,
+                artifact=artifact,
+                offset=offset,
+                max_bytes=max_bytes,
+            )
+        except ResultStoreError as exc:
+            raise ServiceTierError(exc.category) from exc
 
     @staticmethod
     def _validate_run_request(
@@ -1830,6 +1902,8 @@ class ZetsuAgentCoordinator:
         compaction_ratio: float = 0.80,
         verification_argv: Sequence[str] | None = None,
         apply_to_repository: bool = False,
+        persistent_session: bool = False,
+        restart_objective: bool = False,
     ) -> JsonObject:
         self._validate_run_request(
             instruction=instruction,
@@ -1840,6 +1914,10 @@ class ZetsuAgentCoordinator:
             verification_argv=verification_argv,
             apply_to_repository=apply_to_repository,
         )
+        if restart_objective and not persistent_session:
+            raise ServiceTierError("repository_agent_turn_mode_invalid")
+        if persistent_session and apply_to_repository:
+            raise ServiceTierError("repository_agent_turn_canonical_apply_forbidden")
 
         effective_session = session_id or f"zetsu-{uuid.uuid4().hex}"
         creating = session_id is None if creating is None else creating
@@ -1904,22 +1982,74 @@ class ZetsuAgentCoordinator:
             remaining_wall_seconds=remaining_wall,
             apply_to_repository=apply_to_repository,
         )
-        state = (
-            AgentExecutionState(
-                objective=instruction,
-                lane=lane.value,
-                model_id=route.model_id,
-                context_limit=route.context_limit,
-                required_verification_argv=(
-                    list(required_verification_argv)
-                    if required_verification_argv is not None
-                    else None
-                ),
-            )
-            if creating
-            else self._restore(ctx, instruction)
+        fresh_state = AgentExecutionState(
+            objective=instruction,
+            lane=lane.value,
+            model_id=route.model_id,
+            context_limit=route.context_limit,
+            required_verification_argv=(
+                list(required_verification_argv)
+                if required_verification_argv is not None
+                else None
+            ),
         )
         if creating:
+            state = fresh_state
+        elif restart_objective:
+            prior_raw = self.checkpoints.read(effective_session)
+            if prior_raw is None:
+                state = fresh_state
+            else:
+                prior_objective = prior_raw.get("objective")
+                if not isinstance(prior_objective, str) or not prior_objective:
+                    raise ServiceTierError("zetsu_agent_checkpoint_state_invalid")
+                prior_verifier_raw = prior_raw.get("required_verification_argv")
+                verifier_upgrade = (
+                    prior_verifier_raw is None
+                    and required_verification_argv is not None
+                )
+                restore_ctx = (
+                    replace(ctx, required_verification_argv=None)
+                    if verifier_upgrade
+                    else ctx
+                )
+                prior = self._restore(restore_ctx, prior_objective)
+                if verifier_upgrade and (
+                    prior.mutation_epoch != 0
+                    or prior.last_verified_epoch not in {-1, 0}
+                    or prior.changed_paths
+                ):
+                    raise ServiceTierError("zetsu_agent_verifier_upgrade_unsafe")
+                state = AgentExecutionState(
+                    objective=instruction,
+                    summary=prior.summary,
+                    recent_observations=[
+                        *prior.recent_observations[-3:],
+                        "PERSISTENT TURN BOUNDARY: continue in the same owned worktree",
+                    ],
+                    changed_paths=list(prior.changed_paths),
+                    worktree_head=prior.worktree_head,
+                    worktree_status_sha256=prior.worktree_status_sha256,
+                    lane=lane.value,
+                    model_id=route.model_id,
+                    context_limit=route.context_limit,
+                    required_verification_argv=(
+                        list(required_verification_argv)
+                        if required_verification_argv is not None
+                        else None
+                    ),
+                    validation_history=list(prior.validation_history[-8:]),
+                    unresolved_failures=list(prior.unresolved_failures),
+                    evidence_refs=list(prior.evidence_refs[-32:]),
+                    mutation_epoch=prior.mutation_epoch,
+                    last_verified_epoch=prior.last_verified_epoch,
+                    command_count=prior.command_count,
+                    consumed_wall_seconds=prior.consumed_wall_seconds,
+                    telemetry=prior.telemetry,
+                )
+        else:
+            state = self._restore(ctx, instruction)
+        if creating or restart_objective:
             head, status_sha256, changed = self._worktree_state(worktree)
             state.worktree_head = head
             state.worktree_status_sha256 = status_sha256
@@ -2012,6 +2142,7 @@ class ZetsuAgentCoordinator:
                         continue
                     final_result = value.strip()
                     status = "SUCCESS"
+                    state.summary = final_result
                     state.next_state = "finished"
                     self._checkpoint(ctx, state)
                     break
@@ -2179,7 +2310,10 @@ class ZetsuAgentCoordinator:
             except Exception:
                 pass
             self._finalize_terminal_failure_best_effort(
-                ctx, state, str(failure_category)
+                ctx,
+                state,
+                str(failure_category),
+                terminal=not persistent_session,
             )
             evidence = getattr(exc, "evidence", None)
             raise ServiceTierError(
@@ -2187,7 +2321,9 @@ class ZetsuAgentCoordinator:
             ) from exc
         except ResultStoreError as exc:
             failure_category = exc.category
-            self._finalize_terminal_failure_best_effort(ctx, state, exc.category)
+            self._finalize_terminal_failure_best_effort(
+                ctx, state, exc.category, terminal=not persistent_session
+            )
             raise ServiceTierError(exc.category) from exc
         except (ServiceTierError, subprocess.TimeoutExpired) as exc:
             failure_category = getattr(exc, "category", "zetsu_agent_timeout")
@@ -2196,12 +2332,22 @@ class ZetsuAgentCoordinator:
             except Exception:
                 pass
             self._finalize_terminal_failure_best_effort(
-                ctx, state, str(failure_category)
+                ctx,
+                state,
+                str(failure_category),
+                terminal=not persistent_session,
             )
             raise
         finally:
             elapsed = time.monotonic() - run_started
             state.consumed_wall_seconds += elapsed
+            if persistent_session:
+                try:
+                    self._checkpoint(replace(ctx, run_started=time.monotonic()), state)
+                except Exception:
+                    # Preserve the original deterministic outcome; a later turn
+                    # will fail closed if the checkpoint is unavailable or corrupt.
+                    pass
 
         head, worktree_status_sha256, changed = self._worktree_state(worktree)
         state.worktree_head = head
@@ -2223,7 +2369,9 @@ class ZetsuAgentCoordinator:
             promotion = self._apply_verified_handoff(ctx, state, handoff)
             self._checkpoint(replace(ctx, run_started=time.monotonic()), state)
         except ServiceTierError as exc:
-            self._record_failure_best_effort(ctx, state, exc.category)
+            self._record_failure_best_effort(
+                ctx, state, exc.category, terminal=not persistent_session
+            )
             raise
         verification_summary = (
             f"PASSED:verified_epoch={state.last_verified_epoch}"
@@ -2271,22 +2419,29 @@ class ZetsuAgentCoordinator:
                 artifacts=artifacts,
             )
         except ResultStoreError as exc:
-            self._record_failure_best_effort(ctx, state, exc.category)
+            self._record_failure_best_effort(
+                ctx, state, exc.category, terminal=not persistent_session
+            )
             raise ServiceTierError(exc.category) from exc
+        result_id = str(delivery["result_id"])
         self.tiered.sandboxes.record_result(
             effective_session,
             user_id=user_id,
             command_count=state.command_count,
             verification_summary=verification_summary,
             failed=status != "SUCCESS",
-            terminal=True,
+            terminal=not persistent_session,
+            result_id=result_id,
         )
-        result_id = str(delivery["result_id"])
         cleanup = getattr(self.tiered.sandboxes, "authorize_terminal_cleanup", None)
         worktree_release = (
-            cleanup(effective_session, user_id=user_id, result_id=result_id)
-            if callable(cleanup)
-            else {"action": "NOT_SUPPORTED_BY_SANDBOX_ADAPTER"}
+            {"action": "PRESERVED_FOR_CONTINUATION"}
+            if persistent_session
+            else (
+                cleanup(effective_session, user_id=user_id, result_id=result_id)
+                if callable(cleanup)
+                else {"action": "NOT_SUPPORTED_BY_SANDBOX_ADAPTER"}
+            )
         )
         self.results.clear_staging(effective_session)
         return {

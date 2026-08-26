@@ -34,6 +34,27 @@ Clean failed/expired sessions are reclaimed before quota denial, while dirty
 worktrees remain recoverable. See [ZETSU.md](ZETSU.md) and
 [AGENT_WORKTREES.md](AGENT_WORKTREES.md).
 
+### Persistent terminal agent
+
+`laplace chat` is the terminal UI for the same resident Operator—not a second
+agent runtime. From a registered project, start it after the normal lightweight
+topology is ready:
+
+```bash
+laplace zetsu start --nocodev
+cd <registered-project>
+laplace chat --repo-id <logical-repository-id>
+```
+
+The default `agent` mode creates one remote session on the first instruction and
+reuses it through `/messages` on later instructions. Use `/mode chat` only for
+an optional plain `LaplaceCore.chat` conversation; `/mode agent` returns to the
+same persistent repository agent. `/status`, `/diff`, `/tests`, `/context`, and
+`/history` use deterministic Operator data and cause zero monitoring model
+calls. Exit and resume with `laplace chat --resume last`; both the local terminal
+state and its remote session ID are root/repository checked. See
+[LAPLACE_CHAT.md](LAPLACE_CHAT.md) for command and token details.
+
 ## 1. Open Laplace
 
 For local use, open `http://127.0.0.1:8765`. Through an SSH tunnel, open the same URL on your client. For production HTTPS, use the exact URL supplied by the administrator.
@@ -121,11 +142,27 @@ Personal context is read-only to Agent and is not mounted in a repository. Share
 
 ## 11. Use the repository agent
 
-Only Plus capability exposes the Agent workspace. Select a repository from the server-populated list—there is no filesystem-path field—choose a lane, enter a bounded task, and select **Start isolated agent**.
+Only Plus capability exposes the Agent workspace. Select a repository from the
+server-populated list—there is no filesystem-path field—choose a lane, enter a
+bounded task, and select **Send to persistent agent**.
 
 ![Plus repository selector and bounded task form](user_guide/assets/plus_agent.png)
 
-The server binds the session to the authenticated user, logical repository ID, canonical server-owned repository root, base revision, isolated worktree, and tool policy before the first model call. Network access is denied. Absolute paths, traversal, links, mounts, nested repositories, submodules, sibling worktrees, and changed grants fail closed.
+The first send binds one session to the authenticated user, logical repository
+ID, canonical server-owned repository root, base revision, isolated worktree,
+and tool policy. Later messages reuse that exact session and worktree, so the
+agent retains the verified worktree context instead of starting a new task for
+each prompt. Use **New session** only for a deliberately separate task. The
+server transcript is durable and owner-bound; **Resume** in the worktree history
+returns to the same session after a page reload.
+
+Read-only inspection is the default. To allow an edit, select **Allow bounded
+edits after confirmation**, supply a deterministic verification argv one argument
+per line (for example `pytest`, `-q`, and a test path), and tick the explicit
+confirmation for that turn. The server validates argv without a shell and refuses
+all mutation actions until a qualifying verifier is pinned. Network access is
+denied. Absolute paths, traversal, links, mounts, nested repositories,
+submodules, sibling worktrees, and changed grants fail closed.
 
 If the repository list is empty, ask an administrator to register and grant a logical ID. After a grant or revoke, sign in again because the access change closes existing sessions.
 
@@ -135,7 +172,12 @@ The result separates the plan/status, changed-file summary, unified diff, and te
 
 ![Readable agent diff and passing test results](user_guide/assets/agent_diff_and_tests.png)
 
-Use **Cancel** to block further work and release a clean Laplace-owned worktree. A dirty worktree is preserved for inspection rather than silently discarded.
+Use **Status**, **Diff**, **Tests**, and **Context** to inspect deterministic
+session state. They make no model call. Diff is loaded as an owner-bound bounded
+result page rather than reconstructed by a model. **Cancel** uses the existing
+Operator cancellation endpoint to block further work and release a clean
+Laplace-owned worktree. A dirty worktree is preserved for inspection rather than
+silently discarded.
 
 The history view supports resume, clean close, export request, patch download, event history, and confirmed discard. It shows logical IDs, commit/grant revision, state, changed paths, diff hash, verification, and expiry without canonical paths. See [AGENT_WORKTREES.md](AGENT_WORKTREES.md).
 

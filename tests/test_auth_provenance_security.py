@@ -413,6 +413,50 @@ def test_conversation_owner_isolation(tmp_path: Path) -> None:
     assert store.list("usr_two") == []
 
 
+def test_agent_conversation_is_durable_bounded_and_owner_repo_isolated(
+    tmp_path: Path,
+) -> None:
+    store = ConversationStore(tmp_path / "conversations.sqlite3")
+    binding = store.bind_agent_session(
+        "usr_one",
+        "agent-one",
+        repo_id="repo-one",
+        title="Inspect the scheduler",
+    )
+    assert store.bind_agent_session(
+        "usr_one",
+        "agent-one",
+        repo_id="repo-one",
+        title="Ignored idempotent title",
+    ) == binding
+    for index in range(3):
+        store.append_agent_message(
+            "usr_one",
+            "agent-one",
+            role="user" if index % 2 == 0 else "assistant",
+            content=f"message-{index}",
+        )
+    conversation = store.get_agent_conversation("usr_one", "agent-one", limit=2)
+    assert conversation["repo_id"] == "repo-one"
+    assert conversation["total_messages"] == 3
+    assert conversation["truncated"] is True
+    assert [item["content"] for item in conversation["messages"]] == [
+        "message-1",
+        "message-2",
+    ]
+    with pytest.raises(ConversationError, match="agent_conversation_not_found"):
+        store.get_agent_conversation("usr_two", "agent-one")
+    with pytest.raises(
+        ConversationError, match="agent_conversation_repository_mismatch"
+    ):
+        store.bind_agent_session(
+            "usr_one",
+            "agent-one",
+            repo_id="repo-two",
+            title="Wrong repository",
+        )
+
+
 def test_artifact_identity_hash_owner_repo_and_clean_export(tmp_path: Path) -> None:
     registry = ArtifactRegistry(
         tmp_path / "registry.sqlite3",

@@ -19,7 +19,7 @@ browser = ["playwright>=1.40"]
 
 [project.scripts]
 research-workspace = "research_workspace.cli:main"
-laplace = "research_workspace.entrypoints:laplace_main"
+laplace = "research_workspace.laplace_chat_entrypoint:main"
 laplace-operator = "research_workspace.operator_cli:main"
 laplace-operator-server = "research_workspace.operator_server:main"
 research = "research_workspace.research_cli:main"

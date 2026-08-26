@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping, TypeAlias
+from typing import Mapping, TypeAlias, cast
 
 JsonObject: TypeAlias = dict[str, object]
 
@@ -78,6 +78,16 @@ class ConversationStore:
                     UNIQUE(conversation_id, ordinal),
                     FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id)
                 );
+                CREATE TABLE IF NOT EXISTS agent_conversations (
+                    agent_session_id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL UNIQUE,
+                    owner_user_id TEXT NOT NULL,
+                    repo_id TEXT NOT NULL,
+                    created_at_utc TEXT NOT NULL,
+                    FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id)
+                );
+                CREATE INDEX IF NOT EXISTS agent_conversations_owner
+                ON agent_conversations(owner_user_id, created_at_utc);
                 """
             )
         os.chmod(self.path, 0o600)
@@ -278,5 +288,154 @@ class ConversationStore:
                     "created_at_utc": str(row["created_at_utc"]),
                 }
                 for row in rows
+            ],
+        }
+
+    def bind_agent_session(
+        self,
+        owner_user_id: str,
+        agent_session_id: str,
+        *,
+        repo_id: str,
+        title: str,
+    ) -> JsonObject:
+        """Idempotently bind one owner/repository agent session to durable messages."""
+
+        if not owner_user_id or not agent_session_id or not repo_id:
+            raise ConversationError("invalid_agent_conversation_binding")
+        cleaned_title = title.strip()[:160] or "New agent session"
+        now = datetime.now(UTC).isoformat()
+        with self._lock, self._connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT conversation_id, repo_id, created_at_utc
+                FROM agent_conversations
+                WHERE agent_session_id = ? AND owner_user_id = ?
+                """,
+                (agent_session_id, owner_user_id),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["repo_id"]) != repo_id:
+                    raise ConversationError("agent_conversation_repository_mismatch")
+                return {
+                    "agent_session_id": agent_session_id,
+                    "conversation_id": str(existing["conversation_id"]),
+                    "repo_id": repo_id,
+                    "created_at_utc": str(existing["created_at_utc"]),
+                }
+            collision = connection.execute(
+                "SELECT 1 FROM agent_conversations WHERE agent_session_id = ?",
+                (agent_session_id,),
+            ).fetchone()
+            if collision is not None:
+                raise ConversationError("agent_conversation_not_found")
+            conversation_id = f"conv-{uuid.uuid4().hex}"
+            connection.execute(
+                """
+                INSERT INTO conversations (
+                    conversation_id, owner_user_id, title, archived, draft,
+                    created_at_utc, updated_at_utc, deleted_at_utc
+                ) VALUES (?, ?, ?, 0, '', ?, ?, NULL)
+                """,
+                (conversation_id, owner_user_id, cleaned_title, now, now),
+            )
+            connection.execute(
+                """
+                INSERT INTO agent_conversations (
+                    agent_session_id, conversation_id, owner_user_id, repo_id,
+                    created_at_utc
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (agent_session_id, conversation_id, owner_user_id, repo_id, now),
+            )
+        return {
+            "agent_session_id": agent_session_id,
+            "conversation_id": conversation_id,
+            "repo_id": repo_id,
+            "created_at_utc": now,
+        }
+
+    def _require_agent_binding(
+        self, owner_user_id: str, agent_session_id: str
+    ) -> sqlite3.Row:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT agent_session_id, conversation_id, repo_id, created_at_utc
+                FROM agent_conversations
+                WHERE agent_session_id = ? AND owner_user_id = ?
+                """,
+                (agent_session_id, owner_user_id),
+            ).fetchone()
+        if row is None:
+            raise ConversationError("agent_conversation_not_found")
+        return cast(sqlite3.Row, row)
+
+    def append_agent_message(
+        self,
+        owner_user_id: str,
+        agent_session_id: str,
+        *,
+        role: str,
+        content: str,
+        metadata: Mapping[str, object] | None = None,
+    ) -> JsonObject:
+        binding = self._require_agent_binding(owner_user_id, agent_session_id)
+        return self.append_message(
+            owner_user_id,
+            str(binding["conversation_id"]),
+            role=role,
+            content=content,
+            metadata=metadata,
+        )
+
+    def get_agent_conversation(
+        self,
+        owner_user_id: str,
+        agent_session_id: str,
+        *,
+        limit: int = 200,
+    ) -> JsonObject:
+        """Return a bounded newest-first window, reordered for display."""
+
+        if not 1 <= limit <= 200:
+            raise ConversationError("invalid_agent_conversation_limit")
+        binding = self._require_agent_binding(owner_user_id, agent_session_id)
+        conversation_id = str(binding["conversation_id"])
+        with self._connect() as connection:
+            total_row = connection.execute(
+                """
+                SELECT COUNT(*) AS total FROM conversation_messages
+                WHERE conversation_id = ? AND owner_user_id = ?
+                """,
+                (conversation_id, owner_user_id),
+            ).fetchone()
+            rows = connection.execute(
+                """
+                SELECT message_id, ordinal, role, content, metadata_json, created_at_utc
+                FROM conversation_messages
+                WHERE conversation_id = ? AND owner_user_id = ?
+                ORDER BY ordinal DESC LIMIT ?
+                """,
+                (conversation_id, owner_user_id, limit),
+            ).fetchall()
+        total = int(total_row["total"]) if total_row is not None else 0
+        return {
+            "agent_session_id": agent_session_id,
+            "conversation_id": conversation_id,
+            "repo_id": str(binding["repo_id"]),
+            "created_at_utc": str(binding["created_at_utc"]),
+            "total_messages": total,
+            "truncated": total > len(rows),
+            "messages": [
+                {
+                    "message_id": str(row["message_id"]),
+                    "ordinal": int(row["ordinal"]),
+                    "role": str(row["role"]),
+                    "content": str(row["content"]),
+                    "metadata": json.loads(str(row["metadata_json"])),
+                    "created_at_utc": str(row["created_at_utc"]),
+                }
+                for row in reversed(rows)
             ],
         }

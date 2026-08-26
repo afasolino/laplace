@@ -34,7 +34,11 @@ def test_cooperative_timeout_signals_context_and_records_late_completion(tmp_pat
     stopped = threading.Event()
 
     def cooperative(context: HookContext) -> None:
-        while not context.cancellation_requested and not context.deadline_exceeded:
+        # Wait for the dispatcher's explicit cooperative cancellation signal.
+        # Checking the clock here made the test race the worker startup under
+        # load: a callback scheduled after its short deadline could return
+        # before ``Future.result`` observed the timeout.
+        while not context.cancellation_requested:
             time.sleep(0.001)
         stopped.set()
 

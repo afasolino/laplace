@@ -20,6 +20,8 @@ const state = {
   activeChatRequestId: null,
   activeChatContent: null,
   agentSessionId: null,
+  agentRepoId: null,
+  agentMessages: [],
   researchJobId: null,
   draftTimer: null,
 };
@@ -424,6 +426,10 @@ function buildAgentView() {
     element("option", {value: "both", text: "Both permitted corpora"}),
     element("option", {value: "selected_personal", text: "Selected personal corpus"}),
   ]);
+  const accessSelect = element("select", {id: "agent-access", name: "access_mode"}, [
+    element("option", {value: "read", text: "Read-only inspection", selected: true}),
+    element("option", {value: "modify", text: "Allow bounded edits after confirmation"}),
+  ]);
   if (!state.capabilities.personal_corpus_enabled) {
     [...retrievalSelect.options]
       .filter((option) => ["personal", "both", "selected_personal"].includes(option.value))
@@ -438,11 +444,21 @@ function buildAgentView() {
     ]),
     element("label", {text: "Engineering domain"}, [domainSelect]),
     element("label", {text: "Reference sources"}, [retrievalSelect]),
+    element("label", {text: "Repository access"}, [accessSelect]),
+    element("label", {className: "wide", text: "Verification argv (one argument per line)"}, [
+      element("textarea", {name: "verification_argv", rows: 3, placeholder: "pytest\n-q\ntests/test_component.py"}),
+      element("span", {className: "field-help", text: "Required for edits. The server validates this argv without invoking a shell."}),
+    ]),
+    element("label", {className: "wide", text: "Confirm repository mutation"}, [
+      element("input", {name: "confirm_mutation", type: "checkbox", value: "yes"}),
+      element("span", {className: "field-help", text: "Required for each turn that enables edits."}),
+    ]),
     element("label", {className: "wide", text: "Bounded task"}, [
       element("textarea", {name: "instruction", rows: 6, required: true, placeholder: "Describe the requested repository change…"}),
     ]),
     element("div", {className: "wide button-row"}, [
-      element("button", {className: "button primary", type: "submit", text: "Start isolated agent"}),
+      element("button", {className: "button primary", type: "submit", text: "Send to persistent agent"}),
+      element("button", {id: "new-agent", className: "button secondary", type: "button", text: "New session"}),
       element("button", {id: "cancel-agent", className: "button danger", type: "button", text: "Cancel", disabled: true}),
     ]),
   ]);
@@ -460,6 +476,22 @@ function buildAgentView() {
       element("p", {text: "The server resolves this logical repository ID, creates an isolated worktree, denies network access, and verifies the resulting patch."}),
     ]),
     form,
+    element("article", {className: "surface"}, [
+      element("div", {className: "section-heading"}, [
+        element("h3", {text: "Persistent agent conversation"}),
+        element("span", {id: "agent-session-label", className: "subtle", text: "No remote session"}),
+      ]),
+      element("div", {id: "agent-transcript", className: "stack-list"}, [
+        element("p", {className: "subtle", text: "Messages remain attached to one owner-bound Operator session."}),
+      ]),
+      element("div", {className: "button-row"}, [
+        ...["status", "diff", "tests", "context"].map((name) => {
+          const button = element("button", {className: "button secondary", type: "button", text: name});
+          button.addEventListener("click", () => inspectAgent(name));
+          return button;
+        }),
+      ]),
+    ]),
     element("article", {className: "surface"}, [
       element("div", {className: "section-heading"}, [element("h3", {text: "Plan and status"}), element("span", {id: "agent-state", className: "state-pill", text: "Not started"})]),
       element("div", {id: "agent-plan", className: "stack-list"}, [element("p", {className: "subtle", text: "Select a repository and describe a bounded task."})]),
@@ -482,6 +514,7 @@ function buildAgentView() {
     ]),
   ]);
   $("#cancel-agent", view).addEventListener("click", cancelAgent);
+  $("#new-agent", view).addEventListener("click", newAgentSession);
   $("#refresh-worktrees", view).addEventListener("click", loadWorktrees);
   return view;
 }
@@ -1569,35 +1602,56 @@ async function runAgent(event) {
     showNotice("Choose a server-authorized repository.", "error");
     return;
   }
-  const sessionId = `agent-${crypto.randomUUID().replaceAll("-", "")}`;
-  state.agentSessionId = sessionId;
-  $("#agent-state").textContent = "Binding isolated worktree";
-  $("#agent-plan").replaceChildren(stackItem("1 · Bind", "Resolving the server-side grant and creating an isolated worktree."));
+  if (state.agentSessionId && state.agentRepoId !== repoId) {
+    showNotice("The current agent session is pinned to another repository. Choose New session first.", "error");
+    return;
+  }
+  const instruction = String(form.get("instruction") || "").trim();
+  const mutating = form.get("access_mode") === "modify";
+  const verificationArgv = String(form.get("verification_argv") || "")
+    .split("\n").map((item) => item.trim()).filter(Boolean);
+  if (mutating && (!verificationArgv.length || form.get("confirm_mutation") !== "yes")) {
+    showNotice("Editing requires an explicit verifier and mutation confirmation for this turn.", "error");
+    return;
+  }
+  let sessionId = state.agentSessionId;
   try {
-    const bound = await api("/api/v1/agent/sessions", {
-      method: "POST", mutation: true,
-      body: {
-        repo_id: repoId, session_id: sessionId,
-        task_title: String(form.get("instruction")).trim().slice(0, 120),
-        idempotency_key: `worktree:${sessionId}`,
-        allowed_tools: ["read_file", "apply_patch", "run_validation"],
-        max_commands: 100, max_wall_seconds: 1800,
-      },
-    });
+    if (!sessionId) {
+      sessionId = `agent-${crypto.randomUUID().replaceAll("-", "")}`;
+      $("#agent-state").textContent = "Binding isolated worktree";
+      $("#agent-plan").replaceChildren(stackItem("1 · Bind", "Resolving the server-side grant and creating an isolated worktree."));
+      const bound = await api("/api/v1/agent/sessions", {
+        method: "POST", mutation: true,
+        body: {
+          repo_id: repoId, session_id: sessionId,
+          task_title: instruction.slice(0, 120),
+          idempotency_key: `worktree:${sessionId}`,
+        },
+      });
+      state.agentSessionId = sessionId;
+      state.agentRepoId = repoId;
+      $("#agent-session-label").textContent = sessionId;
+      $("#agent-plan").append(stackItem("2 · Execute", `${bound.binding.logical_repository_name} · ${bound.binding.worktree_status}`));
+    } else {
+      $("#agent-plan").append(stackItem("Continue", `Reusing ${sessionId}`));
+    }
     $("#cancel-agent").disabled = false;
-    $("#agent-plan").append(stackItem("2 · Execute", `${bound.binding.logical_repository_name} · ${bound.binding.worktree_status}`));
     $("#agent-state").textContent = "Running bounded task";
     const result = await api(`/api/v1/agent/sessions/${encodeURIComponent(sessionId)}/messages`, {
       method: "POST", mutation: true,
       body: {
         lane: form.get("lane"),
-        instruction: form.get("instruction"),
+        instruction,
         domain: form.get("domain"),
         retrieval_selection: form.get("retrieval_selection"),
         personal_corpus_id: form.get("retrieval_selection") === "selected_personal" ? state.selectedCorpusId : null,
+        verification_argv: mutating ? verificationArgv : null,
       },
     });
     renderAgentResult(result);
+    event.currentTarget.querySelector("textarea[name=instruction]").value = "";
+    event.currentTarget.querySelector("input[name=confirm_mutation]").checked = false;
+    await loadAgentConversation();
     await loadWorktrees();
   } catch (error) {
     $("#agent-state").textContent = "Failed";
@@ -1607,11 +1661,79 @@ async function runAgent(event) {
   }
 }
 
+function newAgentSession() {
+  state.agentSessionId = null;
+  state.agentRepoId = null;
+  state.agentMessages = [];
+  $("#agent-session-label").textContent = "No remote session";
+  $("#agent-state").textContent = "Not started";
+  $("#cancel-agent").disabled = true;
+  $("#agent-transcript").replaceChildren(element("p", {className: "subtle", text: "Start a new owner-bound session with your next instruction."}));
+  $("#agent-plan").replaceChildren(element("p", {className: "subtle", text: "Select a repository and describe a bounded task."}));
+}
+
+async function loadAgentConversation() {
+  if (!state.agentSessionId) return;
+  const result = await api(`/api/v1/agent/sessions/${encodeURIComponent(state.agentSessionId)}/messages`);
+  const conversation = result.conversation || {};
+  if (conversation.agent_session_id !== state.agentSessionId || conversation.repo_id !== state.agentRepoId) {
+    throw new Error("Agent conversation identity mismatch.");
+  }
+  state.agentMessages = conversation.messages || [];
+  const transcript = $("#agent-transcript");
+  transcript.replaceChildren();
+  if (conversation.truncated) transcript.append(element("p", {className: "subtle", text: "Showing the newest bounded message window."}));
+  for (const message of state.agentMessages) {
+    transcript.append(stackItem(message.role === "user" ? "You" : "Laplace agent", message.content));
+  }
+  if (!state.agentMessages.length) transcript.append(element("p", {className: "subtle", text: "No messages yet."}));
+}
+
+async function inspectAgent(kind) {
+  if (!state.agentSessionId) {
+    showNotice("Start or resume an agent session first.", "error");
+    return;
+  }
+  try {
+    if (kind === "context") {
+      const conversation = await api(`/api/v1/agent/sessions/${encodeURIComponent(state.agentSessionId)}/messages`);
+      showNotice(JSON.stringify({
+        session_id: state.agentSessionId,
+        repo_id: state.agentRepoId,
+        messages: conversation.conversation?.total_messages || 0,
+      }, null, 2));
+      return;
+    }
+    const status = await api(`/api/v1/agent/sessions/${encodeURIComponent(state.agentSessionId)}/status`);
+    let value;
+    if (kind === "status") {
+      value = status;
+    } else if (kind === "diff") {
+      const resultId = status.worktree_status?.result_id;
+      if (!resultId) {
+        value = "No durable result is attached to this session yet.";
+      } else {
+        const query = new URLSearchParams({artifact: "handoff.patch", offset: "0", max_bytes: "24000"});
+        const page = await api(`/api/v1/agent/sessions/${encodeURIComponent(state.agentSessionId)}/results/${encodeURIComponent(resultId)}?${query}`);
+        const bytes = Uint8Array.from(atob(page.content_base64 || ""), (character) => character.charCodeAt(0));
+        value = new TextDecoder("utf-8", {fatal: true}).decode(bytes) || "No repository diff.";
+        if (page.next_offset !== null) value += `\n\n[paged: next offset ${page.next_offset}]`;
+      }
+      $("#agent-diff").textContent = value;
+    } else {
+      value = status.worktree_status?.verification_summary || "No stored test evidence.";
+    }
+    showNotice(typeof value === "string" ? value : JSON.stringify(value, null, 2));
+  } catch (error) {
+    showNotice(errorMessage(error), "error");
+  }
+}
+
 function renderAgentResult(result) {
-  const response = result.response || {};
-  $("#agent-state").textContent = "Complete";
+  $("#agent-state").textContent = result.status || "Complete";
   $("#agent-state").className = "state-pill";
-  $("#agent-plan").append(stackItem("3 · Verify", `${response.verification_status || "UNKNOWN"} · ${result.effective_lane || "—"} · ${result.model_id || "—"}`));
+  const verification = result.verification || {};
+  $("#agent-plan").append(stackItem("3 · Verify", `${verification.passed === true ? "PASSED" : (verification.passed === false ? "FAILED" : "NOT RUN")} · ${result.effective_lane || "—"} · ${result.model_id || "—"}`));
   const retrieval = result.retrieval || {};
   $("#agent-plan").append(stackItem(
     "4 · Retrieval",
@@ -1621,15 +1743,19 @@ function renderAgentResult(result) {
   ));
   const files = $("#agent-files");
   files.replaceChildren();
-  for (const path of response.modified_paths || result.modified_paths || []) files.append(stackItem(path, "Modified inside the isolated worktree"));
+  for (const path of result.changed_paths || []) files.append(stackItem(path, "Modified inside the isolated worktree"));
   if (!files.children.length) files.append(element("p", {className: "subtle", text: "No modified paths were reported."}));
-  $("#agent-diff").textContent = response.diff || result.diff || "The backend reported validated file changes without an inline diff.";
+  const handoff = result.handoff || {};
+  $("#agent-diff").textContent = handoff.patch_inline ? (handoff.patch || "No diff.") :
+    `${handoff.patch_chars || 0} bytes · sha256 ${handoff.patch_sha256 || "not available"} · use Diff to load a bounded page.`;
   const tests = $("#agent-tests");
   tests.replaceChildren();
-  const results = response.tests || result.tests || [{name: "Deterministic patch validation", status: response.verification_status || "PASSED"}];
+  const results = result.validation_history || (result.verification ? [result.verification] : []);
+  if (!results.length) results.push({name: "Mutation verifier", status: "NOT RUN (read-only turn)"});
   for (const test of results) {
-    const passed = String(test.status).toUpperCase().includes("PASS");
-    tests.append(element("li", {className: passed ? "verification-pass" : "verification-fail", text: `${test.name || "Verification"} · ${test.status || "UNKNOWN"}`}));
+    const status = test.passed === true ? "PASSED" : (test.passed === false ? "FAILED" : (test.status || "NOT RUN"));
+    const passed = status === "PASSED" || status.startsWith("NOT RUN");
+    tests.append(element("li", {className: passed ? "verification-pass" : "verification-fail", text: `${test.argv?.join(" ") || test.name || "Verification"} · ${status}`}));
   }
 }
 
@@ -1687,6 +1813,15 @@ async function worktreeAction(worktree, action) {
     const path = `/api/v1/worktrees/${encodeURIComponent(worktree.session_id)}`;
     if (action === "resume") {
       await api(`${path}/resume`, {method: "POST", mutation: true});
+      state.agentSessionId = worktree.session_id;
+      state.agentRepoId = worktree.repo_id;
+      const repository = $("#agent-repository");
+      if (repository && [...repository.options].some((option) => option.value === worktree.repo_id)) {
+        repository.value = worktree.repo_id;
+      }
+      $("#agent-session-label").textContent = worktree.session_id;
+      $("#cancel-agent").disabled = false;
+      await loadAgentConversation();
     } else if (action === "close") {
       const result = await api(`${path}/close`, {method: "POST", mutation: true});
       if (result.status === "PRESERVED_DIRTY_WORKTREE") showNotice("Dirty worktree preserved for inspection.");

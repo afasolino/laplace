@@ -528,6 +528,11 @@ class ZetsuService:
             assert self._agent_coordinator is not None
             return self._agent_coordinator
 
+    def repository_agent_service(self) -> RepositoryAgentService:
+        """Return the shared neutral repository-agent adapter for other Operator surfaces."""
+
+        return self._agent_service()
+
     def _core(self) -> LaplaceCore:
         """Return the injected core, retaining compatibility with small fixtures."""
 

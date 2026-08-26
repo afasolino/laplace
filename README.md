@@ -119,6 +119,27 @@ control-plane workflow is the Core/Operator/Zetsu path above. Local numerical
 work is performed by deterministic Python libraries; models interpret structured
 results and never execute commands extracted from documents or model output.
 
+## Persistent terminal agent
+
+`laplace chat` is a thin, loopback-only terminal client of the resident
+Operator—not a second Core, scheduler, sandbox, or model process. Its default
+mode creates one owner-bound repository-agent session and reuses it across
+natural-language turns. Plain Qwen/Core conversation is explicitly selected
+with `/mode chat`.
+
+```bash
+laplace zetsu start --nocodev
+cd <registered-project>
+laplace chat --repo-id <logical-repository-id>
+```
+
+Agent inspection works without CodeV. Edits require an explicit deterministic
+`--verification` argv; `--access confirm` asks before a verifier-backed turn.
+The terminal and Operator GUI share the same session, worktree lifecycle,
+durable transcript, cancellation endpoint, status evidence, and paged result
+artifacts. See [Laplace Chat](docs/LAPLACE_CHAT.md) and the
+[feature matrix](docs/FEATURE_MATRIX.md).
+
 ## Security and lifecycle boundaries
 
 Only administrator-registered canonical Git roots can receive repository grants.
@@ -151,6 +172,8 @@ rewrite the v2 branch.
 ## Documentation and evidence
 
 - [User workflow](docs/USER_GUIDE.md)
+- [Laplace Chat terminal guide](docs/LAPLACE_CHAT.md)
+- [Feature matrix and production evidence](docs/FEATURE_MATRIX.md)
 - [Zetsu operations](docs/ZETSU.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)

@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import json
+import argparse
 import shutil
 import tempfile
 import time
 from pathlib import Path
+from typing import Sequence
 
 from research_workspace.client_bridge import (
     LocalWorkspace,
@@ -16,8 +18,25 @@ from research_workspace.client_bridge import (
 )
 
 
-def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="laplace-client-cert-", dir="/tmp") as raw:
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--work-root",
+        type=Path,
+        default=ROOT / "outputs" / "certification" / "client-sandbox",
+        help="Repository-local parent for disposable certification workspaces.",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    arguments = _parser().parse_args(argv)
+    work_root = arguments.work_root.expanduser().resolve()
+    work_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="laplace-client-cert-", dir=work_root) as raw:
         root = Path(raw) / "project"
         root.mkdir()
         registry = WorkspaceRegistry(Path(raw) / "state/workspaces.json")

@@ -779,7 +779,16 @@ async def test_api_enforces_basic_chat_only_and_plus_repository_binding(
 ) -> None:
     repository_root = tmp_path / "repository"
     _git_repository(repository_root)
-    chat = _ChatBackend()
+    chat = _ChatBackend(
+        [
+            {
+                "content": json.dumps(
+                    {"action": "finish", "result": "bounded fixture result"}
+                ),
+                "finish_reason": "stop",
+            }
+        ]
+    )
     agent = _AgentBackend()
     service, users, repositories, _ = _service(tmp_path, chat=chat, agent=agent)
     users.set_user("basic-api", CapabilityTier.BASIC)
@@ -847,14 +856,18 @@ async def test_api_enforces_basic_chat_only_and_plus_repository_binding(
             },
         )
         assert run.status_code == 200
-        assert agent.calls[0].user_id == "plus-api"
+        assert run.json()["status"] == "SUCCESS"
+        assert agent.calls == []
+        assert run.json()["worktree_release"] == {
+            "action": "PRESERVED_FOR_CONTINUATION"
+        }
         status = await client.get(
             "/api/v1/agent/sessions/plus-session/status",
             headers=plus_headers,
         )
         assert status.status_code == 200
         assert status.json()["status"] == "ACTIVE_CLEAN"
-        assert status.json()["last_result"]["status"] == "SUCCESS"
+        assert status.json()["worktree_status"]["result_id"].startswith("res_")
         cancelled = await client.post(
             "/api/v1/agent/sessions/plus-session/cancel",
             headers={**plus_headers, "X-CSRF-Token": plus_csrf},

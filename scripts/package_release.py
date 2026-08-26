@@ -12,12 +12,16 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import tomllib
 import venv
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
+PROJECT_VERSION = str(
+    tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+)
 FORBIDDEN_PARTS = {
     ".env",
     ".git",
@@ -200,7 +204,7 @@ def _install_smoke(wheel: Path, environment: dict[str, str], temporary: Path) ->
             "-c",
             (
                 "import importlib.metadata as m, research_workspace as r;"
-                "assert r.__version__ == m.version('local-research-workspace') == '0.7.0';"
+                f"assert r.__version__ == m.version('local-research-workspace') == {PROJECT_VERSION!r};"
                 "print(r.__version__)"
             ),
         ],
@@ -215,7 +219,7 @@ def _install_smoke(wheel: Path, environment: dict[str, str], temporary: Path) ->
         [str(script), "--version"],
         environment=environment,
     )
-    if version["status"] != "PASS" or "laplace 0.7.0 (" not in str(
+    if version["status"] != "PASS" or f"laplace {PROJECT_VERSION} (" not in str(
         version["output_tail"]
     ):
         raise RuntimeError("console_entrypoint_smoke_failed")
@@ -242,7 +246,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
     )
     try:
-        with tempfile.TemporaryDirectory(prefix="laplace-v8-package-") as temporary_name:
+        with tempfile.TemporaryDirectory(
+            prefix="laplace-v8-package-", dir=output
+        ) as temporary_name:
             temporary = Path(temporary_name)
             environment["UV_CACHE_DIR"] = str(temporary / "uv-cache")
             revision = subprocess.run(  # nosec B603 B607 - fixed read-only Git query

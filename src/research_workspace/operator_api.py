@@ -206,6 +206,10 @@ class AgentRunRequest(BaseModel):
     domain: str = Field(min_length=1, max_length=80)
     retrieval_selection: Literal["none", "personal", "shared", "both", "selected_personal"] = "none"
     personal_corpus_id: str | None = Field(default=None, pattern=r"^pc_[a-f0-9]{32}$")
+    max_steps: int = Field(default=12, ge=1, le=32)
+    max_chars: int = Field(default=8_000, ge=512, le=24_000)
+    verification_argv: list[str] | None = Field(default=None, min_length=1, max_length=64)
+    wait_timeout_seconds: int = Field(default=1_800, ge=1, le=3_600)
 
 
 class TierUserRequest(BaseModel):
@@ -477,6 +481,59 @@ class OperatorApiSettings:
 
 def _is_within(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
+
+
+def _agent_result_content(result: Mapping[str, object]) -> str:
+    content = result.get("content")
+    if isinstance(content, str) and content.strip():
+        return content[:128_000]
+    summary = result.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return summary[:128_000]
+    result_id = result.get("result_id")
+    return f"Agent turn completed. Result reference: {result_id or 'unavailable'}"
+
+
+def _public_agent_result(result: Mapping[str, object]) -> JsonObject:
+    """Expose bounded evidence references without server-local artifact paths."""
+
+    public = {
+        key: result.get(key)
+        for key in (
+            "status",
+            "session_id",
+            "repo_id",
+            "model_id",
+            "effective_lane",
+            "content",
+            "changed_paths",
+            "verification",
+            "validation_history",
+            "unresolved_failures",
+            "evidence_refs",
+            "promotion",
+            "truncated",
+            "max_chars",
+            "elapsed_seconds",
+            "telemetry",
+            "result_id",
+            "result_artifacts",
+            "delivery_status",
+            "worktree_release",
+            "retrieval",
+            "agent_conversation_message_id",
+            "agent_conversation_persistence",
+        )
+        if key in result
+    }
+    handoff = result.get("handoff")
+    if isinstance(handoff, Mapping):
+        public["handoff"] = {
+            key: handoff.get(key)
+            for key in ("patch_chars", "patch_sha256", "patch_inline", "patch")
+            if key in handoff
+        }
+    return public
 
 
 def create_operator_app(
@@ -2967,6 +3024,13 @@ def create_operator_app(
                 "worktree_status": "ACTIVE_ISOLATED",
                 "network_policy": "network-denied-v1",
             }
+        if conversation_store is not None:
+            conversation_store.bind_agent_session(
+                authenticated.user_id,
+                body.session_id,
+                repo_id=body.repo_id,
+                title=body.task_title,
+            )
         return result
 
     @app.post("/api/v1/agent/sessions/{session_id}/run")
@@ -3030,25 +3094,106 @@ def create_operator_app(
                 )[:100_000]
         elif body.personal_corpus_id is not None:
             raise CorpusError("personal_corpus_id_without_selection")
+        service = require_tiered()
+        binding = service.sandboxes.require_active(
+            session_id,
+            user_id=authenticated.user_id,
+        )
+        if conversation_store is not None:
+            conversation_store.append_agent_message(
+                authenticated.user_id,
+                session_id,
+                role="user",
+                content=body.instruction,
+                metadata={
+                    "lane": body.lane,
+                    "domain": body.domain,
+                    "retrieval_selection": body.retrieval_selection,
+                },
+            )
+        if zetsu_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="repository_agent_conversation_unavailable",
+            )
+        zetsu_service.repository_agent_service()
         if settings.fixture_mode:
-            result = require_core().agent_session(
+            result = require_core().repository_agent_turn(
                 user_id=authenticated.user_id,
+                repo_id=binding.repo_id,
                 session_id=session_id,
                 lane=ModelLane(body.lane),
                 instruction=instruction,
-                domain=body.domain,
+                max_steps=body.max_steps,
+                max_chars=body.max_chars,
+                verification_argv=body.verification_argv,
+                wait_timeout_seconds=body.wait_timeout_seconds,
             )
         else:
             result = await run_in_threadpool(
-                require_core().agent_session,
+                require_core().repository_agent_turn,
                 user_id=authenticated.user_id,
+                repo_id=binding.repo_id,
                 session_id=session_id,
                 lane=ModelLane(body.lane),
                 instruction=instruction,
-                domain=body.domain,
+                max_steps=body.max_steps,
+                max_chars=body.max_chars,
+                verification_argv=body.verification_argv,
+                wait_timeout_seconds=body.wait_timeout_seconds,
             )
         result["retrieval"] = retrieval
-        return result
+        if conversation_store is not None:
+            try:
+                message = conversation_store.append_agent_message(
+                    authenticated.user_id,
+                    session_id,
+                    role="assistant",
+                    content=_agent_result_content(result),
+                    metadata={
+                        key: result.get(key)
+                        for key in (
+                            "status",
+                            "result_id",
+                            "delivery_status",
+                            "verification_status",
+                            "changed_paths",
+                        )
+                    },
+                )
+                result["agent_conversation_message_id"] = message["message_id"]
+            except Exception:
+                LOGGER.exception(
+                    "agent conversation result persistence failed",
+                    extra={"session_id": session_id},
+                )
+                result["agent_conversation_persistence"] = "FAILED_AFTER_DURABLE_RESULT"
+        return _public_agent_result(result)
+
+    @app.get("/api/v1/agent/sessions/{session_id}/messages")
+    async def agent_session_messages(
+        session_id: str,
+        authenticated: AuthPrincipal = Depends(agent_principal),
+        limit: int = Query(default=200, ge=1, le=200),
+    ) -> JsonObject:
+        service = require_tiered()
+        service.sandboxes.inspect(
+            session_id,
+            user_id=authenticated.user_id,
+        )
+        if conversation_store is None:
+            raise HTTPException(
+                status_code=503,
+                detail="agent_conversation_store_unavailable",
+            )
+        return {
+            "status": "OK",
+            "conversation": conversation_store.get_agent_conversation(
+                authenticated.user_id,
+                session_id,
+                limit=limit,
+            ),
+        }
 
     @app.get("/api/v1/agent/sessions/{session_id}/status")
     async def agent_session_status(
@@ -3073,6 +3218,35 @@ def create_operator_app(
                 key: value for key, value in worktree.items() if key != "worktree_root"
             }
         return result
+
+    @app.get("/api/v1/agent/sessions/{session_id}/results/{result_id}")
+    async def agent_result_page(
+        session_id: str,
+        result_id: str,
+        authenticated: AuthPrincipal = Depends(agent_principal),
+        artifact: str = Query(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"),
+        offset: int = Query(default=0, ge=0),
+        max_bytes: int = Query(default=24_000, ge=1, le=65_536),
+    ) -> JsonObject:
+        binding = require_tiered().sandboxes.inspect(
+            session_id,
+            user_id=authenticated.user_id,
+        )
+        if zetsu_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="repository_agent_conversation_unavailable",
+            )
+        zetsu_service.repository_agent_service()
+        return require_core().repository_result_page(
+            user_id=authenticated.user_id,
+            repo_id=str(binding["repo_id"]),
+            session_id=session_id,
+            result_id=result_id,
+            artifact=artifact,
+            offset=offset,
+            max_bytes=max_bytes,
+        )
 
     @app.post("/api/v1/worktrees/{session_id}/cancel")
     @app.post("/api/v1/agent/sessions/{session_id}/cancel")

@@ -10,7 +10,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, cast
 
 from .model_routing import RoutingTaskMetadata, assess_rtl_worker_eligibility
 from .memory import MemoryService
@@ -24,7 +24,10 @@ from .logical_subagents import (
     SubagentExecutor,
 )
 from .personal_corpus import PersonalCorpusStore
-from .repository_agent_service import RepositoryAgentService
+from .repository_agent_service import (
+    RepositoryAgentConversationService,
+    RepositoryAgentService,
+)
 from .repository_context import (
     RepoMap,
     RepositoryContextService,
@@ -288,6 +291,60 @@ class LaplaceCore:
             verification_argv=list(verification_argv) if verification_argv is not None else None,
             apply_to_repository=apply_to_repository,
             wait_timeout_seconds=wait_timeout_seconds,
+        )
+
+    def repository_agent_turn(
+        self,
+        *,
+        user_id: str,
+        repo_id: str,
+        instruction: str,
+        lane: ModelLane,
+        session_id: str,
+        max_steps: int,
+        max_chars: int,
+        verification_argv: Sequence[str] | None,
+        wait_timeout_seconds: float,
+    ) -> JsonObject:
+        """Run one bounded turn in an explicitly persistent repository session."""
+
+        service = self._require_repository_agent()
+        if not callable(getattr(service, "run_turn", None)):
+            raise LaplaceCoreError("repository_agent_conversation_unavailable")
+        conversation = cast(RepositoryAgentConversationService, service)
+        return conversation.run_turn(
+            user_id=user_id,
+            repo_id=repo_id,
+            instruction=instruction,
+            lane=lane,
+            session_id=session_id,
+            max_steps=max_steps,
+            max_chars=max_chars,
+            verification_argv=verification_argv,
+            wait_timeout_seconds=wait_timeout_seconds,
+        )
+
+    def repository_result_page(
+        self,
+        *,
+        user_id: str,
+        repo_id: str,
+        session_id: str,
+        result_id: str,
+        artifact: str,
+        offset: int,
+        max_bytes: int,
+    ) -> JsonObject:
+        """Return one bounded durable result page through the neutral service."""
+
+        return self._require_repository_agent().result_page(
+            user_id=user_id,
+            repo_id=repo_id,
+            session_id=session_id,
+            result_id=result_id,
+            artifact=artifact,
+            offset=offset,
+            max_bytes=max_bytes,
         )
 
     def rtl_task(

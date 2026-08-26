@@ -45,3 +45,37 @@ class RepositoryAgentService(Protocol):
     def handoff_evidence(self, session_id: str, *, max_chars: int) -> JsonObject:
         """Return bounded exact handoff evidence for an authorized adapter caller."""
         ...
+
+    def result_page(
+        self,
+        *,
+        user_id: str,
+        repo_id: str,
+        session_id: str,
+        result_id: str,
+        artifact: str,
+        offset: int,
+        max_bytes: int,
+    ) -> JsonObject:
+        """Read one owner/repository-bound durable result page."""
+        ...
+
+
+class RepositoryAgentConversationService(RepositoryAgentService, Protocol):
+    """Optional neutral extension for persistent multi-turn repository sessions."""
+
+    def run_turn(
+        self,
+        *,
+        user_id: str,
+        repo_id: str,
+        instruction: str,
+        lane: ModelLane,
+        session_id: str,
+        max_steps: int,
+        max_chars: int,
+        verification_argv: Sequence[str] | None,
+        wait_timeout_seconds: float,
+    ) -> JsonObject:
+        """Run one bounded turn without terminalizing the owned worktree."""
+        ...

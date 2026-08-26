@@ -22,6 +22,11 @@ ssh -N -L 8765:127.0.0.1:8765 <server>
 
 Keep the Operator service bound to `127.0.0.1:8765`, then open `http://127.0.0.1:8765` on the client. This is the quickest safe remote method. The remote machine's ports 8765, 8102, and 8103 need not be opened in a firewall.
 
+The `laplace chat` terminal client intentionally accepts only a loopback
+Operator URL. Run the tunnel first, then use `laplace chat --operator-url
+http://127.0.0.1:8765` on the client machine. It refuses redirects so bearer or
+CSRF credentials cannot be redirected away from that loopback endpoint.
+
 ## Production HTTPS reverse proxy
 
 Use [Caddyfile.example](../deploy/caddy/Caddyfile.example) or [laplace.conf.example](../deploy/nginx/laplace.conf.example). Replace the example DNS name and paths. Do not expose any Qwen or CodeV model port, including 8102, 8103, and candidate ports 8206/8207.
@@ -98,5 +103,10 @@ Direct non-loopback HTTP is rejected unless `--allow-insecure-lan-http` is expli
 Caddy's `flush_interval -1` and Nginx's `proxy_buffering off` preserve SSE/streaming and cancellation behavior. Proxy timeouts permit bounded chat/research calls without unlimited bodies.
 
 Folder selection and drag-and-drop run in the user's browser over the same authenticated HTTPS origin. The browser sends selected bytes and relative logical names only; the server never receives a client canonical path. Separately, Laplace Client can operate on explicitly granted PC roots through its outbound authenticated agent; see [LAPLACE_CLIENT.md](LAPLACE_CLIENT.md). Configure the proxy request-body limit to match the Operator service and per-file corpus policy while retaining bounded multipart timeouts.
+
+Remote Operator Agent sessions modify only registered repositories on the
+Operator host. To operate on files that remain on another user's PC, pair that
+PC with `laplace-client` and grant one canonical workspace explicitly; Chat,
+Zetsu, and the browser never acquire that filesystem authority implicitly.
 
 Stop the reverse proxy only if it is dedicated to Laplace and the operator authorized it. Stop the Operator service before model servers. The model lifecycle unit validates ownership before signalling PIDs.
