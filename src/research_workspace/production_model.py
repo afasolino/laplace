@@ -24,6 +24,46 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _approved_model_roots(repository_root: Path) -> tuple[Path, ...]:
+    """Return canonical operator-approved roots for immutable model artifacts."""
+
+    roots: list[Path] = [repository_root.resolve()]
+    raw = os.environ.get("LAPLACE_APPROVED_MODEL_ROOTS", "")
+    for value in raw.split(os.pathsep):
+        value = value.strip()
+        if not value:
+            continue
+
+        configured = Path(value).expanduser()
+        if not configured.is_absolute():
+            raise RuntimeError("qwen38_approved_artifact_root_not_absolute")
+        if configured.is_symlink():
+            raise RuntimeError("qwen38_approved_artifact_root_symlink")
+
+        try:
+            resolved = configured.resolve(strict=True)
+        except OSError as exc:
+            raise RuntimeError("qwen38_approved_artifact_root_unavailable") from exc
+
+        if not resolved.is_dir():
+            raise RuntimeError("qwen38_approved_artifact_root_not_directory")
+        if resolved != configured.absolute():
+            raise RuntimeError("qwen38_approved_artifact_root_symlink_parent")
+
+        if resolved not in roots:
+            roots.append(resolved)
+
+    return tuple(roots)
+
+
 def verify_qwen38_artifact(repository_root: Path) -> dict[str, object]:
     """Verify every packed artifact byte against the immutable local manifest."""
 
@@ -40,13 +80,33 @@ def verify_qwen38_artifact(repository_root: Path) -> dict[str, object]:
     if configured_artifact_root.is_symlink():
         raise RuntimeError("qwen38_artifact_root_symlink")
     artifact_root = configured_artifact_root.resolve()
-    try:
-        artifact_root.relative_to(root)
-    except ValueError as exc:
-        raise RuntimeError("qwen38_artifact_path_outside_repository") from exc
-    artifact_manifest_path = (root / artifact_manifest_value).resolve()
-    if artifact_manifest_path.parent != artifact_root:
+
+    approved_roots = _approved_model_roots(root)
+    if not any(_path_is_within(artifact_root, approved) for approved in approved_roots):
+        raise RuntimeError("qwen38_artifact_path_outside_repository")
+
+    artifact_manifest_relative = Path(artifact_manifest_value)
+    if artifact_manifest_relative.is_absolute() or ".." in artifact_manifest_relative.parts:
         raise RuntimeError("qwen38_artifact_manifest_path_mismatch")
+
+    artifact_manifest_path = (root / artifact_manifest_relative).resolve()
+    if artifact_manifest_path.parent != artifact_root:
+        if (
+            artifact_manifest_relative.name != "laplace_artifact_manifest.json"
+            or artifact_manifest_relative.parent.name != artifact_root.name
+        ):
+            raise RuntimeError("qwen38_artifact_manifest_path_mismatch")
+
+        candidate = artifact_root / artifact_manifest_relative.name
+        if candidate.is_symlink():
+            raise RuntimeError("qwen38_artifact_manifest_path_mismatch")
+
+        artifact_manifest_path = candidate.resolve()
+        if (
+            artifact_manifest_path.parent != artifact_root
+            or artifact_manifest_path != candidate.absolute()
+        ):
+            raise RuntimeError("qwen38_artifact_manifest_path_mismatch")
     artifact_raw: object = json.loads(artifact_manifest_path.read_text(encoding="utf-8"))
     if not isinstance(artifact_raw, dict) or artifact_raw.get("schema_version") != 1:
         raise RuntimeError("qwen38_artifact_manifest_invalid")

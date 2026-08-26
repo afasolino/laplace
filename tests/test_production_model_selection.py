@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
 import shutil
+from pathlib import Path
 
 import pytest
 
-from research_workspace.production_model import select
+from research_workspace.production_model import select, verify_qwen38_artifact
 
 
 def _write_promotable_manifest(root: Path, *, mtp_status: str) -> Path:
@@ -134,3 +134,83 @@ def test_qwen38_selection_rejects_artifact_corruption(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="qwen38_artifact_file_hash_mismatch"):
         select("qwen38", root, tmp_path / "active.json")
+
+
+def _move_artifact_outside_repository(root: Path, external_parent: Path) -> Path:
+    manifest_path = root / "configs/model_manifests/qwen38_27b_a6000.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    source = root / ".models/qwen38"
+    external_parent.mkdir(parents=True, exist_ok=True)
+    target = external_parent / "qwen38"
+    shutil.move(str(source), str(target))
+
+    manifest["artifact_path"] = str(target)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return target
+
+
+def test_qwen38_repository_local_artifact_remains_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    (root / "configs/model_manifests").mkdir(parents=True)
+    _write_promotable_manifest(root, mtp_status="PASSED")
+
+    monkeypatch.delenv("LAPLACE_APPROVED_MODEL_ROOTS", raising=False)
+    result = verify_qwen38_artifact(root)
+
+    assert Path(str(result["artifact_path"])).resolve() == (root / ".models/qwen38").resolve()
+
+
+def test_qwen38_explicit_external_approved_root_is_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    (root / "configs/model_manifests").mkdir(parents=True)
+    _write_promotable_manifest(root, mtp_status="PASSED")
+    approved = tmp_path / "approved-models"
+    artifact = _move_artifact_outside_repository(root, approved)
+
+    monkeypatch.setenv("LAPLACE_APPROVED_MODEL_ROOTS", str(approved))
+    result = verify_qwen38_artifact(root)
+
+    assert Path(str(result["artifact_path"])).resolve() == artifact.resolve()
+
+
+def test_qwen38_external_artifact_without_approval_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    (root / "configs/model_manifests").mkdir(parents=True)
+    _write_promotable_manifest(root, mtp_status="PASSED")
+    _move_artifact_outside_repository(root, tmp_path / "external-models")
+
+    monkeypatch.delenv("LAPLACE_APPROVED_MODEL_ROOTS", raising=False)
+    with pytest.raises(RuntimeError, match="qwen38_artifact_path_outside_repository"):
+        verify_qwen38_artifact(root)
+
+
+def test_qwen38_approved_root_does_not_allow_symlink_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    (root / "configs/model_manifests").mkdir(parents=True)
+    _write_promotable_manifest(root, mtp_status="PASSED")
+
+    outside = tmp_path / "outside"
+    artifact = _move_artifact_outside_repository(root, outside)
+
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    escaped = approved / "escaped"
+    escaped.symlink_to(outside, target_is_directory=True)
+
+    manifest_path = root / "configs/model_manifests/qwen38_27b_a6000.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifact_path"] = str(escaped / artifact.name)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    monkeypatch.setenv("LAPLACE_APPROVED_MODEL_ROOTS", str(approved))
+    with pytest.raises(RuntimeError, match="qwen38_artifact_path_outside_repository"):
+        verify_qwen38_artifact(root)
