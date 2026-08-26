@@ -129,3 +129,25 @@ def test_planner_is_available_from_standalone_core(tmp_path: Path) -> None:
     plan = _plan(core.context_planner)
     assert isinstance(plan, ContextPlan)
     assert plan.owner_user_id == "owner-a"
+
+
+def test_oversized_recent_trajectory_is_safely_bounded_for_persistent_turns() -> None:
+    planner = ContextPlanner()
+    observation = "STEP 1 ACTION inspect\nHEAD\n" + ("x" * 80_000) + "\nTAIL"
+
+    plan = _plan(planner, recent_trajectory=(observation,))
+
+    assert len(plan.recent_trajectory) == 1
+    bounded = plan.recent_trajectory[0]
+    assert len(bounded) <= 12_000
+    assert bounded.startswith("STEP 1 ACTION inspect")
+    assert bounded.endswith("TAIL")
+    assert "[recent trajectory truncated]" in bounded
+
+    messages = planner.compaction_messages(
+        objective=plan.objective,
+        exact_state=plan.exact_state,
+        prior_summary="",
+        recent_trajectory=(observation,),
+    )
+    assert "[recent trajectory truncated]" in messages[1]["content"]

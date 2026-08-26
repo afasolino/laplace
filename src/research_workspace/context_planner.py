@@ -45,6 +45,21 @@ def _text(value: object, *, label: str, maximum: int, allow_empty: bool = False)
     return value
 
 
+def _recent_trajectory_text(value: object) -> str:
+    """Validate advisory trajectory text and deterministically bound its context footprint."""
+
+    if not isinstance(value, str) or "\x00" in value or not value.strip():
+        raise ContextPlannerError("invalid_recent_trajectory")
+    if len(value) <= _MAX_RECENT_ITEM_CHARS:
+        return value
+
+    marker = "\n...[recent trajectory truncated]...\n"
+    available = _MAX_RECENT_ITEM_CHARS - len(marker)
+    head = available // 2
+    tail = available - head
+    return value[:head] + marker + value[-tail:]
+
+
 def _json_value(value: object, *, label: str, maximum: int) -> object:
     def visit(item: object) -> None:
         if item is None or isinstance(item, (str, bool, int)):
@@ -219,7 +234,7 @@ class ContextPlanner:
         memory = _items(relevant_memory, label="relevant_memory")
         retrieval = _items(retrieval_evidence, label="retrieval_evidence")
         trajectory = tuple(
-            _text(item, label="recent_trajectory", maximum=_MAX_RECENT_ITEM_CHARS)
+            _recent_trajectory_text(item)
             for item in recent_trajectory[-_MAX_RECENT_ITEMS:]
         )
         summary = _text(
@@ -320,7 +335,7 @@ class ContextPlanner:
         exact = json.dumps(_object(exact_state, label="exact_state"), sort_keys=True, ensure_ascii=False)
         summary = _text(prior_summary, label="semantic_summary", maximum=_MAX_SUMMARY_CHARS, allow_empty=True)
         recent = "\n\n".join(
-            _text(item, label="recent_trajectory", maximum=_MAX_RECENT_ITEM_CHARS)
+            _recent_trajectory_text(item)
             for item in recent_trajectory[-_MAX_RECENT_ITEMS:]
         ) or "NONE"
         return (
