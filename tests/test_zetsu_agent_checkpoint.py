@@ -1537,3 +1537,37 @@ def test_checkpoint_rejects_malformed_semantic_state_and_telemetry(
     coordinator.checkpoints.write(ctx.session_id, raw)
     with pytest.raises(ServiceTierError, match="zetsu_agent_checkpoint_telemetry_invalid"):
         coordinator._restore(ctx, "objective")
+
+
+def test_missing_legacy_read_is_recoverable_but_materialization_failure_is_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tiered = _Tiered(tmp_path)
+    coordinator = ZetsuAgentCoordinator(
+        tiered, checkpoint_store=AgentCheckpointStore(tmp_path / "checkpoints")
+    )
+    ctx = _ctx(tmp_path, session="read-recovery", user="user-a")
+    action = {"action": "read", "paths": ["missing.py"]}
+
+    observation = json.loads(coordinator._read_observation(ctx, action))
+    assert observation == {
+        "category": "zetsu_agent_read_target_unavailable",
+        "guidance": (
+            "Resolve an existing repository-relative path with repository search or repo_map "
+            "before retrying the read."
+        ),
+        "paths": ["missing.py"],
+        "status": "RECOVERABLE_ACTION_ERROR",
+    }
+    assert coordinator._action_progress_details(action)["paths"] == ["missing.py"]
+
+    def reject_materialization(_ctx: AgentRunContext, _path: str) -> None:
+        raise ServiceTierError("repository_revision_not_materialized")
+
+    monkeypatch.setattr(
+        coordinator,
+        "_raise_materialization_failure_if_needed",
+        reject_materialization,
+    )
+    with pytest.raises(ServiceTierError, match="repository_revision_not_materialized"):
+        coordinator._read_observation(ctx, action)

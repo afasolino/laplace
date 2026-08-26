@@ -96,9 +96,21 @@ def _progress_description(event: str, details: Mapping[str, object]) -> str:
     action = details.get("action")
     action_text = str(action) if isinstance(action, str) and action else ""
     path = details.get("path")
+    paths = details.get("paths")
     name = details.get("name")
     query = details.get("query")
-    target = path if isinstance(path, str) and path else name if isinstance(name, str) else None
+    path_list = (
+        [item for item in paths if isinstance(item, str) and item]
+        if isinstance(paths, list)
+        else []
+    )
+    target: str | None = None
+    if isinstance(path, str) and path:
+        target = path
+    elif path_list:
+        target = ", ".join(path_list[:4])
+    elif isinstance(name, str) and name:
+        target = name
     if event == "TURN_SUBMITTED":
         return "submitted"
     if event == "TURN_STARTED":

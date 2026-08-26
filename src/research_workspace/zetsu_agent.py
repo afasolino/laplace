@@ -381,6 +381,12 @@ class ZetsuAgentCoordinator:
             value = action.get(key)
             if isinstance(value, str) and value:
                 details[key] = value[:240]
+        paths = action.get("paths")
+        if isinstance(paths, Sequence) and not isinstance(paths, (str, bytes)):
+            rendered_paths = [item[:240] for item in paths if isinstance(item, str) and item][:4]
+            if rendered_paths:
+                details["paths"] = rendered_paths
+                details["path_count"] = len(paths)
         return details
 
     @staticmethod
@@ -824,6 +830,37 @@ class ZetsuAgentCoordinator:
         if len(result) == 1 and action.get("paths") is None:
             return next(iter(result.values()))
         return json.dumps(result, sort_keys=True, ensure_ascii=False)
+
+    def _read_observation(self, ctx: AgentRunContext, action: Mapping[str, object]) -> str:
+        """Recover only from an ordinary missing legacy-read target."""
+
+        try:
+            return self._read(ctx, action)
+        except ServiceTierError as exc:
+            if exc.category != "zetsu_agent_read_target_unavailable":
+                raise
+            details = self._action_progress_details(action)
+            paths = details.get("paths")
+            attempted_paths = (
+                list(paths)
+                if isinstance(paths, list)
+                else [details["path"]]
+                if isinstance(details.get("path"), str)
+                else []
+            )
+            return json.dumps(
+                {
+                    "status": "RECOVERABLE_ACTION_ERROR",
+                    "category": exc.category,
+                    "paths": attempted_paths,
+                    "guidance": (
+                        "Resolve an existing repository-relative path with repository "
+                        "search or repo_map before retrying the read."
+                    ),
+                },
+                sort_keys=True,
+                ensure_ascii=False,
+            )
 
     def _retrieve(
         self, ctx: AgentRunContext, state: AgentExecutionState, action: Mapping[str, object]
@@ -2520,7 +2557,7 @@ class ZetsuAgentCoordinator:
                 elif action_name == "search":
                     observation = self._search(ctx, state, action)
                 elif action_name == "read":
-                    observation = self._read(ctx, action)
+                    observation = self._read_observation(ctx, action)
                 elif action_name == "retrieve":
                     observation = self._retrieve(ctx, state, action)
                 elif action_name == "edit":

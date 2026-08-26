@@ -2,7 +2,13 @@ from pathlib import Path
 
 import pytest
 
-from research_workspace.chat_cli import ChatCLIError, ChatShell, _format_elapsed, sanitize_terminal
+from research_workspace.chat_cli import (
+    ChatCLIError,
+    ChatShell,
+    _format_elapsed,
+    _progress_description,
+    sanitize_terminal,
+)
 from research_workspace.chat_session import ChatSessionStore
 
 
@@ -113,6 +119,16 @@ def test_elapsed_format_is_compact_and_stable():
     assert _format_elapsed(12.34) == "12.3s"
     assert _format_elapsed(125.0) == "2m 05s"
     assert _format_elapsed(3_723.0) == "1h 02m 03s"
+
+
+def test_multi_path_read_progress_lists_targets():
+    assert (
+        _progress_description(
+            "REPOSITORY_READ_STARTED",
+            {"action": "read", "paths": ["tests/a.py", "src/b.py"]},
+        )
+        == "read tests/a.py, src/b.py"
+    )
 
 
 def test_natural_language_turns_reuse_one_remote_agent_session(tmp_path: Path):
