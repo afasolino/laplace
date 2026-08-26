@@ -34,6 +34,7 @@ from .context_planner import DEFAULT_COMPACTION_RATIO, ContextPlanner, ContextPl
 from .personal_corpus import CorpusError, PersonalCorpusStore
 from .repository_authorization import RepositoryAuthorizationError, validate_workspace_path
 from .service_tiers import ModelLane, ServiceTierError, TieredServingService
+from .task_labels import derive_task_label
 from .verification_policy import validate_verification_argv
 from .zetsu_context import compact_personal_results
 from .result_store import ResultStore, ResultStoreError
@@ -253,6 +254,7 @@ class AgentRunContext:
     required_verification_argv: tuple[str, ...] | None
     run_started: float
     remaining_wall_seconds: float
+    task_label: str = "Repository Task"
     apply_to_repository: bool = False
 
 
@@ -360,15 +362,26 @@ class ZetsuAgentCoordinator:
         if not callable(reporter):
             return
         try:
+            payload = dict(details or {})
+            payload["task_label"] = ctx.task_label
             reporter(
                 ctx.session_id,
                 user_id=ctx.user_id,
                 event=event,
-                details=dict(details or {}),
+                details=payload,
             )
         except Exception:
             # Progress telemetry must never change the authoritative task outcome.
             pass
+
+    @staticmethod
+    def _action_progress_details(action: Mapping[str, object]) -> JsonObject:
+        details: JsonObject = {"action": str(action.get("action", "unknown"))}
+        for key in ("path", "query", "name", "glob"):
+            value = action.get(key)
+            if isinstance(value, str) and value:
+                details[key] = value[:240]
+        return details
 
     @staticmethod
     def _system_prompt() -> str:
@@ -1882,6 +1895,7 @@ class ZetsuAgentCoordinator:
         wait_timeout_seconds: float = 1_800.0,
         persistent_session: bool = False,
         restart_objective: bool = False,
+        task_label: str | None = None,
     ) -> JsonObject:
         self._validate_run_request(
             instruction=instruction,
@@ -1932,6 +1946,7 @@ class ZetsuAgentCoordinator:
                 apply_to_repository=apply_to_repository,
                 persistent_session=persistent_session,
                 restart_objective=restart_objective,
+                task_label=task_label,
             )
             if admission is not None and self.scheduler is not None:
                 terminal = "SUCCEEDED" if result.get("status") == "SUCCESS" else "FAILED"
@@ -2002,6 +2017,7 @@ class ZetsuAgentCoordinator:
         max_chars: int = 8_000,
         verification_argv: Sequence[str] | None = None,
         wait_timeout_seconds: float = 1_800.0,
+        task_label: str | None = None,
     ) -> JsonObject:
         """Run one bounded turn while preserving the owned worktree for continuation."""
 
@@ -2018,6 +2034,7 @@ class ZetsuAgentCoordinator:
             wait_timeout_seconds=wait_timeout_seconds,
             persistent_session=True,
             restart_objective=True,
+            task_label=task_label,
         )
 
     def result_page(
@@ -2077,9 +2094,15 @@ class ZetsuAgentCoordinator:
         if self.scheduler is None:
             raise ServiceTierError("agent_scheduler_unavailable")
         try:
-            return self.scheduler.task_status(user_id=user_id, session_id=session_id)
+            status = self.scheduler.task_status(user_id=user_id, session_id=session_id)
         except AgentSchedulerError as exc:
             raise ServiceTierError(exc.category, exc.evidence) from exc
+        has_session = getattr(self.tiered.sandboxes, "has_session", None)
+        if callable(has_session) and has_session(session_id, user_id=user_id):
+            worktree = self.tiered.sandboxes.status(session_id, user_id=user_id)
+            if isinstance(worktree.get("task_label"), str):
+                status["task_label"] = worktree["task_label"]
+        return status
 
     def cancel_queued(self, *, user_id: str, session_id: str) -> JsonObject:
         if self.scheduler is None:
@@ -2105,6 +2128,7 @@ class ZetsuAgentCoordinator:
         apply_to_repository: bool = False,
         persistent_session: bool = False,
         restart_objective: bool = False,
+        task_label: str | None = None,
     ) -> JsonObject:
         self._validate_run_request(
             instruction=instruction,
@@ -2122,6 +2146,7 @@ class ZetsuAgentCoordinator:
 
         effective_session = session_id or f"zetsu-{uuid.uuid4().hex}"
         creating = session_id is None if creating is None else creating
+        effective_task_label = derive_task_label(task_label or instruction)
         digest = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
         if creating:
             self.tiered.create_agent_session(
@@ -2181,6 +2206,7 @@ class ZetsuAgentCoordinator:
             required_verification_argv=required_verification_argv,
             run_started=run_started,
             remaining_wall_seconds=remaining_wall,
+            task_label=effective_task_label,
             apply_to_repository=apply_to_repository,
         )
         fresh_state = AgentExecutionState(
@@ -2287,6 +2313,7 @@ class ZetsuAgentCoordinator:
             sanitized_model_name=route.model_id,
             instruction_digest=digest,
             remaining_wall_seconds=remaining_wall,
+            task_label=ctx.task_label,
         )
         threshold = int(route.context_limit * compaction_ratio)
         status = "SUCCESS" if resume_verified_finish else "INCOMPLETE"
@@ -2399,14 +2426,15 @@ class ZetsuAgentCoordinator:
                     break
 
                 self._consume_tool_budget(ctx, state)
+                progress_details = self._action_progress_details(action)
                 if action_name in {"repo_map", "find_symbol", "find_references", "read_region", "read", "inspect_diff", "git_state"}:
-                    self._progress(ctx, "REPOSITORY_READ_STARTED", {"action": action_name})
+                    self._progress(ctx, "REPOSITORY_READ_STARTED", progress_details)
                 elif action_name in {"search_text", "search"}:
-                    self._progress(ctx, "REPOSITORY_SEARCH_STARTED", {"action": action_name})
+                    self._progress(ctx, "REPOSITORY_SEARCH_STARTED", progress_details)
                 elif action_name == "retrieve":
-                    self._progress(ctx, "RETRIEVAL_STARTED")
+                    self._progress(ctx, "RETRIEVAL_STARTED", progress_details)
                 else:
-                    self._progress(ctx, "TOOL_STARTED", {"action": action_name})
+                    self._progress(ctx, "TOOL_STARTED", progress_details)
                 if action_name in {
                     "repo_map",
                     "find_symbol",
@@ -2662,6 +2690,7 @@ class ZetsuAgentCoordinator:
             "repo_id": repo_id,
             "model_id": route.model_id,
             "effective_lane": lane.value,
+            "task_label": ctx.task_label,
             "content": authoritative_content,
             "changed_paths": changed,
             "verification": state.validation_history[-1] if state.validation_history else None,

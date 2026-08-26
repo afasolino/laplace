@@ -17,8 +17,9 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
-from typing import Sequence
 
 from .chat_operator_client import (
     OperatorClient,
@@ -26,6 +27,7 @@ from .chat_operator_client import (
     extract_display_text,
 )
 from .chat_session import ChatSession, ChatSessionError, ChatSessionStore
+from .task_labels import derive_task_label
 
 _CONTROL = re.compile(
     r"(?:\x1B[@-_][0-?]*[ -/]*[@-~])|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"
@@ -67,6 +69,99 @@ def _repo_id(root: Path, explicit: str | None) -> str:
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value) is None:
         raise ChatCLIError("invalid_repo_id")
     return value
+
+
+def _format_elapsed(seconds: float) -> str:
+    value = max(0.0, seconds)
+    if value < 60.0:
+        return f"{value:.1f}s"
+    total = int(value)
+    minutes, seconds_part = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m {seconds_part:02d}s"
+    hours, minutes_part = divmod(minutes, 60)
+    return f"{hours}h {minutes_part:02d}m {seconds_part:02d}s"
+
+
+def _event_timestamp_unix(value: object) -> float | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except ValueError:
+        return None
+
+
+def _progress_description(event: str, details: Mapping[str, object]) -> str:
+    action = details.get("action")
+    action_text = str(action) if isinstance(action, str) and action else ""
+    path = details.get("path")
+    name = details.get("name")
+    query = details.get("query")
+    target = path if isinstance(path, str) and path else name if isinstance(name, str) else None
+    if event == "TURN_SUBMITTED":
+        return "submitted"
+    if event == "TURN_STARTED":
+        return "started"
+    if event == "TASK_STARTED":
+        return "task started"
+    if event == "REPOSITORY_READ_STARTED":
+        return f"{action_text or 'repository read'} {target}".strip()
+    if event == "REPOSITORY_SEARCH_STARTED":
+        if isinstance(query, str) and query:
+            return f"{action_text or 'repository search'} {query[:80]}"
+        return action_text or "repository search"
+    if event == "RETRIEVAL_STARTED":
+        return "retrieving context"
+    if event == "TOOL_STARTED":
+        return action_text or "tool started"
+    if event == "VERIFICATION_STARTED":
+        return "verification started"
+    if event == "VERIFICATION_COMPLETED":
+        passed = details.get("passed")
+        return "verification passed" if passed is True else "verification failed"
+    if event == "QUANTUM_CONTINUING":
+        quantum = details.get("quantum")
+        steps = details.get("cumulative_steps")
+        directive = details.get("directive")
+        parts = ["continuing"]
+        if isinstance(quantum, int):
+            parts.append(f"q{quantum}")
+        if isinstance(steps, int):
+            parts.append(f"steps={steps}")
+        if isinstance(directive, str) and directive:
+            parts.append(directive)
+        return " · ".join(parts)
+    if event == "TASK_YIELDED_RESUMABLE":
+        return "task yielded resumable"
+    if event == "TASK_COMPLETED":
+        return "task completed"
+    if event == "TASK_FAILED":
+        return "task failed"
+    if event == "TASK_CANCELLED":
+        return "task cancelled"
+    if event == "TURN_YIELDED_RESUMABLE":
+        return "yielded resumable"
+    if event == "TURN_COMPLETED":
+        return "completed"
+    if event == "TURN_FAILED":
+        return "failed"
+    if event == "TURN_CANCELLED":
+        return "cancelled"
+    return event.lower().replace("_", " ")
+
+
+def _render_progress(task_label: str, event: str, details: Mapping[str, object]) -> str:
+    return sanitize_terminal(
+        f"[{task_label} · {_progress_description(event, details)}]", maximum=360
+    )
+
+
+def _render_elapsed(task_label: str | None, started_at_unix: float) -> str:
+    elapsed = _format_elapsed(time.time() - started_at_unix)
+    if task_label:
+        return f"[{task_label} · elapsed {elapsed}]"
+    return f"[elapsed {elapsed}]"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -174,6 +269,7 @@ class ChatShell:
         return created.session_id
 
     def _chat_turn(self, text: str) -> None:
+        started_at_unix = time.time()
         self.session = self.store.append_message(
             self.session,
             role="user",
@@ -193,6 +289,7 @@ class ChatShell:
         if not response:
             response = sanitize_terminal(payload)
         print(sanitize_terminal(response))
+        print(_render_elapsed(None, started_at_unix))
         self.session = self.store.append_message(
             self.session,
             role="assistant",
@@ -200,6 +297,8 @@ class ChatShell:
         )
 
     def _agent_turn(self, text: str) -> None:
+        started_at_unix = time.time()
+        task_label = derive_task_label(text)
         if self.session.active_turn_id is not None:
             raise ChatCLIError("agent_turn_active:use_/watch_or_/cancel")
         self._confirm_agent_turn()
@@ -229,19 +328,26 @@ class ChatShell:
             else None
         )
         if submission is not None:
-            print(f"[agent turn {sanitize_terminal(turn_id, maximum=160)} submitted]")
+            print(
+                f"[agent turn {sanitize_terminal(turn_id, maximum=160)} · "
+                f"{sanitize_terminal(task_label, maximum=64)} · submitted]"
+            )
             try:
-                rendered = self._watch_agent_turn(
+                rendered, resolved_label, resolved_started_at = self._watch_agent_turn(
                     remote,
                     turn_id,
                     after_sequence=submission.event_cursor,
+                    task_label=task_label,
+                    submitted_at_unix=started_at_unix,
                 )
             except KeyboardInterrupt:
                 print(sanitize_terminal(self.client.cancel_agent(remote)))
                 print("[agent cancellation requested; use /watch to reconnect]")
+                print(_render_elapsed(task_label, started_at_unix))
                 return
             self.session = self.store.update(self.session, active_turn_id=None)
             print(sanitize_terminal(rendered))
+            print(_render_elapsed(resolved_label, resolved_started_at or started_at_unix))
             self.session = self.store.append_message(
                 self.session,
                 role="assistant",
@@ -263,6 +369,7 @@ class ChatShell:
         response = extract_display_text(payload)
         rendered = response if response else sanitize_terminal(payload)
         print(sanitize_terminal(rendered))
+        print(_render_elapsed(task_label, started_at_unix))
         self.session = self.store.append_message(
             self.session,
             role="assistant",
@@ -270,10 +377,20 @@ class ChatShell:
             mode="agent",
         )
 
-    def _watch_agent_turn(self, remote: str, turn_id: str, *, after_sequence: int) -> str:
+    def _watch_agent_turn(
+        self,
+        remote: str,
+        turn_id: str,
+        *,
+        after_sequence: int,
+        task_label: str | None = None,
+        submitted_at_unix: float | None = None,
+    ) -> tuple[str, str, float | None]:
         """Render durable server events; no model call is used for monitoring."""
 
         cursor = after_sequence
+        resolved_label = task_label or "Agent Task"
+        resolved_started_at = submitted_at_unix
         turn_started = False
         terminal_observed = False
         terminal_wait_deadline: float | None = None
@@ -289,7 +406,24 @@ class ChatShell:
                     continue
                 event = record.get("event")
                 if isinstance(event, str):
-                    print(f"[agent {sanitize_terminal(event, maximum=120)}]")
+                    record_label = details.get("task_label") if isinstance(details, dict) else None
+                    if isinstance(record_label, str) and record_label:
+                        resolved_label = record_label[:64]
+                    if (
+                        resolved_started_at is None
+                        and event == "TURN_SUBMITTED"
+                        and event_turn == turn_id
+                    ):
+                        resolved_started_at = _event_timestamp_unix(
+                            record.get("timestamp_utc")
+                        )
+                    print(
+                        _render_progress(
+                            resolved_label,
+                            event,
+                            details if isinstance(details, dict) else {},
+                        )
+                    )
                     if event == "TURN_STARTED" and event_turn == turn_id:
                         turn_started = True
                     if event in {
@@ -322,7 +456,7 @@ class ChatShell:
                         if isinstance(metadata, dict) and metadata.get("turn_id") == turn_id:
                             content = message.get("content")
                             if isinstance(content, str) and content:
-                                return content
+                                return content, resolved_label, resolved_started_at
                 if terminal_wait_deadline is None:
                     terminal_wait_deadline = time.monotonic() + 15.0
                 if time.monotonic() >= terminal_wait_deadline:
@@ -441,13 +575,21 @@ class ChatShell:
             if self.session.active_turn_id is None:
                 raise ChatCLIError("no_active_agent_turn")
             remote = self._require_remote()
-            rendered = self._watch_agent_turn(
+            rendered, task_label, submitted_at_unix = self._watch_agent_turn(
                 remote,
                 self.session.active_turn_id,
                 after_sequence=0,
             )
             self.session = self.store.update(self.session, active_turn_id=None)
             print(sanitize_terminal(rendered))
+            if submitted_at_unix is not None:
+                print(_render_elapsed(task_label, submitted_at_unix))
+            self.session = self.store.append_message(
+                self.session,
+                role="assistant",
+                content=rendered[:128_000],
+                mode="agent",
+            )
             return True
         if command == "/contract":
             print(sanitize_terminal(self.client.contract_check().__dict__))

@@ -305,6 +305,7 @@ class LaplaceCore:
         max_chars: int,
         verification_argv: Sequence[str] | None,
         wait_timeout_seconds: float,
+        task_label: str | None = None,
     ) -> JsonObject:
         """Run one bounded turn in an explicitly persistent repository session."""
 
@@ -322,6 +323,7 @@ class LaplaceCore:
             max_chars=max_chars,
             verification_argv=verification_argv,
             wait_timeout_seconds=wait_timeout_seconds,
+            task_label=task_label,
         )
 
     def repository_result_page(

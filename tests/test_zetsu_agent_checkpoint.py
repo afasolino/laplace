@@ -1133,6 +1133,7 @@ def test_adaptive_quantum_continues_same_objective_to_finish(tmp_path: Path) -> 
 
     assert result["status"] == "SUCCESS"
     assert result["content"] == "inspection complete"
+    assert result["task_label"] == "component.py VALUE"
     assert result["cumulative_steps"] == 3
     assert result["continuation_count"] == 1
     assert result["failure_category"] is None
@@ -1141,6 +1142,10 @@ def test_adaptive_quantum_continues_same_objective_to_finish(tmp_path: Path) -> 
     assert continuing[0][1]["cumulative_steps"] == 2
     assert continuing[0][1]["progress"] is True
     assert continuing[0][1]["directive"] == "reassess_finish"
+    assert continuing[0][1]["task_label"] == "component.py VALUE"
+    searches = [item for item in tiered.sandboxes.events if item[0] == "REPOSITORY_SEARCH_STARTED"]
+    assert searches[0][1]["query"] == "VALUE"
+    assert searches[0][1]["task_label"] == "component.py VALUE"
     assert len(tiered.sandboxes.results) == 1
     assert tiered.sandboxes.results[0]["resumable"] is False
     assert "reassess_finish" in tiered.prompts[2]

@@ -79,6 +79,7 @@ class _PersistentTurns:
             lane="quality",
             sanitized_model_name="fixture-quality",
             instruction_digest="0" * 64,
+            task_label=str(kwargs["task_label"]),
         )
         self.started.set()
         if self.block and not self.release.wait(timeout=5):
@@ -104,6 +105,7 @@ class _PersistentTurns:
             "repo_id": kwargs["repo_id"],
             "model_id": "fixture-quality",
             "effective_lane": "quality",
+            "task_label": str(kwargs["task_label"]),
             "content": "resumable boundary" if self.resumable else "async completed",
             "changed_paths": [],
             "verification": None,
@@ -273,12 +275,15 @@ async def test_async_turn_survives_request_completion_and_events_are_owner_scope
         assert "TURN_SUBMITTED" in events
         assert "TURN_STARTED" in events
         assert "TURN_COMPLETED" in events
+        assert "Repository Task" in events
         transcript = await resumed.get(
             "/api/v1/agent/sessions/agent-one/messages", headers=headers
         )
         messages = transcript.json()["conversation"]["messages"]
         assert messages[-1]["content"] == "async completed"
         assert messages[-1]["metadata"]["turn_id"] == "turn-00000001"
+        assert messages[-1]["metadata"]["task_label"] == "Repository Task"
+        assert persistent.calls == 1
 
 
 @pytest.mark.anyio

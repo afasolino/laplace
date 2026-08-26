@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from research_workspace.chat_cli import ChatCLIError, ChatShell, sanitize_terminal
+from research_workspace.chat_cli import ChatCLIError, ChatShell, _format_elapsed, sanitize_terminal
 from research_workspace.chat_session import ChatSessionStore
 
 
@@ -109,6 +109,12 @@ def test_terminal_escape_sequences_are_removed():
     assert sanitize_terminal("\x1b[31mBAD\x1b[0m\x07") == "BAD"
 
 
+def test_elapsed_format_is_compact_and_stable():
+    assert _format_elapsed(12.34) == "12.3s"
+    assert _format_elapsed(125.0) == "2m 05s"
+    assert _format_elapsed(3_723.0) == "1h 02m 03s"
+
+
 def test_natural_language_turns_reuse_one_remote_agent_session(tmp_path: Path):
     chat, client = shell(tmp_path)
     chat.session = chat.store.update(chat.session, remote_agent_session_id=None)
@@ -134,7 +140,7 @@ def test_mutating_turn_confirmation_fails_closed_before_remote_call(
     assert client.model_calls == 0
 
 
-def test_async_agent_turn_uses_events_instead_of_waiting_for_sync_http(tmp_path: Path):
+def test_async_agent_turn_uses_events_instead_of_waiting_for_sync_http(tmp_path: Path, capsys):
     class AsyncClient(Client):
         def submit_agent_turn(self, *, session_id, turn_id, **_kwargs):
             self.turn_sessions.append(session_id)
@@ -184,6 +190,63 @@ def test_async_agent_turn_uses_events_instead_of_waiting_for_sync_http(tmp_path:
 
     client.submit_agent_turn = submit_with_turn_id  # type: ignore[method-assign]
     chat._agent_turn("inspect component")
+    output = capsys.readouterr().out
     assert client.model_calls == 0
     assert chat.session.active_turn_id is None
     assert chat.session.messages[-1].content == "completed without a long HTTP wait"
+    assert "Component Task · submitted" in output
+    assert "[Component Task · completed]" in output
+    assert "[Component Task · elapsed " in output
+
+
+def test_watch_recovers_task_label_and_elapsed_from_durable_events(tmp_path: Path, capsys) -> None:
+    class WatchClient(Client):
+        def agent_events(self, session_id, *, after_sequence):
+            assert session_id == "remote-a"
+            assert after_sequence == 0
+            return [
+                {
+                    "sequence": 1,
+                    "event": "TURN_SUBMITTED",
+                    "timestamp_utc": "2026-08-26T16:00:00+00:00",
+                    "details": {"turn_id": "turn-watch-1", "task_label": "Reconnect Agent Task"},
+                },
+                {
+                    "sequence": 2,
+                    "event": "TURN_STARTED",
+                    "timestamp_utc": "2026-08-26T16:00:00+00:00",
+                    "details": {"turn_id": "turn-watch-1", "task_label": "Reconnect Agent Task"},
+                },
+                {
+                    "sequence": 3,
+                    "event": "TURN_COMPLETED",
+                    "timestamp_utc": "2026-08-26T16:00:01+00:00",
+                    "details": {"turn_id": "turn-watch-1", "task_label": "Reconnect Agent Task"},
+                },
+            ]
+
+        def agent_messages(self, session_id):
+            return {
+                "conversation": {
+                    "agent_session_id": session_id,
+                    "repo_id": "repo-a",
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": "reconnected result",
+                            "metadata": {"turn_id": "turn-watch-1"},
+                        }
+                    ],
+                }
+            }
+
+    chat, _ = shell(tmp_path)
+    chat.client = WatchClient()  # type: ignore[assignment]
+    chat.session = chat.store.update(chat.session, active_turn_id="turn-watch-1")
+    assert chat.command("/watch")
+    output = capsys.readouterr().out
+    assert "[Reconnect Agent Task · submitted]" in output
+    assert "[Reconnect Agent Task · completed]" in output
+    assert "[Reconnect Agent Task · elapsed " in output
+    assert "reconnected result" in output
+    assert chat.session.messages[-1].content == "reconnected result"

@@ -21,6 +21,7 @@ from .repository_authorization import (
     RepositoryAuthorizationStore,
     validate_workspace_path,
 )
+from .task_labels import derive_task_label
 
 JsonObject: TypeAlias = dict[str, object]
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
@@ -162,6 +163,7 @@ class AgentSandboxManager:
                     tool_policy_json TEXT NOT NULL,
                     environment_json TEXT NOT NULL,
                     task_title TEXT NOT NULL,
+                    current_task_label TEXT,
                     instruction_digest TEXT NOT NULL,
                     state TEXT NOT NULL,
                     lane TEXT,
@@ -227,6 +229,9 @@ class AgentSandboxManager:
                 ),
                 "last_heartbeat_utc": (
                     "ALTER TABLE worktree_sessions ADD COLUMN last_heartbeat_utc TEXT"
+                ),
+                "current_task_label": (
+                    "ALTER TABLE worktree_sessions ADD COLUMN current_task_label TEXT"
                 ),
             }
             for name, statement in migrations.items():
@@ -910,7 +915,8 @@ class AgentSandboxManager:
             historical = connection.execute(
                 """
                 SELECT repo_id, base_revision, grant_revision, state, changed_paths_json,
-                       diff_hash, verification_summary, physical_state, result_id
+                       diff_hash, verification_summary, physical_state, result_id,
+                       current_task_label
                 FROM worktree_sessions WHERE session_id=? AND user_id=?
                 """,
                 (identifier, user_id),
@@ -930,6 +936,11 @@ class AgentSandboxManager:
                 "diff_hash": historical["diff_hash"],
                 "verification_summary": historical["verification_summary"],
                 "result_id": historical["result_id"],
+                "task_label": (
+                    str(historical["current_task_label"])
+                    if historical["current_task_label"]
+                    else None
+                ),
             }
         binding = self.require_active(session_id, user_id=user_id)
         root = Path(binding.worktree_root)
@@ -974,6 +985,11 @@ class AgentSandboxManager:
             "diff_hash": diff_hash,
             "verification_summary": historical["verification_summary"],
             "result_id": historical["result_id"],
+            "task_label": (
+                str(historical["current_task_label"])
+                if historical["current_task_label"]
+                else None
+            ),
         }
 
     def has_session(self, session_id: str, *, user_id: str) -> bool:
@@ -1106,6 +1122,9 @@ class AgentSandboxManager:
             "updated_at_utc": str(row["updated_at_utc"]),
             "completed_at_utc": row["completed_at_utc"],
             "task_title": str(row["task_title"]),
+            "task_label": (
+                str(row["current_task_label"]) if row["current_task_label"] else None
+            ),
             "instruction_digest": str(row["instruction_digest"]),
             "state": state,
             "lane": row["lane"],
@@ -1148,8 +1167,12 @@ class AgentSandboxManager:
         sanitized_model_name: str,
         instruction_digest: str | None = None,
         remaining_wall_seconds: float | None = None,
+        task_label: str | None = None,
     ) -> JsonObject:
         binding = self.require_active(session_id, user_id=user_id)
+        normalized_task_label = (
+            derive_task_label(task_label) if task_label is not None else None
+        )
         if instruction_digest is not None and not re.fullmatch(r"[a-f0-9]{64}", instruction_digest):
             raise AgentSandboxError("invalid_instruction_digest")
         if remaining_wall_seconds is not None and not (
@@ -1164,17 +1187,19 @@ class AgentSandboxManager:
         boot_id = self._boot_identity()
         if start_ticks is None or boot_id is None:
             raise AgentSandboxError("executor_identity_unavailable")
-        self._set_state(
-            binding,
-            "RUNNING",
-            "TASK_STARTED",
-            {"lane": lane, "model_name": sanitized_model_name},
-        )
+        start_details: JsonObject = {
+            "lane": lane,
+            "model_name": sanitized_model_name,
+        }
+        if normalized_task_label is not None:
+            start_details["task_label"] = normalized_task_label
+        self._set_state(binding, "RUNNING", "TASK_STARTED", start_details)
         with self._connect() as connection:
             connection.execute(
                 """
-                UPDATE worktree_sessions SET lane=?, sanitized_model_name=?
-                    , instruction_digest=COALESCE(?, instruction_digest), executor_pid=?,
+                UPDATE worktree_sessions SET lane=?, sanitized_model_name=?,
+                    current_task_label=?,
+                    instruction_digest=COALESCE(?, instruction_digest), executor_pid=?,
                     executor_start_ticks=?, executor_boot_id=?, wall_deadline_utc=?,
                     last_heartbeat_utc=?
                 WHERE session_id=? AND user_id=?
@@ -1182,6 +1207,7 @@ class AgentSandboxManager:
                 (
                     lane,
                     sanitized_model_name,
+                    normalized_task_label,
                     instruction_digest,
                     os.getpid(),
                     start_ticks,
@@ -1282,17 +1308,18 @@ class AgentSandboxManager:
                 if resumable
                 else ("TASK_FAILED" if failed else "TASK_COMPLETED")
             )
-            self._event(
-                connection,
-                binding,
-                event,
-                state,
-                {
-                    "changed_paths": list(changed_paths),
-                    "diff_hash": diff_hash,
-                    "result_id": result_id,
-                },
-            )
+            current = connection.execute(
+                "SELECT current_task_label FROM worktree_sessions WHERE session_id=? AND user_id=?",
+                (session_id, user_id),
+            ).fetchone()
+            details: JsonObject = {
+                "changed_paths": list(changed_paths),
+                "diff_hash": diff_hash,
+                "result_id": result_id,
+            }
+            if current is not None and current["current_task_label"]:
+                details["task_label"] = str(current["current_task_label"])
+            self._event(connection, binding, event, state, details)
         self._live_executors.discard(session_id)
         return self.inspect(session_id, user_id=user_id)
 

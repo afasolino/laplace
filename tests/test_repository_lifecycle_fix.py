@@ -445,3 +445,32 @@ def test_authenticated_sessions_cli_reports_quota_and_release_flags(tmp_path: Pa
     assert record["worktree_path"]
     assert record["counts_against_quota"] is True
     assert record["worktree_clean"] is True
+
+
+def test_current_task_label_is_durable_in_status_and_terminal_events(tmp_path: Path) -> None:
+    manager, _, _, _ = _manager(tmp_path)
+    _binding(manager, "labeled-task")
+    manager.start_task(
+        "labeled-task",
+        user_id="owner",
+        lane="quality",
+        sanitized_model_name="fixture",
+        instruction_digest="0" * 64,
+        task_label="Inspect scheduler flow",
+    )
+    running = manager.status("labeled-task", user_id="owner")
+    assert running["task_label"] == "Scheduler Flow"
+    started = manager.events("labeled-task", user_id="owner", after_sequence=0)[-1]
+    assert started["event"] == "TASK_STARTED"
+    assert started["details"]["task_label"] == "Scheduler Flow"
+
+    manager.record_result(
+        "labeled-task",
+        user_id="owner",
+        command_count=0,
+        verification_summary="PASSED:read_only",
+        result_id="res_" + "1" * 32,
+    )
+    terminal = manager.events("labeled-task", user_id="owner", after_sequence=0)[-1]
+    assert terminal["event"] == "TASK_COMPLETED"
+    assert terminal["details"]["task_label"] == "Scheduler Flow"

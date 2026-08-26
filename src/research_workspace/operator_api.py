@@ -65,6 +65,7 @@ from .research_plane import DeepResearchService, ResearchPlaneError
 from .research_web_adapters import supported_web_adapter_names
 from .repository_authorization import RepositoryAuthorizationError
 from .service_tiers import ModelLane, ServiceTierError, TieredServingService
+from .task_labels import derive_task_label
 from .serving_profile_runtime import (
     ServingProfileOperator,
     ServingRuntimeError,
@@ -3159,6 +3160,7 @@ def create_operator_app(
                 max_chars=body.max_chars,
                 verification_argv=body.verification_argv,
                 wait_timeout_seconds=body.wait_timeout_seconds,
+                task_label=derive_task_label(body.instruction),
             )
         else:
             result = await run_in_threadpool(
@@ -3172,6 +3174,7 @@ def create_operator_app(
                 max_chars=body.max_chars,
                 verification_argv=body.verification_argv,
                 wait_timeout_seconds=body.wait_timeout_seconds,
+                task_label=derive_task_label(body.instruction),
             )
         result["retrieval"] = retrieval
         return result
@@ -3193,6 +3196,7 @@ def create_operator_app(
                         "delivery_status",
                         "verification_status",
                         "changed_paths",
+                        "task_label",
                     )
                 }
                 if turn_id is not None:
@@ -3235,6 +3239,7 @@ def create_operator_app(
                     "lane": body.lane,
                     "domain": body.domain,
                     "retrieval_selection": body.retrieval_selection,
+                    "task_label": derive_task_label(body.instruction),
                 },
             )
         result = await _execute_prepared_agent_turn(
@@ -3312,6 +3317,7 @@ def create_operator_app(
             active = agent_turn_tasks.get(key)
             if active is not None and not active[1].done() and active[0] != body.turn_id:
                 raise HTTPException(status_code=409, detail="agent_session_turn_in_progress")
+            task_label = derive_task_label(body.instruction)
             conversation_store.append_agent_message(
                 authenticated.user_id,
                 session_id,
@@ -3323,13 +3329,14 @@ def create_operator_app(
                     "lane": body.lane,
                     "domain": body.domain,
                     "retrieval_selection": body.retrieval_selection,
+                    "task_label": task_label,
                 },
             )
             submitted = require_tiered().sandboxes.record_progress(
                 session_id,
                 user_id=authenticated.user_id,
                 event="TURN_SUBMITTED",
-                details={"turn_id": body.turn_id, "lane": body.lane},
+                details={"turn_id": body.turn_id, "lane": body.lane, "task_label": task_label},
             )
 
             async def run_submitted_turn() -> None:
@@ -3338,7 +3345,7 @@ def create_operator_app(
                         session_id,
                         user_id=authenticated.user_id,
                         event="TURN_STARTED",
-                        details={"turn_id": body.turn_id},
+                        details={"turn_id": body.turn_id, "task_label": task_label},
                     )
                     result = await _execute_prepared_agent_turn(
                         session_id=session_id,
@@ -3368,6 +3375,7 @@ def create_operator_app(
                             "turn_id": body.turn_id,
                             "status": status,
                             "result_id": result.get("result_id"),
+                            "task_label": task_label,
                         },
                     )
                 except Exception as exc:
@@ -3383,7 +3391,11 @@ def create_operator_app(
                             session_id,
                             role="assistant",
                             content=f"Agent turn ended: {category}",
-                            metadata={"turn_id": body.turn_id, "status": category},
+                            metadata={
+                                "turn_id": body.turn_id,
+                                "status": category,
+                                "task_label": task_label,
+                            },
                         )
                     except Exception:
                         LOGGER.exception(
@@ -3395,7 +3407,11 @@ def create_operator_app(
                             session_id,
                             user_id=authenticated.user_id,
                             event=event,
-                            details={"turn_id": body.turn_id, "category": category},
+                            details={
+                                "turn_id": body.turn_id,
+                                "category": category,
+                                "task_label": task_label,
+                            },
                         )
                     except AgentSandboxError:
                         # The coordinator may have safely released a clean
