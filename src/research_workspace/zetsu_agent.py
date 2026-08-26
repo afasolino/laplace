@@ -1141,10 +1141,16 @@ class ZetsuAgentCoordinator:
             return str(raw)[-limit:]
         return raw.decode("utf-8", errors="replace")
 
+    @staticmethod
+    def _verification_tool_allowed(allowed_tools: Sequence[str]) -> bool:
+        """Accept the canonical verifier capability and its persisted legacy alias."""
+
+        return "run_tests" in allowed_tools or "run_validation" in allowed_tools
+
     def _verify(
         self, ctx: AgentRunContext, state: AgentExecutionState, action: Mapping[str, object]
     ) -> JsonObject:
-        if "run_tests" not in ctx.binding.tool_policy.allowed_tools:
+        if not self._verification_tool_allowed(ctx.binding.tool_policy.allowed_tools):
             raise ServiceTierError("zetsu_agent_verify_not_allowed")
         argv = self._verify_argv(ctx.worktree, action.get("argv"))
         self._progress(ctx, "VERIFICATION_STARTED")

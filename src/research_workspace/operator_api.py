@@ -187,7 +187,7 @@ class AgentSessionRequest(BaseModel):
     repo_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
     session_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
     allowed_tools: list[str] = Field(
-        default_factory=lambda: ["read_file", "apply_patch", "run_validation"],
+        default_factory=lambda: ["read_file", "apply_patch", "run_tests"],
         min_length=1,
         max_length=20,
     )
