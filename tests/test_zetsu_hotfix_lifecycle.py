@@ -920,3 +920,96 @@ async def test_nocodev_readiness_is_ready_with_only_qwen_and_operator(
     assert payload["status"] == "READY"
     assert payload["codev"] == "intentionally_disabled"
     assert not any(reason.endswith(":economy") for reason in payload["reasons"])
+
+
+def test_bounded_persistent_yield_remains_resumable(tmp_path: Path) -> None:
+    manager, _, _ = _manager(tmp_path, quota=2)
+    root = _binding(manager, "persistent-yield")
+
+    checkpoint = (
+        manager.sandbox_root
+        / "zetsu_agent_checkpoints"
+        / f"{hashlib.sha256(b'persistent-yield').hexdigest()}.json"
+    )
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_text(
+        json.dumps(
+            {
+                "session_id": "persistent-yield",
+                "user_id_sha256": hashlib.sha256(b"owner").hexdigest(),
+                "repo_id": "repo",
+                "base_revision": manager.require_active(
+                    "persistent-yield", user_id="owner"
+                ).base_revision,
+                "worktree_head": _git(root, "rev-parse", "HEAD"),
+                "worktree_status_sha256": hashlib.sha256(b"").hexdigest(),
+                "changed_paths": [],
+                "consumed_wall_seconds": 1.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result_id = "res_" + ("1" * 32)
+    recorded = manager.record_result(
+        "persistent-yield",
+        user_id="owner",
+        command_count=12,
+        verification_summary="INCOMPLETE:max_steps_exhausted",
+        resumable=True,
+        result_id=result_id,
+    )
+
+    assert recorded["state"] == "INTERRUPTED_RESUMABLE"
+    assert recorded["result_id"] == result_id
+
+    status = manager.status("persistent-yield", user_id="owner")
+    assert status["lifecycle_state"] == "INTERRUPTED_RESUMABLE"
+    assert status["result_id"] == result_id
+    assert root.is_dir()
+
+    with manager._connect() as connection:
+        event = connection.execute(
+            """
+            SELECT event, state
+            FROM worktree_events
+            WHERE session_id=?
+            ORDER BY sequence DESC
+            LIMIT 1
+            """,
+            ("persistent-yield",),
+        ).fetchone()
+
+    assert event is not None
+    assert event["event"] == "TASK_YIELDED_RESUMABLE"
+    assert event["state"] == "INTERRUPTED_RESUMABLE"
+
+    reconciled = manager.reconcile(
+        dry_run=False,
+        user_id="owner",
+        session_id="persistent-yield",
+        limit=1,
+    )
+    assert reconciled["released"] == 0
+    assert root.is_dir()
+    assert (
+        manager.status("persistent-yield", user_id="owner")["lifecycle_state"]
+        == "INTERRUPTED_RESUMABLE"
+    )
+
+
+def test_record_result_rejects_conflicting_resumable_failure_state(
+    tmp_path: Path,
+) -> None:
+    manager, _, _ = _manager(tmp_path)
+    _binding(manager, "invalid-yield")
+
+    with pytest.raises(AgentSandboxError, match="result_state_invalid"):
+        manager.record_result(
+            "invalid-yield",
+            user_id="owner",
+            command_count=1,
+            verification_summary="FAILED:fixture",
+            failed=True,
+            resumable=True,
+        )

@@ -2373,10 +2373,15 @@ class ZetsuAgentCoordinator:
                 ctx, state, exc.category, terminal=not persistent_session
             )
             raise
+        resumable = persistent_session and status == "INCOMPLETE"
         verification_summary = (
             f"PASSED:verified_epoch={state.last_verified_epoch}"
             if status == "SUCCESS"
-            else f"FAILED:{failure_category or 'incomplete'}"
+            else (
+                f"INCOMPLETE:{failure_category or 'incomplete'}"
+                if resumable
+                else f"FAILED:{failure_category or 'incomplete'}"
+            )
         )
         authoritative: JsonObject = {
             "status": status,
@@ -2429,8 +2434,9 @@ class ZetsuAgentCoordinator:
             user_id=user_id,
             command_count=state.command_count,
             verification_summary=verification_summary,
-            failed=status != "SUCCESS",
+            failed=status != "SUCCESS" and not resumable,
             terminal=not persistent_session,
+            resumable=resumable,
             result_id=result_id,
         )
         cleanup = getattr(self.tiered.sandboxes, "authorize_terminal_cleanup", None)

@@ -979,6 +979,7 @@ def test_persistent_agent_turn_reuses_worktree_and_carries_verified_summary(
 
         def __init__(self) -> None:
             self.terminal_flags: list[bool] = []
+            self.resumable_flags: list[bool] = []
 
         @staticmethod
         def require_active(_session_id: str, *, user_id: str) -> AgentSessionBinding:
@@ -991,6 +992,7 @@ def test_persistent_agent_turn_reuses_worktree_and_carries_verified_summary(
 
         def record_result(self, *_args: object, **kwargs: object) -> dict[str, object]:
             self.terminal_flags.append(bool(kwargs["terminal"]))
+            self.resumable_flags.append(bool(kwargs.get("resumable", False)))
             return {"status": "ACTIVE_CLEAN"}
 
     class Tiered:
@@ -1012,6 +1014,7 @@ def test_persistent_agent_turn_reuses_worktree_and_carries_verified_summary(
         def __init__(self) -> None:
             self.prompts: list[str] = []
             self.results = iter(("first inspected result", "second follow-up result"))
+            self.yield_mode = False
 
         @staticmethod
         def agent_session_status(**_kwargs: object) -> dict[str, object]:
@@ -1022,6 +1025,15 @@ def test_persistent_agent_turn_reuses_worktree_and_carries_verified_summary(
             assert isinstance(messages, list | tuple)
             prompt = json.dumps(messages)
             self.prompts.append(prompt)
+            if self.yield_mode:
+                return {
+                    "response": {
+                        "content": json.dumps(
+                            {"action": "search", "query": "fixture-never-matches", "glob": "*.py"}
+                        ),
+                        "usage": {"prompt_tokens": 100, "completion_tokens": 10},
+                    }
+                }
             result = next(self.results)
             return {
                 "response": {
@@ -1058,14 +1070,33 @@ def test_persistent_agent_turn_reuses_worktree_and_carries_verified_summary(
         wait_timeout_seconds=30,
     )
 
-    assert first["session_id"] == second["session_id"] == "chat-agent-session"
+    tiered.yield_mode = True
+    third = coordinator.run_turn(
+        user_id="user-a",
+        repo_id="repo",
+        instruction="Continue inspecting without finishing yet",
+        lane=ModelLane.QUALITY,
+        session_id="chat-agent-session",
+        max_steps=4,
+        max_chars=2_000,
+        verification_argv=("pytest", "-q"),
+        wait_timeout_seconds=30,
+    )
+
+    assert first["session_id"] == second["session_id"] == third["session_id"] == "chat-agent-session"
     assert first["worktree_release"] == {"action": "PRESERVED_FOR_CONTINUATION"}
     assert second["worktree_release"] == {"action": "PRESERVED_FOR_CONTINUATION"}
-    assert tiered.sandboxes.terminal_flags == [False, False]
+    assert third["worktree_release"] == {"action": "PRESERVED_FOR_CONTINUATION"}
+    assert third["status"] == "INCOMPLETE"
+    assert third["content"] == "Maximum bounded agent steps reached before verified finish."
+    assert tiered.sandboxes.terminal_flags == [False, False, False]
+    assert tiered.sandboxes.resumable_flags == [False, False, True]
     assert "first inspected result" in tiered.prompts[1]
-    assert coordinator.checkpoints.read("chat-agent-session")[
-        "required_verification_argv"
-    ] == ["pytest", "-q"]
+
+    checkpoint = coordinator.checkpoints.read("chat-agent-session")
+    assert checkpoint is not None
+    assert checkpoint["required_verification_argv"] == ["pytest", "-q"]
+    assert checkpoint["next_state"] == "choose_action"
 
 
 def test_checkpoint_resume_binds_route_and_required_verifier(tmp_path: Path, monkeypatch) -> None:

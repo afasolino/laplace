@@ -1170,17 +1170,21 @@ class AgentSandboxManager:
         verification_summary: str,
         failed: bool = False,
         terminal: bool = False,
+        resumable: bool = False,
         result_id: str | None = None,
     ) -> JsonObject:
         if result_id is not None and re.fullmatch(r"res_[a-f0-9]{32}", result_id) is None:
             raise AgentSandboxError("result_id_invalid")
+        if resumable and (failed or terminal):
+            raise AgentSandboxError("result_state_invalid")
         binding = self.require_active(session_id, user_id=user_id)
         changed_paths, diff_hash = self._diff_summary(binding)
-        state = (
-            ("FAILED_TERMINAL" if failed else "SUCCEEDED")
-            if terminal
-            else ("FAILED" if failed else ("DIRTY" if changed_paths else "ACTIVE"))
-        )
+        if resumable:
+            state = "INTERRUPTED_RESUMABLE"
+        elif terminal:
+            state = "FAILED_TERMINAL" if failed else "SUCCEEDED"
+        else:
+            state = "FAILED" if failed else ("DIRTY" if changed_paths else "ACTIVE")
         now = datetime.now(UTC).isoformat()
         with self._connect() as connection:
             connection.execute(
@@ -1207,10 +1211,15 @@ class AgentSandboxManager:
                     user_id,
                 ),
             )
+            event = (
+                "TASK_YIELDED_RESUMABLE"
+                if resumable
+                else ("TASK_FAILED" if failed else "TASK_COMPLETED")
+            )
             self._event(
                 connection,
                 binding,
-                "TASK_FAILED" if failed else "TASK_COMPLETED",
+                event,
                 state,
                 {
                     "changed_paths": list(changed_paths),
