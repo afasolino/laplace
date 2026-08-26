@@ -55,6 +55,14 @@ calls. Exit and resume with `laplace chat --resume last`; both the local termina
 state and its remote session ID are root/repository checked. See
 [LAPLACE_CHAT.md](LAPLACE_CHAT.md) for command and token details.
 
+### Governed self-improvement
+
+Use `laplace-maintenance` when you want to turn bounded trajectory and memory
+evidence into reviewable improvement proposals. It is intentionally shadow-only:
+it cannot edit code, activate a skill, change routing, or promote itself. The
+complete cycle, frozen A/B evidence format, held-out requirement, and human
+approval workflow are in [SELF_IMPROVEMENT.md](SELF_IMPROVEMENT.md).
+
 ## 1. Open Laplace
 
 For local use, open `http://127.0.0.1:8765`. Through an SSH tunnel, open the same URL on your client. For production HTTPS, use the exact URL supplied by the administrator.

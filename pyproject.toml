@@ -25,6 +25,7 @@ laplace-operator-server = "research_workspace.operator_server:main"
 research = "research_workspace.research_cli:main"
 laplace-migrate = "research_workspace.migration_cli:main"
 laplace-client = "research_workspace.client_bridge:main"
+laplace-maintenance = "research_workspace.maintenance_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -16,7 +16,7 @@ import tomllib
 import venv
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Sequence
+from typing import Sequence, TypedDict
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT_VERSION = str(
@@ -34,6 +34,18 @@ FORBIDDEN_PARTS = {
 }
 
 
+class CommandResult(TypedDict):
+    command: list[str]
+    returncode: int
+    status: str
+    output_tail: str
+
+
+class BuildResult(TypedDict):
+    command: CommandResult
+    artifacts: list[Path]
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -42,7 +54,7 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _command(arguments: Sequence[str], *, environment: dict[str, str]) -> dict[str, object]:
+def _command(arguments: Sequence[str], *, environment: dict[str, str]) -> CommandResult:
     completed = subprocess.run(  # nosec B603
         list(arguments),
         cwd=ROOT,
@@ -91,21 +103,21 @@ def _inspect_distribution(path: Path) -> dict[str, object]:
     members: list[str] = []
     if path.suffix == ".whl":
         with zipfile.ZipFile(path) as archive:
-            for info in archive.infolist():
-                logical = _safe_member(info.filename)
-                member_mode = (info.external_attr >> 16) & 0o170000
+            for zip_info in archive.infolist():
+                logical = _safe_member(zip_info.filename)
+                member_mode = (zip_info.external_attr >> 16) & 0o170000
                 if member_mode == 0o120000:
                     raise RuntimeError("unsafe_distribution_member_type")
-                if info.file_size > 50 * 1024 * 1024:
+                if zip_info.file_size > 50 * 1024 * 1024:
                     raise RuntimeError("distribution_member_oversize")
                 members.append(logical.as_posix())
     else:
         with tarfile.open(path, "r:gz") as archive:
-            for info in archive.getmembers():
-                logical = _safe_member(info.name)
-                if info.issym() or info.islnk() or info.isdev():
+            for tar_info in archive.getmembers():
+                logical = _safe_member(tar_info.name)
+                if tar_info.issym() or tar_info.islnk() or tar_info.isdev():
                     raise RuntimeError("unsafe_distribution_member_type")
-                if info.size > 50 * 1024 * 1024:
+                if tar_info.size > 50 * 1024 * 1024:
                     raise RuntimeError("distribution_member_oversize")
                 members.append(logical.as_posix())
     if not members:
@@ -147,7 +159,7 @@ def _normalize_sdist(path: Path, *, epoch: int) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _build(target: Path, environment: dict[str, str]) -> dict[str, object]:
+def _build(target: Path, environment: dict[str, str]) -> BuildResult:
     target.mkdir()
     command = _command(
         [
@@ -223,10 +235,29 @@ def _install_smoke(wheel: Path, environment: dict[str, str], temporary: Path) ->
         version["output_tail"]
     ):
         raise RuntimeError("console_entrypoint_smoke_failed")
+    maintenance = temporary / (
+        "Scripts/laplace-maintenance.exe" if os.name == "nt" else "bin/laplace-maintenance"
+    )
+    if not maintenance.is_file():
+        raise RuntimeError("maintenance_console_entrypoint_missing")
+    maintenance_status = _command(
+        [
+            str(maintenance),
+            "--state-root",
+            str(temporary / "maintenance-state"),
+            "status",
+        ],
+        environment=environment,
+    )
+    if maintenance_status["status"] != "PASS" or '"mode": "SHADOW"' not in str(
+        maintenance_status["output_tail"]
+    ):
+        raise RuntimeError("maintenance_console_entrypoint_smoke_failed")
     return {
         "install": install,
         "import_smoke": smoke,
         "console_entrypoint_smoke": version,
+        "maintenance_console_entrypoint_smoke": maintenance_status,
     }
 
 
@@ -265,10 +296,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             first = _build(temporary / "first", environment)
             second = _build(temporary / "second", environment)
             first_artifacts = {
-                path.name: path for path in first["artifacts"]  # type: ignore[union-attr]
+                path.name: path for path in first["artifacts"]
             }
             second_artifacts = {
-                path.name: path for path in second["artifacts"]  # type: ignore[union-attr]
+                path.name: path for path in second["artifacts"]
             }
             if first_artifacts.keys() != second_artifacts.keys():
                 raise RuntimeError("package_filenames_not_reproducible")

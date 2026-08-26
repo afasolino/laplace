@@ -17,6 +17,7 @@ runtime is present on every host.
 | Worktree lifecycle | Zetsu sessions/worktrees; Operator worktree view | Owner-only quota, stale clean reclamation, dirty preservation, durable result evidence, no ordinary force delete | lifecycle, sandbox, hotfix tests |
 | Retrieval and personal corpus | Operator Knowledge; Core retrieval | Owner-scoped, incremental, provenance-bearing documents; corpus content is read-only to agent and never mounted into a worktree | corpus/authentication tests |
 | Memory, rules, context | Core services | Schema compatibility fails closed; rules precede advisory memory/retrieval; bounded compaction | memory/rules/context tests |
+| Governed self-improvement | `laplace-maintenance` | Deterministic shadow proposals only; frozen A/B + held-out evidence and human approval are required; no auto-promotion or execution | `tests/test_idle_consolidation_g10.py`, `tests/test_maintenance_cli.py`, `docs/SELF_IMPROVEMENT.md` |
 | Bounded ACI | Repository agent | Path validation, continuation reads, atomic chunked writes, no generic shell/network surface | ACI and agent tests |
 | Scheduler and GPU admission | Tiered serving; repository/logical agents | FIFO bounded queue, atomic reservation accounting, separate queue/execution budgets, release on terminal paths | corrective scheduler tests |
 | Qwen serving | Operator routes and Zetsu | Existing certified local serving/routing is preserved; normal Qwen operation does not require CodeV | serving and runtime tests |

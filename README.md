@@ -174,6 +174,7 @@ rewrite the v2 branch.
 - [User workflow](docs/USER_GUIDE.md)
 - [Laplace Chat terminal guide](docs/LAPLACE_CHAT.md)
 - [Feature matrix and production evidence](docs/FEATURE_MATRIX.md)
+- [Governed self-improvement guide](docs/SELF_IMPROVEMENT.md)
 - [Zetsu operations](docs/ZETSU.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)

@@ -842,7 +842,11 @@ def _candidate_from_json(path: Path) -> ServingCandidate:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run Laplace-only quality improvement evidence.")
-    parser.add_argument("--candidate-json", required=True, type=Path)
+    parser.add_argument(
+        "--candidate-json",
+        type=Path,
+        help="Measured local serving candidate; required unless --analysis-only is selected.",
+    )
     parser.add_argument(
         "--output-root", type=Path, default=Path("outputs/a6000_agent_team/quality_improvement")
     )
@@ -869,8 +873,13 @@ def main(argv: list[str] | None = None) -> int:
     output = (root / arguments.output_root).resolve()
     output.mkdir(parents=True, exist_ok=True)
     if arguments.analysis_only:
-        write_failure_analysis(root, output)
+        try:
+            write_failure_analysis(root, output)
+        except (OSError, RuntimeError, ValueError) as exc:
+            parser.error(f"analysis-only requires the recorded quality evidence: {exc}")
         return 0
+    if arguments.candidate_json is None:
+        parser.error("--candidate-json is required unless --analysis-only is selected")
     candidate = _candidate_from_json(arguments.candidate_json)
     cuda = LocalToolRunner(root).run("cuda_probe", ["nvidia-smi", "-L"], timeout_seconds=30)
     if cuda.status != "PASS" or "A6000" not in cuda.stdout:
