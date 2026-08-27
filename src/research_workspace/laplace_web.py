@@ -193,22 +193,17 @@ class WebController:
             verifier = resolve_verification(self.verifiers, session.session_id, supplied_verifier)
         except ChatVerificationError as exc:
             raise LaplaceWebError(str(exc)) from exc
-        if decision.route == "agent" and access == "write" and verifier is None:
+        allow_mutation = decision.route == "agent" and access == "write"
+        if allow_mutation and verifier is None:
             raise LaplaceWebError("write_access_requires_verification")
         client = self._client()
-        self.store.append_message(session, role="user", content=text, mode=session_mode)
-        session = self.store.load(
-            session.session_id,
-            repo_id=self.repo_id,
-            repository_root=str(self.repository_root),
-        )
-        current.append({"role": "user", "content": text})
         if decision.route in {"chat", "retrieval"}:
             messages = [
                 {"role": item.role, "content": item.content}
                 for item in session.messages
                 if item.mode == "chat"
             ]
+            messages.append({"role": "user", "content": text})
             if decision.route == "retrieval":
                 payload = client.chat(
                     lane=session.lane,
@@ -256,11 +251,16 @@ class WebController:
                 lane=session.lane,
                 domain=session.domain,
                 verification_argv=verifier,
+                allow_mutation=allow_mutation,
             )
             response = extract_display_text(payload) or str(payload)
+        session = self.store.append_message(
+            session, role="user", content=text, mode=session_mode
+        )
         self.store.append_message(
             session, role="assistant", content=response[:128_000], mode=session_mode
         )
+        current.append({"role": "user", "content": text})
         current.append({"role": "assistant", "content": response})
         status = (
             f"session={session.session_id} · mode={session_mode} · route={decision.route} "

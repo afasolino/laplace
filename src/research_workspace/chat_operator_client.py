@@ -643,6 +643,7 @@ class OperatorClient:
         max_steps: int | None = None,
         max_chars: int | None = None,
         verification_argv: Sequence[str] | None = None,
+        allow_mutation: bool = False,
         wait_timeout_seconds: int | None = None,
     ) -> JsonObject:
         contract = self.contract_check()
@@ -661,6 +662,7 @@ class OperatorClient:
                 "verification_argv": (
                     list(verification_argv) if verification_argv is not None else None
                 ),
+                "allow_mutation": allow_mutation,
                 "wait_timeout_seconds": wait_timeout_seconds,
             },
         )
@@ -679,6 +681,7 @@ class OperatorClient:
         max_steps: int | None = None,
         max_chars: int | None = None,
         verification_argv: Sequence[str] | None = None,
+        allow_mutation: bool = False,
         wait_timeout_seconds: int | None = None,
     ) -> AgentTurnSubmission | None:
         """Submit one idempotent durable turn when the Operator exposes it.
@@ -708,6 +711,7 @@ class OperatorClient:
                 "verification_argv": (
                     list(verification_argv) if verification_argv is not None else None
                 ),
+                "allow_mutation": allow_mutation,
                 "wait_timeout_seconds": wait_timeout_seconds,
             },
         )

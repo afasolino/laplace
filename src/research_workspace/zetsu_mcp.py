@@ -232,6 +232,7 @@ def tool_definitions() -> tuple[JsonObject, ...]:
                         "items": {"type": "string", "minLength": 1, "maxLength": 1_000},
                     },
                     "apply_to_repository": {"type": "boolean"},
+                    "allow_mutation": {"type": "boolean"},
                     "wait_timeout_seconds": {
                         "type": "integer",
                         "minimum": 1,
@@ -397,6 +398,7 @@ _TOOL_ARGUMENTS: Mapping[str, frozenset[str]] = {
             "max_chars",
             "verification_argv",
             "apply_to_repository",
+            "allow_mutation",
             "wait_timeout_seconds",
             "telemetry",
         }
@@ -727,6 +729,14 @@ class ZetsuService:
             if lane_value not in {"quality", "standard"}:
                 raise ZetsuError("invalid_agent_lane")
             verification_argv = _verification_argv(args.get("verification_argv"))
+            apply_to_repository = _boolean(args, "apply_to_repository")
+            allow_mutation = _boolean(
+                args,
+                "allow_mutation",
+                default=apply_to_repository,
+            )
+            if allow_mutation and verification_argv is None:
+                raise ZetsuError("agent_mutation_requires_verifier")
             result = self._agent_service().run(
                 user_id=user_id,
                 repo_id=repo_id,
@@ -743,7 +753,8 @@ class ZetsuService:
                     maximum=24_000,
                 ),
                 verification_argv=verification_argv,
-                apply_to_repository=_boolean(args, "apply_to_repository"),
+                apply_to_repository=apply_to_repository,
+                allow_mutation=allow_mutation,
                 wait_timeout_seconds=_integer(
                     args.get("wait_timeout_seconds", 1_800),
                     label="wait_timeout_seconds",

@@ -127,13 +127,21 @@ def install(
     }
 
 
-def status(*, runner: Runner = _run, codex_executable: str | None = None) -> JsonObject:
+def status(
+    *,
+    repository: Path | None = None,
+    runner: Runner = _run,
+    codex_executable: str | None = None,
+) -> JsonObject:
     codex = codex_executable or _codex()
     result = _get(codex, runner)
-    return {
+    payload: JsonObject = {
         "status": "CONFIGURED" if result.returncode == 0 else "NOT_CONFIGURED",
         "codex": result.stdout.strip() if result.returncode == 0 else result.stderr.strip(),
     }
+    if repository is not None:
+        payload["repository"] = str(repository.expanduser().resolve())
+    return payload
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -144,7 +152,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     install_parser.add_argument("--state-root", type=Path, default=default_state_root())
     install_parser.add_argument("--endpoint", default=os.environ.get("LAPLACE_ZETSU_ENDPOINT", DEFAULT_ENDPOINT))
     install_parser.add_argument("--replace", action="store_true")
-    sub.add_parser("status")
+    status_parser = sub.add_parser("status")
+    status_parser.add_argument("--repo", type=Path, default=Path.cwd())
     sub.add_parser("remove")
     launch = sub.add_parser("launch")
     launch.add_argument("codex_args", nargs=argparse.REMAINDER)
@@ -160,7 +169,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 0
         if args.command == "status":
-            print(json.dumps(status(), indent=2, sort_keys=True))
+            print(json.dumps(status(repository=args.repo), indent=2, sort_keys=True))
             return 0
         codex = _codex()
         if args.command == "remove":

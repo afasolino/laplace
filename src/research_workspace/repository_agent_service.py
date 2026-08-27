@@ -27,6 +27,7 @@ class RepositoryAgentService(Protocol):
         apply_to_repository: bool,
         wait_timeout_seconds: float,
         task_label: str | None = None,
+        allow_mutation: bool = True,
     ) -> JsonObject:
         """Run one bounded repository task through the selected adapter."""
         ...
@@ -78,6 +79,7 @@ class RepositoryAgentConversationService(RepositoryAgentService, Protocol):
         verification_argv: Sequence[str] | None,
         wait_timeout_seconds: float,
         task_label: str | None = None,
+        allow_mutation: bool = False,
     ) -> JsonObject:
         """Run one bounded turn without terminalizing the owned worktree."""
         ...

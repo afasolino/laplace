@@ -185,6 +185,7 @@ def test_old_and_typed_edit_surfaces_preserve_frozen_repair_semantics(tmp_path: 
     context = SimpleNamespace(
         worktree=old_root,
         binding=SimpleNamespace(tool_policy=SimpleNamespace(allowed_tools=("apply_patch",))),
+        allow_mutation=True,
     )
     old_observation = coordinator._edit(
         context,  # type: ignore[arg-type]

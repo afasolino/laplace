@@ -291,20 +291,20 @@ class ChatShell:
         if conversation.get("repo_id") != self.session.repo_id:
             raise ChatCLIError("agent_session_repository_mismatch")
 
-    def _confirm_agent_turn(self) -> None:
+    def _confirm_agent_turn(self) -> bool:
         self._require_agent_authorized()
-        if self.verification_argv is None:
-            return
         if self.session.access_mode == "read":
-            raise ChatCLIError(
-                "agent_mode_disabled_by_read_access:"
-                "use_/access_confirm_or_/access_write_or_/mode_chat"
-            )
+            return False
+        if self.verification_argv is None:
+            if self.session.access_mode == "write":
+                raise ChatCLIError("write_access_requires_verification")
+            return False
         if self.session.access_mode == "write":
-            return
+            return True
         answer = input("Allow this bounded agent turn to mutate its authorized worktree? [y/N] ")
         if answer.strip().lower() not in {"y", "yes"}:
             raise ChatCLIError("agent_turn_cancelled")
+        return True
 
     def _ensure_remote_agent(self, *, task_title: str) -> str:
         if self.session.remote_agent_session_id:
@@ -394,7 +394,7 @@ class ChatShell:
         task_label = derive_task_label(text)
         if self.session.active_turn_id is not None:
             raise ChatCLIError("agent_turn_active:use_/watch_or_/cancel")
-        self._confirm_agent_turn()
+        allow_mutation = self._confirm_agent_turn()
         remote = self._ensure_remote_agent(task_title=text)
         self.session = self.store.append_message(
             self.session,
@@ -415,6 +415,7 @@ class ChatShell:
                 max_steps=self.max_steps,
                 max_chars=self.max_chars,
                 verification_argv=self.verification_argv,
+                allow_mutation=allow_mutation,
                 wait_timeout_seconds=self.wait_timeout_seconds,
             )
             if callable(submit)
@@ -456,6 +457,7 @@ class ChatShell:
             max_steps=self.max_steps,
             max_chars=self.max_chars,
             verification_argv=self.verification_argv,
+            allow_mutation=allow_mutation,
             wait_timeout_seconds=self.wait_timeout_seconds,
         )
         self.session = self.store.update(self.session, active_turn_id=None)

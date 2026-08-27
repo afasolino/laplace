@@ -256,6 +256,7 @@ class AgentRunContext:
     remaining_wall_seconds: float
     task_label: str = "Repository Task"
     apply_to_repository: bool = False
+    allow_mutation: bool = True
 
 
 class AgentCheckpointStore:
@@ -890,7 +891,10 @@ class ZetsuAgentCoordinator:
             ctx.worktree,
             owner_user_id=ctx.user_id,
             session_id=ctx.session_id,
-            allow_mutation="apply_patch" in ctx.binding.tool_policy.allowed_tools,
+            allow_mutation=(
+                ctx.allow_mutation
+                and "apply_patch" in ctx.binding.tool_policy.allowed_tools
+            ),
             required_verification_argv=ctx.required_verification_argv,
             is_cancelled=lambda: self.tiered.agent_session_status(
                 user_id=ctx.user_id, session_id=ctx.session_id
@@ -899,12 +903,14 @@ class ZetsuAgentCoordinator:
         )
 
     @staticmethod
-    def _require_edit_policy(policy: AgentToolPolicy) -> None:
-        if "apply_patch" not in policy.allowed_tools:
+    def _require_edit_policy(ctx: AgentRunContext) -> None:
+        if not ctx.allow_mutation:
+            raise ServiceTierError("zetsu_agent_mutation_not_allowed")
+        if "apply_patch" not in ctx.binding.tool_policy.allowed_tools:
             raise ServiceTierError("zetsu_agent_edit_not_allowed")
 
     def _edit(self, ctx: AgentRunContext, action: Mapping[str, object]) -> str:
-        self._require_edit_policy(ctx.binding.tool_policy)
+        self._require_edit_policy(ctx)
         edits = action.get("edits")
         if edits is None:
             edits = [action]
@@ -957,7 +963,7 @@ class ZetsuAgentCoordinator:
         return f"EDITED:{paths}:replacements={len(edits)}"
 
     def _create(self, ctx: AgentRunContext, action: Mapping[str, object]) -> str:
-        self._require_edit_policy(ctx.binding.tool_policy)
+        self._require_edit_policy(ctx)
         target = self._relative_target(ctx.worktree, action.get("path"))
         content = action.get("content")
         if not isinstance(content, str):
@@ -1373,7 +1379,13 @@ class ZetsuAgentCoordinator:
         policy: JsonObject = {
             "policy_id": ctx.binding.tool_policy.policy_id if ctx is not None else "internal",
             "allowed_tools": (
-                list(ctx.binding.tool_policy.allowed_tools) if ctx is not None else []
+                [
+                    tool
+                    for tool in ctx.binding.tool_policy.allowed_tools
+                    if ctx.allow_mutation or tool != "apply_patch"
+                ]
+                if ctx is not None
+                else []
             ),
             "network_enabled": False,
             "max_commands": (
@@ -1982,6 +1994,7 @@ class ZetsuAgentCoordinator:
         persistent_session: bool = False,
         restart_objective: bool = False,
         task_label: str | None = None,
+        allow_mutation: bool = True,
     ) -> JsonObject:
         self._validate_run_request(
             instruction=instruction,
@@ -1991,6 +2004,7 @@ class ZetsuAgentCoordinator:
             compaction_ratio=compaction_ratio,
             verification_argv=verification_argv,
             apply_to_repository=apply_to_repository,
+            allow_mutation=allow_mutation,
         )
         if restart_objective and not persistent_session:
             raise ServiceTierError("repository_agent_turn_mode_invalid")
@@ -2033,6 +2047,7 @@ class ZetsuAgentCoordinator:
                 persistent_session=persistent_session,
                 restart_objective=restart_objective,
                 task_label=task_label,
+                allow_mutation=allow_mutation,
             )
             if admission is not None and self.scheduler is not None:
                 terminal = "SUCCEEDED" if result.get("status") == "SUCCESS" else "FAILED"
@@ -2104,6 +2119,7 @@ class ZetsuAgentCoordinator:
         verification_argv: Sequence[str] | None = None,
         wait_timeout_seconds: float = 1_800.0,
         task_label: str | None = None,
+        allow_mutation: bool = False,
     ) -> JsonObject:
         """Run one bounded turn while preserving the owned worktree for continuation."""
 
@@ -2121,6 +2137,7 @@ class ZetsuAgentCoordinator:
             persistent_session=True,
             restart_objective=True,
             task_label=task_label,
+            allow_mutation=allow_mutation,
         )
 
     def result_page(
@@ -2157,6 +2174,7 @@ class ZetsuAgentCoordinator:
         compaction_ratio: float,
         verification_argv: Sequence[str] | None,
         apply_to_repository: bool,
+        allow_mutation: bool,
     ) -> None:
         if lane not in {ModelLane.QUALITY, ModelLane.STANDARD}:
             raise ServiceTierError("zetsu_agent_lane_invalid")
@@ -2168,6 +2186,8 @@ class ZetsuAgentCoordinator:
             raise ServiceTierError("zetsu_agent_compaction_ratio_invalid")
         if not isinstance(apply_to_repository, bool):
             raise ServiceTierError("zetsu_agent_apply_mode_invalid")
+        if not isinstance(allow_mutation, bool):
+            raise ServiceTierError("zetsu_agent_mutation_mode_invalid")
         if apply_to_repository and verification_argv is None:
             raise ServiceTierError("zetsu_agent_apply_requires_verifier")
 
@@ -2215,6 +2235,7 @@ class ZetsuAgentCoordinator:
         persistent_session: bool = False,
         restart_objective: bool = False,
         task_label: str | None = None,
+        allow_mutation: bool = True,
     ) -> JsonObject:
         self._validate_run_request(
             instruction=instruction,
@@ -2224,6 +2245,7 @@ class ZetsuAgentCoordinator:
             compaction_ratio=compaction_ratio,
             verification_argv=verification_argv,
             apply_to_repository=apply_to_repository,
+            allow_mutation=allow_mutation,
         )
         if restart_objective and not persistent_session:
             raise ServiceTierError("repository_agent_turn_mode_invalid")
@@ -2294,6 +2316,7 @@ class ZetsuAgentCoordinator:
             remaining_wall_seconds=remaining_wall,
             task_label=effective_task_label,
             apply_to_repository=apply_to_repository,
+            allow_mutation=allow_mutation,
         )
         fresh_state = AgentExecutionState(
             objective=instruction,

@@ -210,6 +210,7 @@ class AgentRunRequest(BaseModel):
     max_steps: int = Field(default=12, ge=1, le=32)
     max_chars: int = Field(default=8_000, ge=512, le=24_000)
     verification_argv: list[str] | None = Field(default=None, min_length=1, max_length=64)
+    allow_mutation: bool = False
     wait_timeout_seconds: int = Field(default=1_800, ge=1, le=3_600)
 
 
@@ -231,6 +232,7 @@ def _agent_async_request_sha256(body: AgentAsyncRunRequest) -> str:
         "max_steps": body.max_steps,
         "max_chars": body.max_chars,
         "verification_argv": body.verification_argv,
+        "allow_mutation": body.allow_mutation,
         "wait_timeout_seconds": body.wait_timeout_seconds,
     }
     encoded = json.dumps(
@@ -3159,6 +3161,7 @@ def create_operator_app(
                 max_steps=body.max_steps,
                 max_chars=body.max_chars,
                 verification_argv=body.verification_argv,
+                allow_mutation=body.allow_mutation,
                 wait_timeout_seconds=body.wait_timeout_seconds,
                 task_label=derive_task_label(body.instruction),
             )
@@ -3173,6 +3176,7 @@ def create_operator_app(
                 max_steps=body.max_steps,
                 max_chars=body.max_chars,
                 verification_argv=body.verification_argv,
+                allow_mutation=body.allow_mutation,
                 wait_timeout_seconds=body.wait_timeout_seconds,
                 task_label=derive_task_label(body.instruction),
             )
