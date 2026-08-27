@@ -1,0 +1,199 @@
+{
+  "aider_revision": "5dc9490bb35f9729ef2c95d00a19ccd30c26339c",
+  "laplace_revision": "25b2d7264e153e9214ade1cb3e98db81754c8e36",
+  "schema": "laplace-v33-aider-repomap-tasks-v1",
+  "tasks": [
+    {
+      "expected_paths": [
+        "src/research_workspace/repository_context.py"
+      ],
+      "expected_terms": [
+        "build_repo_map",
+        "token_budget",
+        "RepoMap"
+      ],
+      "focus_paths": [
+        "src/research_workspace/repository_context.py"
+      ],
+      "query": "Where is build_repo_map implemented and how is its token budget enforced?",
+      "task_id": "repo-map-builder",
+      "token_budget": 1000
+    },
+    {
+      "expected_paths": [
+        "src/research_workspace/zetsu_agent.py"
+      ],
+      "expected_terms": [
+        "allow_mutation",
+        "_typed_aci",
+        "apply_patch"
+      ],
+      "focus_paths": [
+        "src/research_workspace/zetsu_agent.py"
+      ],
+      "query": "Where does the typed agent ACI enforce transient mutation authority?",
+      "task_id": "agent-mutation-authority",
+      "token_budget": 1000
+    },
+    {
+      "expected_paths": [
+        "src/research_workspace/chat_cli.py"
+      ],
+      "expected_terms": [
+        "_confirm_agent_turn",
+        "allow_mutation",
+        "verification"
+      ],
+      "focus_paths": [
+        "src/research_workspace/chat_cli.py"
+      ],
+      "query": "How does laplace chat decide whether one agent turn may mutate?",
+      "task_id": "chat-agent-turn",
+      "token_budget": 1000
+    },
+    {
+      "expected_paths": [
+        "src/research_workspace/chat_input.py"
+      ],
+      "expected_terms": [
+        "PromptSession",
+        "FileHistory",
+        "build_chat_input"
+      ],
+      "focus_paths": [
+        "src/research_workspace/chat_input.py"
+      ],
+      "query": "Where is prompt_toolkit used for interactive chat input and history?",
+      "task_id": "prompt-toolkit-input",
+      "token_budget": 1000
+    },
+    {
+      "expected_paths": [
+        "src/research_workspace/chat_verification.py"
+      ],
+      "expected_terms": [
+        "verification",
+        "verifier",
+        "resolve"
+      ],
+      "focus_paths": [
+        "src/research_workspace/chat_verification.py"
+      ],
+      "query": "Where is persistent chat verification configuration resolved?",
+      "task_id": "verification-sidecar",
+      "token_budget": 1000
+    },
+    {
+      "expected_paths": [
+        "src/research_workspace/laplace_web.py"
+      ],
+      "expected_terms": [
+        "respond",
+        "allow_mutation",
+        "verifier"
+      ],
+      "focus_paths": [
+        "src/research_workspace/laplace_web.py"
+      ],
+      "query": "Where does the Gradio frontend forward agent access and verifier state?",
+      "task_id": "gradio-controller",
+      "token_budget": 1000
+    },
+    {
+      "expected_paths": [
+        "src/research_workspace/zetsu_sdk_stdio.py"
+      ],
+      "expected_terms": [
+        "streamable_http",
+        "Client",
+        "ZetsuBackend"
+      ],
+      "focus_paths": [
+        "src/research_workspace/zetsu_sdk_stdio.py"
+      ],
+      "query": "Where does the stdio MCP bridge connect to the streamable HTTP backend?",
+      "task_id": "mcp-sdk-bridge",
+      "token_budget": 1000
+    },
+    {
+      "expected_paths": [
+        "src/research_workspace/zetsu_codex.py"
+      ],
+      "expected_terms": [
+        "status",
+        "repository",
+        "codex"
+      ],
+      "focus_paths": [
+        "src/research_workspace/zetsu_codex.py"
+      ],
+      "query": "Where is Codex MCP configuration status inspected for a repository?",
+      "task_id": "codex-status",
+      "token_budget": 1000
+    },
+    {
+      "expected_paths": [
+        "src/research_workspace/operator_api.py"
+      ],
+      "expected_terms": [
+        "allow_mutation",
+        "AgentRunRequest",
+        "verification"
+      ],
+      "focus_paths": [
+        "src/research_workspace/operator_api.py"
+      ],
+      "query": "Where does the Operator request schema carry allow_mutation?",
+      "task_id": "operator-agent-request",
+      "token_budget": 1000
+    },
+    {
+      "expected_paths": [
+        "src/research_workspace/repository_agent_service.py"
+      ],
+      "expected_terms": [
+        "run_turn",
+        "allow_mutation",
+        "verification"
+      ],
+      "focus_paths": [
+        "src/research_workspace/repository_agent_service.py"
+      ],
+      "query": "Where is a persistent repository agent turn forwarded to the coordinator?",
+      "task_id": "conversation-service",
+      "token_budget": 1000
+    },
+    {
+      "expected_paths": [
+        "src/research_workspace/bounded_aci.py"
+      ],
+      "expected_terms": [
+        "edit_region",
+        "diff",
+        "allow_mutation"
+      ],
+      "focus_paths": [
+        "src/research_workspace/bounded_aci.py"
+      ],
+      "query": "Where does bounded edit_region reject an invalid repository diff?",
+      "task_id": "bounded-edit-diff-check",
+      "token_budget": 1000
+    },
+    {
+      "expected_paths": [
+        "src/research_workspace/task_labels.py"
+      ],
+      "expected_terms": [
+        "derive_task_label",
+        "Repository",
+        "Task"
+      ],
+      "focus_paths": [
+        "src/research_workspace/task_labels.py"
+      ],
+      "query": "Where is derive_task_label defined and what fallback does it use?",
+      "task_id": "task-label",
+      "token_budget": 1000
+    }
+  ]
+}

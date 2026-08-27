@@ -1,0 +1,613 @@
+{
+  "aider_revision": "5dc9490bb35f9729ef2c95d00a19ccd30c26339c",
+  "budgets": [
+    256,
+    512,
+    1000,
+    2000
+  ],
+  "laplace_revision": "25b2d7264e153e9214ade1cb3e98db81754c8e36",
+  "schema": "laplace-v33-aider-repomap-expanded-v1",
+  "tasks": [
+    {
+      "category": "direct_symbol",
+      "expected_paths": [
+        "src/research_workspace/repository_context.py"
+      ],
+      "expected_symbols": [
+        "RepositoryContextService",
+        "build_repo_map"
+      ],
+      "expected_terms": [
+        "repo map",
+        "token_budget",
+        "parser"
+      ],
+      "focus_mode": "FOCUSED",
+      "focus_paths": [
+        "src/research_workspace/repository_context.py"
+      ],
+      "query": "Find the implementation that builds the advisory repository map and enforces its token budget.",
+      "task_id": "direct-repomap"
+    },
+    {
+      "category": "direct_symbol",
+      "expected_paths": [
+        "src/research_workspace/zetsu_agent.py"
+      ],
+      "expected_symbols": [
+        "_typed_aci"
+      ],
+      "expected_terms": [
+        "allow_mutation",
+        "apply_patch",
+        "tool_policy"
+      ],
+      "focus_mode": "FOCUSED",
+      "focus_paths": [
+        "src/research_workspace/zetsu_agent.py"
+      ],
+      "query": "Find the typed ACI mutation-authority gate used by the Zetsu repository agent.",
+      "task_id": "direct-mutation-authority"
+    },
+    {
+      "category": "direct_symbol",
+      "expected_paths": [
+        "src/research_workspace/chat_cli.py"
+      ],
+      "expected_symbols": [
+        "_confirm_agent_turn",
+        "_agent_turn"
+      ],
+      "expected_terms": [
+        "allow_mutation",
+        "verification",
+        "access_mode"
+      ],
+      "focus_mode": "FOCUSED",
+      "focus_paths": [
+        "src/research_workspace/chat_cli.py"
+      ],
+      "query": "Find how one laplace chat agent turn decides whether mutation is allowed.",
+      "task_id": "direct-chat-turn"
+    },
+    {
+      "category": "direct_symbol",
+      "expected_paths": [
+        "src/research_workspace/chat_input.py"
+      ],
+      "expected_symbols": [
+        "build_chat_input",
+        "PromptSession"
+      ],
+      "expected_terms": [
+        "prompt_toolkit",
+        "history",
+        "multiline"
+      ],
+      "focus_mode": "FOCUSED",
+      "focus_paths": [
+        "src/research_workspace/chat_input.py"
+      ],
+      "query": "Find the prompt_toolkit-backed chat input construction and history handling.",
+      "task_id": "direct-input"
+    },
+    {
+      "category": "direct_symbol",
+      "expected_paths": [
+        "src/research_workspace/chat_verification.py"
+      ],
+      "expected_symbols": [
+        "ChatVerificationStore",
+        "resolve_verification"
+      ],
+      "expected_terms": [
+        "verification",
+        "verifier",
+        "session"
+      ],
+      "focus_mode": "FOCUSED",
+      "focus_paths": [
+        "src/research_workspace/chat_verification.py"
+      ],
+      "query": "Find persistent chat verifier storage and verifier resolution.",
+      "task_id": "direct-verification"
+    },
+    {
+      "category": "direct_symbol",
+      "expected_paths": [
+        "src/research_workspace/ast_context.py"
+      ],
+      "expected_symbols": [
+        "TreeContext"
+      ],
+      "expected_terms": [
+        "grep_ast",
+        "path_escape",
+        "max_chars"
+      ],
+      "focus_mode": "FOCUSED",
+      "focus_paths": [
+        "src/research_workspace/ast_context.py"
+      ],
+      "query": "Find the grep-ast context wrapper and its path-containment logic.",
+      "task_id": "direct-ast-context"
+    },
+    {
+      "category": "cross_file",
+      "expected_paths": [
+        "src/research_workspace/chat_cli.py",
+        "src/research_workspace/chat_operator_client.py",
+        "src/research_workspace/operator_api.py"
+      ],
+      "expected_symbols": [
+        "ChatShell",
+        "OperatorClient"
+      ],
+      "expected_terms": [
+        "agent",
+        "allow_mutation",
+        "verification"
+      ],
+      "focus_mode": "FOCUSED",
+      "focus_paths": [
+        "src/research_workspace/chat_cli.py"
+      ],
+      "query": "Trace an agent turn from ChatShell through OperatorClient to the Operator request API.",
+      "task_id": "cross-chat-operator"
+    },
+    {
+      "category": "cross_file",
+      "expected_paths": [
+        "src/research_workspace/operator_api.py",
+        "src/research_workspace/laplace_core.py",
+        "src/research_workspace/repository_agent_service.py"
+      ],
+      "expected_symbols": [
+        "LaplaceCore",
+        "RepositoryAgentConversationService"
+      ],
+      "expected_terms": [
+        "agent",
+        "repository",
+        "run_turn"
+      ],
+      "focus_mode": "NO_FOCUS",
+      "focus_paths": [],
+      "query": "Where does an Operator agent request flow through LaplaceCore into the persistent repository-agent service?",
+      "task_id": "cross-operator-core-agent"
+    },
+    {
+      "category": "cross_file",
+      "expected_paths": [
+        "src/research_workspace/chat_cli.py",
+        "src/research_workspace/operator_api.py",
+        "src/research_workspace/repository_agent_service.py",
+        "src/research_workspace/zetsu_agent.py"
+      ],
+      "expected_symbols": [
+        "_typed_aci"
+      ],
+      "expected_terms": [
+        "allow_mutation",
+        "verification",
+        "apply_patch"
+      ],
+      "focus_mode": "NO_FOCUS",
+      "focus_paths": [],
+      "query": "Trace allow_mutation from the interactive frontend to the coordinator that constructs the bounded ACI.",
+      "task_id": "cross-mutation-propagation"
+    },
+    {
+      "category": "cross_file",
+      "expected_paths": [
+        "src/research_workspace/zetsu_sdk_stdio.py",
+        "src/research_workspace/zetsu_mcp.py"
+      ],
+      "expected_symbols": [],
+      "expected_terms": [
+        "streamable",
+        "mcp",
+        "backend"
+      ],
+      "focus_mode": "FOCUSED",
+      "focus_paths": [
+        "src/research_workspace/zetsu_sdk_stdio.py"
+      ],
+      "query": "Trace the stdio MCP bridge to the streamable HTTP Zetsu backend.",
+      "task_id": "cross-mcp-bridge"
+    },
+    {
+      "category": "cross_file",
+      "expected_paths": [
+        "src/research_workspace/zetsu_codex.py",
+        "src/research_workspace/zetsu_sdk_stdio.py",
+        "src/research_workspace/zetsu_mcp.py"
+      ],
+      "expected_symbols": [],
+      "expected_terms": [
+        "codex",
+        "stdio",
+        "mcp"
+      ],
+      "focus_mode": "NO_FOCUS",
+      "focus_paths": [],
+      "query": "Find the files that configure Codex MCP and implement the stdio-to-Zetsu bridge.",
+      "task_id": "cross-codex-mcp"
+    },
+    {
+      "category": "cross_file",
+      "expected_paths": [
+        "src/research_workspace/laplace_web.py",
+        "src/research_workspace/chat_operator_client.py",
+        "src/research_workspace/operator_api.py"
+      ],
+      "expected_symbols": [
+        "OperatorClient"
+      ],
+      "expected_terms": [
+        "agent",
+        "access",
+        "verification"
+      ],
+      "focus_mode": "NO_FOCUS",
+      "focus_paths": [],
+      "query": "Trace a Gradio web agent turn into the Operator client and backend request.",
+      "task_id": "cross-web-agent"
+    },
+    {
+      "category": "orientation",
+      "expected_paths": [
+        "src/research_workspace/repository_context.py",
+        "src/research_workspace/ast_context.py"
+      ],
+      "expected_symbols": [
+        "RepositoryContextService",
+        "TreeContext"
+      ],
+      "expected_terms": [
+        "context",
+        "repo",
+        "grep_ast"
+      ],
+      "focus_mode": "NO_FOCUS",
+      "focus_paths": [],
+      "query": "Which modules provide whole-repository context selection and AST-local context extraction?",
+      "task_id": "orient-context-stack"
+    },
+    {
+      "category": "orientation",
+      "expected_paths": [
+        "src/research_workspace/chat_cli.py",
+        "src/research_workspace/chat_input.py",
+        "src/research_workspace/chat_routing.py",
+        "src/research_workspace/chat_session.py"
+      ],
+      "expected_symbols": [
+        "ChatShell"
+      ],
+      "expected_terms": [
+        "chat",
+        "route",
+        "session",
+        "input"
+      ],
+      "focus_mode": "NO_FOCUS",
+      "focus_paths": [],
+      "query": "Which modules make up the interactive terminal frontend, its input handling, routing and persistent session state?",
+      "task_id": "orient-terminal-stack"
+    },
+    {
+      "category": "orientation",
+      "expected_paths": [
+        "src/research_workspace/laplace_web.py",
+        "src/research_workspace/chat_session.py",
+        "src/research_workspace/chat_verification.py"
+      ],
+      "expected_symbols": [
+        "ChatVerificationStore"
+      ],
+      "expected_terms": [
+        "web",
+        "session",
+        "verification"
+      ],
+      "focus_mode": "NO_FOCUS",
+      "focus_paths": [],
+      "query": "Which modules implement the browser frontend together with chat session and verification persistence?",
+      "task_id": "orient-web-stack"
+    },
+    {
+      "category": "orientation",
+      "expected_paths": [
+        "src/research_workspace/repository_agent_service.py",
+        "src/research_workspace/bounded_aci.py",
+        "src/research_workspace/zetsu_agent.py"
+      ],
+      "expected_symbols": [
+        "RepositoryAgentConversationService"
+      ],
+      "expected_terms": [
+        "agent",
+        "bounded",
+        "repository"
+      ],
+      "focus_mode": "NO_FOCUS",
+      "focus_paths": [],
+      "query": "Which modules implement persistent repository-agent conversations, bounded repository edits and Zetsu agent execution?",
+      "task_id": "orient-agent-stack"
+    },
+    {
+      "category": "orientation",
+      "expected_paths": [
+        "src/research_workspace/zetsu_mcp.py",
+        "src/research_workspace/zetsu_sdk_stdio.py",
+        "src/research_workspace/zetsu_codex.py"
+      ],
+      "expected_symbols": [],
+      "expected_terms": [
+        "mcp",
+        "codex",
+        "stdio"
+      ],
+      "focus_mode": "NO_FOCUS",
+      "focus_paths": [],
+      "query": "Which modules together implement Zetsu MCP serving, the SDK stdio bridge and Codex registration?",
+      "task_id": "orient-mcp-stack"
+    },
+    {
+      "category": "ambiguous",
+      "expected_paths": [
+        "src/research_workspace/repository_agent_service.py",
+        "src/research_workspace/zetsu_agent.py"
+      ],
+      "expected_symbols": [],
+      "expected_terms": [
+        "status",
+        "worktree",
+        "repository"
+      ],
+      "focus_mode": "NO_FOCUS",
+      "focus_paths": [],
+      "query": "Locate the different repository-agent status paths and distinguish session worktree status from Zetsu runtime status.",
+      "task_id": "ambiguous-status"
+    },
+    {
+      "category": "ambiguous",
+      "expected_paths": [
+        "src/research_workspace/chat_verification.py",
+        "src/research_workspace/repository_agent_service.py",
+        "src/research_workspace/zetsu_agent.py"
+      ],
+      "expected_symbols": [
+        "ChatVerificationStore"
+      ],
+      "expected_terms": [
+        "verification",
+        "verifier",
+        "argv"
+      ],
+      "focus_mode": "NO_FOCUS",
+      "focus_paths": [],
+      "query": "Locate the different verification concepts: persistent chat verifier configuration and per-agent-turn deterministic verification.",
+      "task_id": "ambiguous-verification"
+    },
+    {
+      "category": "ambiguous",
+      "expected_paths": [
+        "src/research_workspace/chat_session.py",
+        "src/research_workspace/repository_agent_service.py"
+      ],
+      "expected_symbols": [],
+      "expected_terms": [
+        "session",
+        "messages",
+        "repository"
+      ],
+      "focus_mode": "NO_FOCUS",
+      "focus_paths": [],
+      "query": "Locate user chat-session persistence versus persistent repository-agent conversation sessions.",
+      "task_id": "ambiguous-session"
+    },
+    {
+      "category": "ambiguous",
+      "expected_paths": [
+        "src/research_workspace/repository_context.py",
+        "src/research_workspace/ast_context.py",
+        "src/research_workspace/laplace_core.py"
+      ],
+      "expected_symbols": [
+        "RepositoryContextService",
+        "LaplaceCore"
+      ],
+      "expected_terms": [
+        "context",
+        "repository",
+        "request"
+      ],
+      "focus_mode": "NO_FOCUS",
+      "focus_paths": [],
+      "query": "Locate repository-map context, AST-local context and core request context mechanisms without a supplied file.",
+      "task_id": "ambiguous-context"
+    },
+    {
+      "category": "change_impact",
+      "expected_paths": [
+        "src/research_workspace/chat_cli.py",
+        "src/research_workspace/laplace_web.py",
+        "src/research_workspace/operator_api.py",
+        "src/research_workspace/zetsu_agent.py"
+      ],
+      "expected_symbols": [
+        "_confirm_agent_turn",
+        "_typed_aci"
+      ],
+      "expected_terms": [
+        "write",
+        "verification",
+        "allow_mutation"
+      ],
+      "focus_mode": "NO_FOCUS",
+      "focus_paths": [],
+      "query": "If write access and verifier requirements changed, which implementation files would need coordinated review?",
+      "task_id": "impact-write-access"
+    },
+    {
+      "category": "change_impact",
+      "expected_paths": [
+        "src/research_workspace/zetsu_codex.py",
+        "src/research_workspace/zetsu_sdk_stdio.py",
+        "src/research_workspace/zetsu_mcp.py"
+      ],
+      "expected_symbols": [],
+      "expected_terms": [
+        "protocol",
+        "mcp",
+        "codex"
+      ],
+      "focus_mode": "NO_FOCUS",
+      "focus_paths": [],
+      "query": "If the Codex/Zetsu MCP protocol version changed, which bridge and configuration modules should be reviewed?",
+      "task_id": "impact-mcp-protocol"
+    },
+    {
+      "category": "change_impact",
+      "expected_paths": [
+        "src/research_workspace/task_labels.py",
+        "src/research_workspace/chat_cli.py"
+      ],
+      "expected_symbols": [
+        "derive_task_label",
+        "ChatShell"
+      ],
+      "expected_terms": [
+        "label",
+        "fallback",
+        "task"
+      ],
+      "focus_mode": "FOCUSED",
+      "focus_paths": [
+        "src/research_workspace/task_labels.py"
+      ],
+      "query": "If deterministic task-label length or fallback behavior changed, where is the implementation and where is it consumed in the CLI?",
+      "task_id": "impact-task-label"
+    },
+    {
+      "category": "change_impact",
+      "expected_paths": [
+        "src/research_workspace/repository_context.py",
+        "src/research_workspace/zetsu_agent.py"
+      ],
+      "expected_symbols": [
+        "RepositoryContextService"
+      ],
+      "expected_terms": [
+        "token_budget",
+        "repository",
+        "context"
+      ],
+      "focus_mode": "FOCUSED",
+      "focus_paths": [
+        "src/research_workspace/repository_context.py"
+      ],
+      "query": "If advisory RepoMap token budgeting changed, locate the implementation and the agent-side use of repository context.",
+      "task_id": "impact-repomap-budget"
+    },
+    {
+      "category": "change_impact",
+      "expected_paths": [
+        "src/research_workspace/laplace_web.py",
+        "src/research_workspace/chat_session.py"
+      ],
+      "expected_symbols": [],
+      "expected_terms": [
+        "history",
+        "session",
+        "message"
+      ],
+      "focus_mode": "NO_FOCUS",
+      "focus_paths": [],
+      "query": "If failed web turns must not persist into history, which web and session modules govern that behavior?",
+      "task_id": "impact-web-history"
+    },
+    {
+      "category": "governance",
+      "expected_paths": [
+        "src/research_workspace/ast_context.py",
+        "src/research_workspace/bounded_aci.py"
+      ],
+      "expected_symbols": [
+        "TreeContext"
+      ],
+      "expected_terms": [
+        "path",
+        "escape",
+        "repository"
+      ],
+      "focus_mode": "NO_FOCUS",
+      "focus_paths": [],
+      "query": "Locate repository path-containment checks for AST context and bounded file mutations.",
+      "task_id": "governance-path-containment"
+    },
+    {
+      "category": "governance",
+      "expected_paths": [
+        "src/research_workspace/bounded_aci.py",
+        "src/research_workspace/zetsu_agent.py"
+      ],
+      "expected_symbols": [
+        "edit_region",
+        "_typed_aci"
+      ],
+      "expected_terms": [
+        "diff",
+        "edit",
+        "mutation"
+      ],
+      "focus_mode": "FOCUSED",
+      "focus_paths": [
+        "src/research_workspace/bounded_aci.py"
+      ],
+      "query": "Locate the bounded edit implementation that rolls back an edit when git diff --check fails and the agent that invokes bounded mutation.",
+      "task_id": "governance-mutation-rollback"
+    },
+    {
+      "category": "governance",
+      "expected_paths": [
+        "src/research_workspace/zetsu_sdk_stdio.py",
+        "src/research_workspace/zetsu_codex.py"
+      ],
+      "expected_symbols": [],
+      "expected_terms": [
+        "token",
+        "env",
+        "codex"
+      ],
+      "focus_mode": "NO_FOCUS",
+      "focus_paths": [],
+      "query": "Locate the Codex/MCP bridge configuration where bearer-token leakage must be avoided.",
+      "task_id": "governance-mcp-secrets"
+    },
+    {
+      "category": "governance",
+      "expected_paths": [
+        "src/research_workspace/operator_api.py",
+        "src/research_workspace/repository_agent_service.py",
+        "src/research_workspace/zetsu_agent.py"
+      ],
+      "expected_symbols": [
+        "RepositoryAgentConversationService"
+      ],
+      "expected_terms": [
+        "repository",
+        "authorized",
+        "allow_mutation"
+      ],
+      "focus_mode": "NO_FOCUS",
+      "focus_paths": [],
+      "query": "Locate the repository-agent authorization and mutation governance path from Operator requests to Zetsu execution.",
+      "task_id": "governance-authorization"
+    }
+  ],
+  "timed_repetitions": 5
+}
