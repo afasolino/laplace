@@ -1298,7 +1298,7 @@ def test_standalone_agent_uses_independent_command_budget_across_quantum(tmp_pat
     assert tiered.sandboxes.results[0]["terminal"] is True
 
 
-def test_persistent_agent_turn_reuses_worktree_and_carries_verified_summary(
+def test_persistent_agent_turn_reuses_worktree_and_isolates_new_objective_semantics(
     tmp_path: Path,
 ) -> None:
     repository = tmp_path / "repository"
@@ -1466,7 +1466,7 @@ def test_persistent_agent_turn_reuses_worktree_and_carries_verified_summary(
     assert third["stagnation_count"] == 2
     assert tiered.sandboxes.terminal_flags == [False, False, False]
     assert tiered.sandboxes.resumable_flags == [False, False, True]
-    assert "first inspected result" in tiered.prompts[1]
+    assert "first inspected result" not in tiered.prompts[1]
     assert len(tiered.prompts) == 14
 
     checkpoint = coordinator.checkpoints.read("chat-agent-session")

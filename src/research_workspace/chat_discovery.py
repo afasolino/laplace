@@ -13,6 +13,7 @@ COMMAND_HELP: tuple[str, ...] = (
     "/capabilities",
     "/verification",
     "/frontends",
+    "/route auto|chat|agent|retrieval|corpus|runtime",
     "/mode agent|chat",
     "/access read|confirm|write",
     "/status",

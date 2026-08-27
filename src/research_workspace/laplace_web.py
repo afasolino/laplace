@@ -17,7 +17,9 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TypeAlias
 
+from .chat_capability_views import corpus_overview, runtime_metrics_view
 from .chat_operator_client import OperatorClient, OperatorClientError, extract_display_text
+from .chat_routing import route_message
 from .chat_session import ChatSession, ChatSessionError, ChatSessionStore
 from .chat_verification import ChatVerificationError, ChatVerificationStore, resolve_verification
 
@@ -176,45 +178,59 @@ class WebController:
         ]
         if not text:
             return current, session_id, "", "Message is empty."
-        if mode not in {"agent", "chat"} or access not in {"read", "confirm", "write"}:
+        allowed_routes = {"auto", "agent", "chat", "retrieval", "corpus", "runtime"}
+        if mode not in allowed_routes or access not in {"read", "confirm", "write"}:
             raise LaplaceWebError("invalid_web_session_mode")
         if lane not in {"quality", "standard", "economy"}:
             raise LaplaceWebError("invalid_web_lane")
-
+        decision = route_message(text, mode)  # type: ignore[arg-type]
+        session_mode = "agent" if decision.route == "agent" else "chat"
         supplied_verifier = _verification(verification_text)
         session = self._load_or_create(
-            session_id,
-            mode=mode,
-            access=access,
-            lane=lane,
+            session_id, mode=session_mode, access=access, lane=lane
         )
         try:
             verifier = resolve_verification(self.verifiers, session.session_id, supplied_verifier)
         except ChatVerificationError as exc:
             raise LaplaceWebError(str(exc)) from exc
-        if access == "write" and verifier is None:
+        if decision.route == "agent" and access == "write" and verifier is None:
             raise LaplaceWebError("write_access_requires_verification")
-
         client = self._client()
-        self.store.append_message(session, role="user", content=text, mode=mode)
+        self.store.append_message(session, role="user", content=text, mode=session_mode)
         session = self.store.load(
             session.session_id,
             repo_id=self.repo_id,
             repository_root=str(self.repository_root),
         )
         current.append({"role": "user", "content": text})
-
-        if mode == "chat":
-            payload = client.chat(
-                lane=session.lane,
-                messages=[
-                    {"role": item.role, "content": item.content}
-                    for item in session.messages
-                    if item.mode == "chat"
-                ],
-                domain=session.domain,
-                session_id=session.session_id,
-            )
+        if decision.route in {"chat", "retrieval"}:
+            messages = [
+                {"role": item.role, "content": item.content}
+                for item in session.messages
+                if item.mode == "chat"
+            ]
+            if decision.route == "retrieval":
+                payload = client.chat(
+                    lane=session.lane,
+                    messages=messages,
+                    domain="general",
+                    session_id=session.session_id,
+                    retrieval_selection="personal",
+                )
+            else:
+                payload = client.chat(
+                    lane=session.lane,
+                    messages=messages,
+                    domain="general",
+                    session_id=session.session_id,
+                )
+            response = extract_display_text(payload) or str(payload)
+        elif decision.route == "corpus":
+            payload = corpus_overview(client)
+            response = str(payload)
+        elif decision.route == "runtime":
+            payload = runtime_metrics_view(client.capabilities())
+            response = str(payload)
         else:
             capabilities = client.capabilities()
             repositories = capabilities.get("authorized_repositories")
@@ -241,11 +257,16 @@ class WebController:
                 domain=session.domain,
                 verification_argv=verifier,
             )
-
-        response = extract_display_text(payload) or str(payload)
-        self.store.append_message(session, role="assistant", content=response[:128_000], mode=mode)
+            response = extract_display_text(payload) or str(payload)
+        self.store.append_message(
+            session, role="assistant", content=response[:128_000], mode=session_mode
+        )
         current.append({"role": "assistant", "content": response})
-        return current, session.session_id, "", f"session={session.session_id} · mode={mode} · access={access}"
+        status = (
+            f"session={session.session_id} · mode={session_mode} · route={decision.route} "
+            f"({decision.reason}) · access={access}"
+        )
+        return current, session.session_id, "", status
 
 
 def build_app(controller: WebController):  # type: ignore[no-untyped-def]
@@ -257,7 +278,11 @@ def build_app(controller: WebController):  # type: ignore[no-untyped-def]
     with gr.Blocks(title="Laplace") as demo:
         gr.Markdown("# Laplace\nGoverned local agent over the resident Operator")
         with gr.Row():
-            mode = gr.Dropdown(["agent", "chat"], value="agent", label="Mode")
+            mode = gr.Dropdown(
+                ["auto", "chat", "agent", "retrieval", "corpus", "runtime"],
+                value="auto",
+                label="Route",
+            )
             access = gr.Dropdown(["read", "confirm", "write"], value="read", label="Access")
             lane = gr.Dropdown(["quality", "standard", "economy"], value="quality", label="Model lane")
         verifier = gr.Textbox(

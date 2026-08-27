@@ -20,7 +20,9 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
+from typing import cast
 
+from .chat_capability_views import corpus_overview, runtime_metrics_view
 from .chat_discovery import (
     COMMAND_HELP,
     render_capabilities,
@@ -33,6 +35,7 @@ from .chat_operator_client import (
     OperatorClientError,
     extract_display_text,
 )
+from .chat_routing import RouteOverride, route_message
 from .chat_session import ChatSession, ChatSessionError, ChatSessionStore
 from .chat_verification import (
     ChatVerificationError,
@@ -194,7 +197,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-id")
     parser.add_argument("--lane", choices=("quality", "standard", "economy"), default="quality")
     parser.add_argument("--domain", default="software_engineering")
-    parser.add_argument("--mode", choices=("agent", "chat"), default="agent")
+    parser.add_argument("--mode", choices=("agent", "chat"), default=None, help="Legacy explicit route override.")
+    parser.add_argument(
+        "--route",
+        choices=("auto", "chat", "agent", "retrieval", "corpus", "runtime"),
+        default="auto",
+    )
     parser.add_argument("--access", choices=("read", "confirm", "write"), default="confirm")
     parser.add_argument(
         "--operator-url",
@@ -225,6 +233,7 @@ class ChatShell:
         verification_argv: Sequence[str] | None,
         verification_store: ChatVerificationStore | None = None,
         input_reader: Callable[[], str] | None = None,
+        route_mode: RouteOverride | None = None,
     ) -> None:
         self.client = client
         self.store = store
@@ -237,6 +246,9 @@ class ChatShell:
         )
         self.verification_store = verification_store
         self.input_reader = input_reader or (lambda: input("laplace> "))
+        self.route_mode: RouteOverride = cast(
+            RouteOverride, route_mode or self.session.interaction_mode
+        )
 
     def _verification_for_session(
         self, session: ChatSession, supplied: Sequence[str] | None = None
@@ -310,23 +322,34 @@ class ChatShell:
         print(f"[agent session {sanitize_terminal(created.session_id, maximum=160)}]")
         return created.session_id
 
-    def _chat_turn(self, text: str) -> None:
+    def _chat_turn(self, text: str, *, retrieval_selection: str = "none") -> None:
         started_at_unix = time.time()
         self.session = self.store.append_message(
             self.session,
             role="user",
             content=text,
+            mode="chat",
         )
-        payload = self.client.chat(
-            lane=self.session.lane,
-            messages=[
-                {"role": item.role, "content": item.content}
-                for item in self.session.messages
-                if item.mode == "chat"
-            ],
-            domain=self.session.domain,
-            session_id=self.session.session_id,
-        )
+        messages = [
+            {"role": item.role, "content": item.content}
+            for item in self.session.messages
+            if item.mode == "chat"
+        ]
+        if retrieval_selection == "none":
+            payload = self.client.chat(
+                lane=self.session.lane,
+                messages=messages,
+                domain="general",
+                session_id=self.session.session_id,
+            )
+        else:
+            payload = self.client.chat(
+                lane=self.session.lane,
+                messages=messages,
+                domain="general",
+                session_id=self.session.session_id,
+                retrieval_selection=retrieval_selection,
+            )
         response = extract_display_text(payload)
         if not response:
             response = sanitize_terminal(payload)
@@ -336,7 +359,35 @@ class ChatShell:
             self.session,
             role="assistant",
             content=response[:128_000],
+            mode="chat",
         )
+
+    def _direct_view_turn(self, text: str, payload: Mapping[str, object]) -> None:
+        self.session = self.store.append_message(
+            self.session, role="user", content=text, mode="chat"
+        )
+        response = sanitize_terminal(payload)
+        print(response)
+        self.session = self.store.append_message(
+            self.session, role="assistant", content=response[:128_000], mode="chat"
+        )
+
+    def _dispatch_turn(self, text: str) -> None:
+        decision = route_message(text, self.route_mode)
+        print(f"[route {decision.route} · {decision.reason}]")
+        if decision.route == "agent":
+            self._agent_turn(text)
+            return
+        if decision.route == "retrieval":
+            self._chat_turn(text, retrieval_selection="personal")
+            return
+        if decision.route == "corpus":
+            self._direct_view_turn(text, corpus_overview(self.client))
+            return
+        if decision.route == "runtime":
+            self._direct_view_turn(text, runtime_metrics_view(self.client.capabilities()))
+            return
+        self._chat_turn(text)
 
     def _agent_turn(self, text: str) -> None:
         started_at_unix = time.time()
@@ -563,13 +614,23 @@ class ChatShell:
             )
             print(f"verification={value}")
             return True
+        if command == "/route":
+            allowed = {"auto", "chat", "agent", "retrieval", "corpus", "runtime"}
+            if len(args) != 1 or args[0] not in allowed:
+                raise ChatCLIError("usage:/route auto|chat|agent|retrieval|corpus|runtime")
+            self.route_mode = cast(RouteOverride, args[0])
+            if self.route_mode == "agent":
+                self._require_agent_authorized()
+            print(f"route={self.route_mode}")
+            return True
         if command == "/mode":
             if len(args) != 1 or args[0] not in {"agent", "chat"}:
                 raise ChatCLIError("usage:/mode agent|chat")
             self.session = self.store.update(self.session, interaction_mode=args[0])
+            self.route_mode = cast(RouteOverride, args[0])  # legacy explicit route alias
             if args[0] == "agent":
                 self._require_agent_authorized()
-            print(f"mode={self.session.interaction_mode}")
+            print(f"mode={self.session.interaction_mode} route={self.route_mode}")
             return True
         if command == "/access":
             if len(args) != 1 or args[0] not in {"read", "confirm", "write"}:
@@ -648,6 +709,7 @@ class ChatShell:
                         "lane": self.session.lane,
                         "domain": self.session.domain,
                         "mode": self.session.interaction_mode,
+                        "route": self.route_mode,
                         "access": self.session.access_mode,
                         "chat_messages": sum(
                             item.mode == "chat" for item in self.session.messages
@@ -729,7 +791,7 @@ class ChatShell:
                 raise ChatCLIError("write_access_requires_verification")
             self.session = candidate
             self.verification_argv = verifier
-            if self.session.interaction_mode == "agent":
+            if self.route_mode == "agent":
                 self._require_agent_authorized()
             self._validate_remote_session()
             print(f"session={self.session.session_id}")
@@ -739,7 +801,7 @@ class ChatShell:
     def run(self) -> int:
         contract = self.client.contract_check()
         print(
-            f"Laplace | {self.session.interaction_mode} | {self.session.lane} | "
+            f"Laplace | route={self.route_mode} | {self.session.lane} | "
             f"repo={self.session.repo_id} | access={self.session.access_mode}"
         )
         print(
@@ -769,10 +831,7 @@ class ChatShell:
                 text = line.strip()
                 if not text:
                     continue
-                if self.session.interaction_mode == "chat":
-                    self._chat_turn(text)
-                else:
-                    self._agent_turn(text)
+                self._dispatch_turn(text)
             except (ChatCLIError, ChatSessionError, OperatorClientError) as exc:
                 print(f"error: {sanitize_terminal(str(exc), maximum=4000)}", file=sys.stderr)
 
@@ -806,7 +865,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 repository_root=str(root),
                 lane=args.lane,
                 domain=args.domain,
-                interaction_mode=args.mode,
+                interaction_mode=args.mode or "agent",
                 access_mode=args.access,
             )
 
@@ -831,8 +890,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             verification_argv=resolved_verification,
             verification_store=verification_store,
             input_reader=input_reader,
+            route_mode=args.mode or args.route,
         )
-        if session.interaction_mode == "agent":
+        if shell.route_mode == "agent":
             shell._require_agent_authorized()
         shell._validate_remote_session()
         return shell.run()

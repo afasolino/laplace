@@ -996,6 +996,49 @@ class ZetsuAgentCoordinator:
     def _mutation_marker(epoch: int) -> str:
         return f"latest_mutation_unverified:epoch={epoch}"
 
+    @classmethod
+    def _restart_objective_state(
+        cls,
+        prior: AgentExecutionState,
+        *,
+        instruction: str,
+        lane: str,
+        model_id: str,
+        context_limit: int,
+        required_verification_argv: Sequence[str] | None,
+    ) -> AgentExecutionState:
+        """Start a fresh semantic objective while preserving execution safety state."""
+        unresolved = (
+            [cls._mutation_marker(prior.mutation_epoch)]
+            if prior.mutation_epoch > 0
+            and prior.mutation_epoch > prior.last_verified_epoch
+            else []
+        )
+        return AgentExecutionState(
+            objective=instruction,
+            changed_paths=list(prior.changed_paths),
+            worktree_head=prior.worktree_head,
+            worktree_status_sha256=prior.worktree_status_sha256,
+            lane=lane,
+            model_id=model_id,
+            context_limit=context_limit,
+            required_verification_argv=(
+                list(required_verification_argv)
+                if required_verification_argv is not None
+                else None
+            ),
+            unresolved_failures=unresolved,
+            mutation_epoch=prior.mutation_epoch,
+            last_verified_epoch=prior.last_verified_epoch,
+            command_count=prior.command_count,
+            consumed_wall_seconds=prior.consumed_wall_seconds,
+            target_initial_head=prior.target_initial_head,
+            target_initial_status_sha256=prior.target_initial_status_sha256,
+            target_applied_status_sha256=prior.target_applied_status_sha256,
+            applied_patch_sha256=prior.applied_patch_sha256,
+            telemetry=prior.telemetry,
+        )
+
     @staticmethod
     def _verification_command_id(argv: Sequence[str]) -> str:
         encoded = json.dumps(list(argv), separators=(",", ":")).encode("utf-8")
@@ -2290,32 +2333,13 @@ class ZetsuAgentCoordinator:
                     or prior.changed_paths
                 ):
                     raise ServiceTierError("zetsu_agent_verifier_upgrade_unsafe")
-                state = AgentExecutionState(
-                    objective=instruction,
-                    summary=prior.summary,
-                    recent_observations=[
-                        *prior.recent_observations[-3:],
-                        "PERSISTENT TURN BOUNDARY: continue in the same owned worktree",
-                    ],
-                    changed_paths=list(prior.changed_paths),
-                    worktree_head=prior.worktree_head,
-                    worktree_status_sha256=prior.worktree_status_sha256,
+                state = self._restart_objective_state(
+                    prior,
+                    instruction=instruction,
                     lane=lane.value,
                     model_id=route.model_id,
                     context_limit=route.context_limit,
-                    required_verification_argv=(
-                        list(required_verification_argv)
-                        if required_verification_argv is not None
-                        else None
-                    ),
-                    validation_history=list(prior.validation_history[-8:]),
-                    unresolved_failures=list(prior.unresolved_failures),
-                    evidence_refs=list(prior.evidence_refs[-32:]),
-                    mutation_epoch=prior.mutation_epoch,
-                    last_verified_epoch=prior.last_verified_epoch,
-                    command_count=prior.command_count,
-                    consumed_wall_seconds=prior.consumed_wall_seconds,
-                    telemetry=prior.telemetry,
+                    required_verification_argv=required_verification_argv,
                 )
         else:
             state = self._restore(ctx, instruction)

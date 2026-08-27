@@ -11,8 +11,9 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Mapping, Sequence, cast
+from typing import cast
 from urllib.parse import urlsplit, urlunsplit
 
 from .agent_sandbox import AgentSandboxError, AgentSandboxManager
@@ -312,7 +313,7 @@ def _laplace_readiness(endpoint: str, timeout: float) -> dict[str, object]:
     qwen_failures = [
         item
         for item in reason_values
-        if item.endswith(":quality") or item.endswith(":standard")
+        if item.endswith((":quality", ":standard"))
     ]
     codev_failures = [item for item in reason_values if item.endswith(":economy")]
     codev_state = raw.get("codev")
@@ -353,6 +354,50 @@ def _codex_recognition(repository: Path) -> dict[str, object]:
         return {"recognized": False, "detail": "invalid_codex_json"}
     return {"recognized": isinstance(value, dict), "configuration": value}
 
+
+def _recognized_stdio_bridge_settings(
+    repository: Path,
+    state_root: Path,
+    recognition: Mapping[str, object],
+) -> dict[str, str] | None:
+    # Recognize only the exact v3 Codex-owned stdio bridge.
+    if recognition.get("recognized") is not True:
+        return None
+    configuration = recognition.get("configuration")
+    if not isinstance(configuration, dict):
+        return None
+    if configuration.get("name") != "zetsu" or configuration.get("enabled") is False:
+        return None
+    transport = configuration.get("transport")
+    if not isinstance(transport, dict) or transport.get("type") != "stdio":
+        return None
+    command = transport.get("command")
+    args = transport.get("args")
+    if not isinstance(command, str) or not isinstance(args, list) or not all(isinstance(item, str) for item in args):
+        return None
+    bridge = shutil.which("laplace-zetsu-mcp")
+    if bridge is None or Path(command).expanduser().resolve() != Path(bridge).expanduser().resolve():
+        return None
+
+    def flag_value(flag: str) -> str | None:
+        positions = [index for index, item in enumerate(args) if item == flag]
+        if len(positions) != 1:
+            return None
+        index = positions[0]
+        return args[index + 1] if index + 1 < len(args) else None
+
+    repo_arg = flag_value("--repo")
+    state_arg = flag_value("--state-root")
+    endpoint = flag_value("--endpoint")
+    if repo_arg is None or state_arg is None or endpoint is None:
+        return None
+    if Path(repo_arg).expanduser().resolve() != repository.resolve():
+        return None
+    if Path(state_arg).expanduser().resolve() != state_root.resolve():
+        return None
+    if endpoint != DEFAULT_ENDPOINT:
+        return None
+    return {"endpoint": endpoint, "token_env_var": DEFAULT_TOKEN_ENV, "mode": "codex_stdio_bridge"}
 
 def _load_command_token(
     endpoint: str | None,
@@ -441,40 +486,32 @@ def _diagnostic_payload(
     state_root: Path,
 ) -> dict[str, object]:
     value = zetsu_status(repository)
-    token_loaded = _load_command_token(value.endpoint, value.token_env_var, state_root)
+    codex = _codex_recognition(repository)
+    stdio = _recognized_stdio_bridge_settings(repository, state_root, codex)
+    endpoint = stdio["endpoint"] if stdio is not None else value.endpoint
+    token_env_var = stdio["token_env_var"] if stdio is not None else value.token_env_var
+    token_loaded = _load_command_token(endpoint, token_env_var, state_root)
     if token_loaded:
         value = zetsu_status(repository)
-    local_ok = value.configured and value.skill_installed and value.compatible
-    online: dict[str, object] | None = None
-    laplace: dict[str, object] | None = None
-    readiness: dict[str, object] | None = None
+    legacy_ok = value.configured and value.compatible
+    local_ok = value.skill_installed and (legacy_ok or stdio is not None)
+    online = None
+    laplace = None
+    readiness = None
     repository_readiness = _repository_readiness(repository, state_root)
     detail = "offline"
     online_ok = True
-    if not offline and local_ok and value.endpoint and value.token_env_var:
+    if not offline and local_ok and endpoint and token_env_var:
         try:
-            online = _online_probe(
-                value.endpoint,
-                value.token_env_var,
-                timeout,
-                retrieval=command == "test",
-            )
-            laplace = _laplace_status(
-                value.endpoint,
-                value.token_env_var,
-                timeout,
-            )
-            readiness = _laplace_readiness(value.endpoint, timeout)
+            online = _online_probe(endpoint, token_env_var, timeout, retrieval=command == "test")
+            laplace = _laplace_status(endpoint, token_env_var, timeout)
+            readiness = _laplace_readiness(endpoint, timeout)
             if readiness.get("status") == "READY":
                 detail = "ok"
             else:
                 online_ok = False
                 raw_reasons = readiness.get("reasons")
-                reasons = (
-                    ",".join(str(item) for item in raw_reasons)
-                    if isinstance(raw_reasons, list)
-                    else "unknown"
-                )
+                reasons = ",".join(str(item) for item in raw_reasons) if isinstance(raw_reasons, list) else "unknown"
                 detail = f"laplace_readiness_degraded:{reasons}"
         except ZetsuConfigError as exc:
             online_ok = False
@@ -482,65 +519,48 @@ def _diagnostic_payload(
     elif not local_ok:
         online_ok = False
         detail = "configuration_incomplete_or_incompatible"
-    if (
-        not offline
-        and local_ok
-        and online_ok
-        and repository_readiness.get("agent_task_ready") is not True
-    ):
+    if not offline and local_ok and online_ok and repository_readiness.get("agent_task_ready") is not True:
         online_ok = False
         detail = f"repository:{repository_readiness.get('state', 'not_ready')}"
+    configuration_mode = "codex_stdio_bridge" if stdio is not None else ("legacy_managed_http" if value.configured else "none")
     return {
+        **value.as_dict(),
         "ok": local_ok and online_ok,
         "action": command,
         "local_configuration": local_ok,
+        "configuration_mode": configuration_mode,
         "token_loaded_from_local_file": token_loaded,
         "online": online,
         "laplace": laplace,
         "readiness": readiness,
         "detail": detail,
-        **value.as_dict(),
+        "configured": local_ok,
+        "compatible": local_ok,
+        "endpoint": endpoint,
+        "token_env_var": token_env_var,
+        "token_available": bool(token_env_var and os.environ.get(token_env_var)),
         "repository": repository_readiness,
-        "codex": _codex_recognition(repository),
+        "codex": codex,
     }
 
-
-def _ensure_payload(
-    repository: Path,
-    *,
-    state_root: Path,
-    timeout: float,
-) -> dict[str, object]:
+def _ensure_payload(repository: Path, *, state_root: Path, timeout: float) -> dict[str, object]:
     before = zetsu_status(repository)
-    configured_now = not before.compatible
+    codex = _codex_recognition(repository)
+    stdio = _recognized_stdio_bridge_settings(repository, state_root, codex)
+    legacy_ready = before.compatible and before.endpoint == _default_endpoint() and before.token_env_var == DEFAULT_TOKEN_ENV
+    configured_now = not (legacy_ready or stdio is not None)
     if configured_now:
-        configure_zetsu(
-            repository,
-            endpoint=_default_endpoint(),
-            token_env_var=DEFAULT_TOKEN_ENV,
-        )
-    status_payload = _diagnostic_payload(
-        repository,
-        command="status",
-        offline=False,
-        timeout=timeout,
-        state_root=state_root,
-    )
-    test_payload = _diagnostic_payload(
-        repository,
-        command="test",
-        offline=False,
-        timeout=timeout,
-        state_root=state_root,
-    )
+        configure_zetsu(repository, endpoint=_default_endpoint(), token_env_var=DEFAULT_TOKEN_ENV)
+    status_payload = _diagnostic_payload(repository, command="status", offline=False, timeout=timeout, state_root=state_root)
+    test_payload = _diagnostic_payload(repository, command="test", offline=False, timeout=timeout, state_root=state_root)
     return {
         "ok": bool(status_payload["ok"]) and bool(test_payload["ok"]),
         "action": "ensure",
         "configured_now": configured_now,
+        "configuration_mode": "codex_stdio_bridge" if stdio is not None else "legacy_managed_http",
         "status": status_payload,
         "test": test_payload,
     }
-
 
 def _launch_codex(
     repository: Path,
@@ -579,70 +599,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _launch_codex(repository, args.state_root, args.codex_args)
         elif args.command == "start":
             before = zetsu_status(repository)
-            configuration_update_required = not (
-                before.compatible
-                and before.endpoint == DEFAULT_ENDPOINT
-                and before.token_env_var == DEFAULT_TOKEN_ENV
-            )
+            codex = _codex_recognition(repository)
+            stdio = _recognized_stdio_bridge_settings(repository, args.state_root, codex)
+            legacy_ready = before.compatible and before.endpoint == DEFAULT_ENDPOINT and before.token_env_var == DEFAULT_TOKEN_ENV
+            configuration_update_required = not (legacy_ready or stdio is not None)
             if configuration_update_required and not args.dry_run:
-                configured = configure_zetsu(
-                    repository,
-                    endpoint=DEFAULT_ENDPOINT,
-                    token_env_var=DEFAULT_TOKEN_ENV,
-                )
+                configured = configure_zetsu(repository, endpoint=DEFAULT_ENDPOINT, token_env_var=DEFAULT_TOKEN_ENV)
             else:
                 configured = before
+            configuration_mode = "codex_stdio_bridge" if stdio is not None else "legacy_managed_http"
             if args.nocodev:
-                runtime = start_local_runtime(
-                    repository,
-                    args.state_root,
-                    timeout=args.timeout,
-                    dry_run=args.dry_run,
-                    vllm=args.vllm,
-                    ffmpeg_lib=args.ffmpeg_lib,
-                    codev_enabled=False,
-                )
+                runtime = start_local_runtime(repository, args.state_root, timeout=args.timeout, dry_run=args.dry_run, vllm=args.vllm, ffmpeg_lib=args.ffmpeg_lib, codev_enabled=False)
             else:
-                runtime = start_local_runtime(
-                    repository,
-                    args.state_root,
-                    timeout=args.timeout,
-                    dry_run=args.dry_run,
-                    vllm=args.vllm,
-                    ffmpeg_lib=args.ffmpeg_lib,
-                )
+                runtime = start_local_runtime(repository, args.state_root, timeout=args.timeout, dry_run=args.dry_run, vllm=args.vllm, ffmpeg_lib=args.ffmpeg_lib)
             if args.dry_run:
-                payload = {
-                    "ok": True,
-                    "action": "start",
-                    "configuration_update_required": configuration_update_required,
-                    "configured": configured.as_dict(),
-                    "runtime": runtime,
-                }
+                payload = {"ok": True, "action": "start", "configuration_update_required": configuration_update_required, "configuration_mode": configuration_mode, "configured": configured.as_dict(), "runtime": runtime}
             else:
-                status_payload = _diagnostic_payload(
-                    repository,
-                    command="status",
-                    offline=False,
-                    timeout=10.0,
-                    state_root=args.state_root,
-                )
-                test_payload = _diagnostic_payload(
-                    repository,
-                    command="test",
-                    offline=False,
-                    timeout=10.0,
-                    state_root=args.state_root,
-                )
-                payload = {
-                    "ok": bool(status_payload["ok"]) and bool(test_payload["ok"]),
-                    "action": "start",
-                    "configuration_update_required": configuration_update_required,
-                    "configured": configured.as_dict(),
-                    "runtime": runtime,
-                    "status": status_payload,
-                    "test": test_payload,
-                }
+                status_payload = _diagnostic_payload(repository, command="status", offline=False, timeout=10.0, state_root=args.state_root)
+                test_payload = _diagnostic_payload(repository, command="test", offline=False, timeout=10.0, state_root=args.state_root)
+                payload = {"ok": bool(status_payload["ok"]) and bool(test_payload["ok"]), "action": "start", "configuration_update_required": configuration_update_required, "configuration_mode": configuration_mode, "configured": configured.as_dict(), "runtime": runtime, "status": status_payload, "test": test_payload}
         elif args.command == "stop":
             runtime = stop_local_runtime(args.state_root)
             payload = {

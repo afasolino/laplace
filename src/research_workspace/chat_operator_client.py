@@ -21,14 +21,14 @@ import http.cookiejar
 import json
 import os
 import re
-import socket
 import stat
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence, TypeAlias
+from typing import TypeAlias
 
 JsonObject: TypeAlias = dict[str, object]
 _REMOTE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -46,6 +46,8 @@ AGENT_EVENTS_PATH = "/api/v1/agent/sessions/{session_id}/events"
 AGENT_CANCEL_PATH = "/api/v1/agent/sessions/{session_id}/cancel"
 AGENT_RESULT_PATH = "/api/v1/agent/sessions/{session_id}/results/{result_id}"
 CAPABILITIES_PATH = "/api/v1/capabilities"
+PERSONAL_CORPORA_PATH = "/api/v1/personal-corpora"
+PERSONAL_CORPUS_PATH = "/api/v1/personal-corpora/{corpus_id}"
 AGENT_SESSIONS_PATH = "/api/v1/worktrees"
 
 _REQUIRED_ROUTES: tuple[tuple[str, str], ...] = (
@@ -330,7 +332,7 @@ class OperatorClient:
             raise OperatorClientError(
                 f"operator_http_error:{exc.code}:{detail[:4000]}"
             ) from exc
-        except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
+        except (urllib.error.URLError, TimeoutError) as exc:
             raise OperatorClientError(f"operator_unreachable:{exc}") from exc
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise OperatorClientError("operator_response_invalid_json") from exc
@@ -573,6 +575,8 @@ class OperatorClient:
         messages: Sequence[Mapping[str, str]],
         domain: str,
         session_id: str | None,
+        retrieval_selection: str = "none",
+        personal_corpus_id: str | None = None,
     ) -> JsonObject:
         body = self._build_body(
             "post",
@@ -582,6 +586,8 @@ class OperatorClient:
                 "messages": [dict(message) for message in messages],
                 "domain": domain,
                 "session_id": session_id,
+                "retrieval_selection": retrieval_selection,
+                "personal_corpus_id": personal_corpus_id,
             },
         )
         return self._request("POST", CHAT_PATH, body=body)
@@ -590,6 +596,17 @@ class OperatorClient:
         """Return deterministic owner capabilities and authorized repository IDs."""
 
         return self._request("GET", CAPABILITIES_PATH)
+    def personal_corpora(self, *, include_archived: bool = False) -> JsonObject:
+        query = urllib.parse.urlencode({"include_archived": str(include_archived).lower()})
+        return self._request("GET", f"{PERSONAL_CORPORA_PATH}?{query}")
+
+    def personal_corpus(self, corpus_id: str) -> JsonObject:
+        if re.fullmatch(r"pc_[a-f0-9]{32}", corpus_id) is None:
+            raise OperatorClientError("invalid_personal_corpus_id")
+        path = PERSONAL_CORPUS_PATH.replace(
+            "{corpus_id}", urllib.parse.quote(corpus_id, safe="")
+        )
+        return self._request("GET", path)
 
     def create_agent_session(
         self,
@@ -749,7 +766,7 @@ class OperatorClient:
         except urllib.error.HTTPError as exc:
             detail = exc.read(64 * 1024).decode("utf-8", errors="replace")
             raise OperatorClientError(f"operator_http_error:{exc.code}:{detail[:4000]}") from exc
-        except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
+        except (urllib.error.URLError, TimeoutError) as exc:
             raise OperatorClientError(f"operator_unreachable:{exc}") from exc
         try:
             text = raw.decode("utf-8")
