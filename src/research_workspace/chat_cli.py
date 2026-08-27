@@ -17,16 +17,28 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 
+from .chat_discovery import (
+    COMMAND_HELP,
+    render_capabilities,
+    render_frontends,
+    render_skills,
+)
+from .chat_input import build_chat_input
 from .chat_operator_client import (
     OperatorClient,
     OperatorClientError,
     extract_display_text,
 )
 from .chat_session import ChatSession, ChatSessionError, ChatSessionStore
+from .chat_verification import (
+    ChatVerificationError,
+    ChatVerificationStore,
+    resolve_verification,
+)
 from .task_labels import derive_task_label
 
 _CONTROL = re.compile(
@@ -211,6 +223,8 @@ class ChatShell:
         max_chars: int | None,
         wait_timeout_seconds: int | None,
         verification_argv: Sequence[str] | None,
+        verification_store: ChatVerificationStore | None = None,
+        input_reader: Callable[[], str] | None = None,
     ) -> None:
         self.client = client
         self.store = store
@@ -218,7 +232,23 @@ class ChatShell:
         self.max_steps = max_steps
         self.max_chars = max_chars
         self.wait_timeout_seconds = wait_timeout_seconds
-        self.verification_argv = verification_argv
+        self.verification_argv = (
+            tuple(verification_argv) if verification_argv is not None else None
+        )
+        self.verification_store = verification_store
+        self.input_reader = input_reader or (lambda: input("laplace> "))
+
+    def _verification_for_session(
+        self, session: ChatSession, supplied: Sequence[str] | None = None
+    ) -> tuple[str, ...] | None:
+        if self.verification_store is None:
+            return tuple(supplied) if supplied is not None else None
+        try:
+            return resolve_verification(
+                self.verification_store, session.session_id, supplied
+            )
+        except ChatVerificationError as exc:
+            raise ChatCLIError(str(exc)) from exc
 
     def _require_agent_authorized(self) -> None:
         capabilities = self.client.capabilities()
@@ -514,26 +544,24 @@ class ChatShell:
         if command in {"/exit", "/quit"}:
             return False
         if command == "/help":
-            print(
-                "/help\n"
-                "/mode agent|chat\n"
-                "/access read|confirm|write\n"
-                "/status\n"
-                "/tasks\n"
-                "/diff\n"
-                "/tests\n"
-                "/result <artifact> [offset]\n"
-                "/cancel\n"
-                "/watch\n"
-                "/contract\n"
-                "/context\n"
-                "/history\n"
-                "/compact\n"
-                "/model [quality|standard|economy]\n"
-                "/new\n"
-                "/resume <session-id|last>\n"
-                "/exit"
+            print("\n".join(COMMAND_HELP))
+            return True
+        if command == "/skills":
+            print(render_skills(self.client.capabilities()))
+            return True
+        if command == "/capabilities":
+            print(render_capabilities(self.client.capabilities()))
+            return True
+        if command == "/frontends":
+            print(render_frontends())
+            return True
+        if command == "/verification":
+            value = (
+                " ".join(self.verification_argv)
+                if self.verification_argv is not None
+                else "none"
             )
+            print(f"verification={value}")
             return True
         if command == "/mode":
             if len(args) != 1 or args[0] not in {"agent", "chat"}:
@@ -546,6 +574,8 @@ class ChatShell:
         if command == "/access":
             if len(args) != 1 or args[0] not in {"read", "confirm", "write"}:
                 raise ChatCLIError("usage:/access read|confirm|write")
+            if args[0] == "write" and self.verification_argv is None:
+                raise ChatCLIError("write_access_requires_verification")
             self.session = self.store.update(self.session, access_mode=args[0])
             print(f"access={self.session.access_mode}")
             return True
@@ -672,25 +702,33 @@ class ChatShell:
                 interaction_mode=self.session.interaction_mode,
                 access_mode=self.session.access_mode,
             )
+            if self.verification_store is not None and self.verification_argv is not None:
+                self.verification_store.save(
+                    self.session.session_id, self.verification_argv
+                )
             print(f"session={self.session.session_id}")
             return True
         if command == "/resume":
             if len(args) != 1:
                 raise ChatCLIError("usage:/resume <session-id|last>")
             if args[0] == "last":
-                found = self.store.last(
+                candidate = self.store.last(
                     repo_id=self.session.repo_id,
                     repository_root=self.session.repository_root,
                 )
-                if found is None:
+                if candidate is None:
                     raise ChatCLIError("no_previous_session")
-                self.session = found
             else:
-                self.session = self.store.load(
+                candidate = self.store.load(
                     args[0],
                     repo_id=self.session.repo_id,
                     repository_root=self.session.repository_root,
                 )
+            verifier = self._verification_for_session(candidate)
+            if candidate.access_mode == "write" and verifier is None:
+                raise ChatCLIError("write_access_requires_verification")
+            self.session = candidate
+            self.verification_argv = verifier
             if self.session.interaction_mode == "agent":
                 self._require_agent_authorized()
             self._validate_remote_session()
@@ -708,11 +746,15 @@ class ChatShell:
             f"Operator {contract.openapi_version or '?'} @ {contract.base_url} | "
             f"agent_turn={contract.agent_turn_path}"
         )
+        print(
+            "[Enter submits · Alt+Enter/Ctrl+J newline · /help commands · "
+            "/skills capabilities · /frontends integrations]"
+        )
         if self.session.active_turn_id is not None:
             print(f"[active agent turn {sanitize_terminal(self.session.active_turn_id, maximum=160)}; use /watch]")
         while True:
             try:
-                line = input("laplace> ")
+                line = self.input_reader()
             except EOFError:
                 print()
                 return 0
@@ -745,6 +787,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             or Path(os.environ.get("LAPLACE_STATE_ROOT", str(_DEFAULT_STATE_ROOT)))
         ).expanduser().resolve()
         store = ChatSessionStore(state_root / "chat_sessions_v2")
+        verification_store = ChatVerificationStore(state_root / "chat_verifiers_v3")
 
         if args.resume:
             if args.resume == "last":
@@ -767,6 +810,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 access_mode=args.access,
             )
 
+        try:
+            resolved_verification = resolve_verification(
+                verification_store, session.session_id, args.verification
+            )
+        except ChatVerificationError as exc:
+            raise ChatCLIError(str(exc)) from exc
+        if session.access_mode == "write" and resolved_verification is None:
+            raise ChatCLIError("write_access_requires_verification")
+        input_reader = build_chat_input(state_root, repo_id)
+
         client = OperatorClient(base_url=args.operator_url)
         shell = ChatShell(
             client=client,
@@ -775,7 +828,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_steps=args.max_steps,
             max_chars=args.max_chars,
             wait_timeout_seconds=args.wait_timeout_seconds,
-            verification_argv=args.verification,
+            verification_argv=resolved_verification,
+            verification_store=verification_store,
+            input_reader=input_reader,
         )
         if session.interaction_mode == "agent":
             shell._require_agent_authorized()

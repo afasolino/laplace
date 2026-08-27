@@ -1,7 +1,7 @@
-"""Compatibility console entrypoint that adds only ``laplace chat``.
+"""Compatibility console entrypoint for ``laplace chat``, web and Codex.
 
 The installer records the original console target in ORIGINAL_ENTRYPOINT.
-All non-chat invocations are forwarded unchanged.
+All other invocations are forwarded unchanged.
 """
 from __future__ import annotations
 
@@ -29,6 +29,18 @@ def main() -> int:
         from .chat_cli import main as chat_main
 
         return int(chat_main(sys.argv[2:]))
+    if len(sys.argv) >= 2 and sys.argv[1] == "web":
+        from .laplace_web import main as web_main
+
+        return int(web_main(sys.argv[2:]))
+    if len(sys.argv) >= 2 and sys.argv[1] == "codex":
+        from .zetsu_codex import main as codex_main
+
+        return int(codex_main(sys.argv[2:]))
+    if len(sys.argv) >= 2 and sys.argv[1] == "ast-context":
+        from .ast_context import main as ast_context_main
+
+        return int(ast_context_main(sys.argv[2:]))
     result = _original()()
     return int(result) if isinstance(result, int) else 0
 
