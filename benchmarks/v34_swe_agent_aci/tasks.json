@@ -1,0 +1,167 @@
+{
+  "laplace_revision": "5d8e463511d84ab1a7ee87b0f717b665f91d3e0f",
+  "repetitions": 5,
+  "schema": "laplace.v34.swe_aci_phase_a_tasks.v2",
+  "swe_agent_revision": "3ea751c087f32b16e039a2233dd6eefecef325d5",
+  "tasks": [
+    {
+      "end_line": 180,
+      "expected_paths": [
+        "src/alpha.py"
+      ],
+      "expected_terms": [
+        "ALPHA_TOP",
+        "alpha_helper"
+      ],
+      "operation": "read",
+      "path": "src/alpha.py",
+      "primitive": "view",
+      "start_line": 1,
+      "task_id": "view-alpha-top"
+    },
+    {
+      "end_line": 200,
+      "expected_paths": [
+        "src/alpha.py"
+      ],
+      "expected_terms": [
+        "ALPHA_MIDDLE",
+        "alpha_middle"
+      ],
+      "operation": "read",
+      "path": "src/alpha.py",
+      "primitive": "view",
+      "start_line": 45,
+      "task_id": "view-alpha-middle"
+    },
+    {
+      "end_line": 160,
+      "expected_paths": [
+        "src/beta.py"
+      ],
+      "expected_terms": [
+        "BETA_TOP",
+        "beta_helper"
+      ],
+      "operation": "read",
+      "path": "src/beta.py",
+      "primitive": "view",
+      "start_line": 1,
+      "task_id": "view-beta"
+    },
+    {
+      "expected_paths": [
+        "src/alpha.py",
+        "src/beta.py",
+        "src/gamma.py",
+        "tests/test_fixture.py"
+      ],
+      "expected_terms": [
+        "shared_target"
+      ],
+      "glob": "*.py",
+      "operation": "search",
+      "primitive": "search",
+      "query": "shared_target",
+      "task_id": "search-target"
+    },
+    {
+      "expected_paths": [
+        "src/gamma.py"
+      ],
+      "expected_terms": [
+        "UNIQUE_MARKER"
+      ],
+      "glob": "*.py",
+      "operation": "search",
+      "primitive": "search",
+      "query": "UNIQUE_MARKER",
+      "task_id": "search-marker"
+    },
+    {
+      "expected_paths": [
+        "src/alpha.py",
+        "tests/test_fixture.py"
+      ],
+      "expected_terms": [
+        "alpha_middle"
+      ],
+      "glob": "*.py",
+      "operation": "search",
+      "primitive": "search",
+      "query": "alpha_middle",
+      "task_id": "search-function"
+    },
+    {
+      "expected_paths": [],
+      "expected_terms": [],
+      "glob": "*.py",
+      "operation": "search_no_match",
+      "primitive": "search",
+      "query": "V34_IDENTIFIER_THAT_DOES_NOT_EXIST",
+      "task_id": "search-no-match"
+    },
+    {
+      "expected_paths": [
+        "src/edit_target.py"
+      ],
+      "expected_terms": [
+        "VALUE = 2"
+      ],
+      "new_text": "VALUE = 2",
+      "old_text": "VALUE = 1",
+      "operation": "edit_valid",
+      "path": "src/edit_target.py",
+      "primitive": "syntax_preflight",
+      "task_id": "edit-valid-python"
+    },
+    {
+      "expected_paths": [
+        "src/edit_target.py"
+      ],
+      "expected_terms": [
+        "VALUE = 1"
+      ],
+      "new_text": "VALUE = (",
+      "old_text": "VALUE = 1",
+      "operation": "edit_invalid_python",
+      "path": "src/edit_target.py",
+      "primitive": "syntax_preflight",
+      "task_id": "edit-invalid-python"
+    },
+    {
+      "expected_paths": [
+        "src/edit_target.py"
+      ],
+      "expected_terms": [
+        "aci_mutation_not_allowed"
+      ],
+      "new_text": "VALUE = 2",
+      "old_text": "VALUE = 1",
+      "operation": "mutation_denied",
+      "path": "src/edit_target.py",
+      "primitive": "governance",
+      "task_id": "guard-mutation-denied"
+    },
+    {
+      "expected_paths": [],
+      "expected_terms": [
+        "aci_path_escape"
+      ],
+      "operation": "path_escape",
+      "path": "../outside.txt",
+      "primitive": "governance",
+      "task_id": "guard-path-escape"
+    },
+    {
+      "expected_paths": [],
+      "expected_terms": [
+        "aci_git_metadata_forbidden"
+      ],
+      "operation": "git_metadata",
+      "path": ".git/config",
+      "primitive": "governance",
+      "task_id": "guard-git-metadata"
+    }
+  ]
+}

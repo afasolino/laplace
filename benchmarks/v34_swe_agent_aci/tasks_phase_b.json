@@ -1,0 +1,233 @@
+{
+  "lane": "quality",
+  "laplace_revision": "5d8e463511d84ab1a7ee87b0f717b665f91d3e0f",
+  "max_chars": 6000,
+  "max_steps": 6,
+  "minimum_paired_tasks": 10,
+  "paired_tasks": 12,
+  "phase_a_required_assessment": "PROMISING",
+  "phase_a_required_primitives": [
+    "view",
+    "search",
+    "syntax_preflight"
+  ],
+  "schema": "laplace.v34.swe_aci_phase_b_tasks.v1",
+  "swe_agent_revision": "3ea751c087f32b16e039a2233dd6eefecef325d5",
+  "tasks": [
+    {
+      "expected_answer_terms": [
+        "alpha-mid-7f3c"
+      ],
+      "expected_paths": [
+        "src/long_alpha.py"
+      ],
+      "instruction": "Read-only task. Inspect src/long_alpha.py with bounded repository tools. Report the exact string value assigned to MIDPOINT_SECRET. Do not modify anything and do not guess.",
+      "kind": "view",
+      "mutation_expected": false,
+      "oracle": null,
+      "task_id": "view-alpha-mid",
+      "verification_argv": null
+    },
+    {
+      "expected_answer_terms": [
+        "alpha-tail-91bd"
+      ],
+      "expected_paths": [
+        "src/long_alpha.py"
+      ],
+      "instruction": "Read-only task. Inspect src/long_alpha.py and report the exact string value assigned to TAIL_SECRET near the lower part of the file. Use bounded repository tools; do not modify anything.",
+      "kind": "view",
+      "mutation_expected": false,
+      "oracle": null,
+      "task_id": "view-alpha-tail",
+      "verification_argv": null
+    },
+    {
+      "expected_answer_terms": [
+        "beta-secret-c248"
+      ],
+      "expected_paths": [
+        "src/long_beta.py"
+      ],
+      "instruction": "Read-only task. Inspect src/long_beta.py and report the exact value of BETA_SECRET. Use bounded repository tools and do not modify anything.",
+      "kind": "view",
+      "mutation_expected": false,
+      "oracle": null,
+      "task_id": "view-beta-secret",
+      "verification_argv": null
+    },
+    {
+      "expected_answer_terms": [
+        "alpha-head-a119",
+        "beta-secret-c248"
+      ],
+      "expected_paths": [
+        "src/long_alpha.py",
+        "src/long_beta.py"
+      ],
+      "instruction": "Read-only task. Inspect src/long_alpha.py and src/long_beta.py. Report both exact values of HEAD_SECRET and BETA_SECRET. Do not modify files.",
+      "kind": "view",
+      "mutation_expected": false,
+      "oracle": null,
+      "task_id": "view-cross-file",
+      "verification_argv": null
+    },
+    {
+      "expected_answer_terms": [
+        "src/search_one.py",
+        "src/search_two.py",
+        "src/search_three.py"
+      ],
+      "expected_paths": [
+        "src/search_one.py",
+        "src/search_two.py",
+        "src/search_three.py"
+      ],
+      "instruction": "Read-only task. Search the repository for shared_locator. Report every source file under src/ that defines that identifier, and no unrelated files. Do not modify anything.",
+      "kind": "search",
+      "mutation_expected": false,
+      "oracle": null,
+      "task_id": "search-shared-locator",
+      "verification_argv": null
+    },
+    {
+      "expected_answer_terms": [
+        "src/search_three.py",
+        "unique-search-5aa2"
+      ],
+      "expected_paths": [
+        "src/search_three.py"
+      ],
+      "instruction": "Read-only task. Locate UNIQUE_SEARCH_TOKEN using repository search, then report its file path and exact assigned string value. Do not modify anything.",
+      "kind": "search",
+      "mutation_expected": false,
+      "oracle": null,
+      "task_id": "search-unique-token",
+      "verification_argv": null
+    },
+    {
+      "expected_answer_terms": [
+        "src/search_two.py",
+        "function-result-84ce"
+      ],
+      "expected_paths": [
+        "src/search_two.py"
+      ],
+      "instruction": "Read-only task. Locate special_search_function in the repository and report its file path and exact returned string literal. Do not modify anything.",
+      "kind": "search",
+      "mutation_expected": false,
+      "oracle": null,
+      "task_id": "search-function",
+      "verification_argv": null
+    },
+    {
+      "expected_answer_terms": [
+        "NO_MATCHES"
+      ],
+      "expected_paths": [],
+      "instruction": "Read-only task. Search for V34_IDENTIFIER_THAT_DOES_NOT_EXIST. Confirm the search result rather than guessing. If there are no matches, finish with the literal marker NO_MATCHES. Do not modify anything.",
+      "kind": "search",
+      "mutation_expected": false,
+      "oracle": null,
+      "task_id": "search-no-match",
+      "verification_argv": null
+    },
+    {
+      "expected_answer_terms": [],
+      "expected_paths": [
+        "src/edit_target.py"
+      ],
+      "instruction": "Governed mutation task. Change SCALE in src/edit_target.py from 2 to 3 without changing tests or unrelated behavior. Run exactly `pytest tests/test_fixture.py -q` through the bounded verifier and only finish after the latest mutation is verified.",
+      "kind": "mutation",
+      "mutation_expected": true,
+      "oracle": {
+        "forbidden": [
+          "SCALE = 2"
+        ],
+        "path": "src/edit_target.py",
+        "required": [
+          "SCALE = 3"
+        ]
+      },
+      "task_id": "mutate-scale",
+      "verification_argv": [
+        "pytest",
+        "tests/test_fixture.py",
+        "-q"
+      ]
+    },
+    {
+      "expected_answer_terms": [],
+      "expected_paths": [
+        "src/edit_target.py"
+      ],
+      "instruction": "Governed mutation task. Change compute_offset() in src/edit_target.py so it returns 7 instead of 4. Do not modify tests. Run exactly `pytest tests/test_fixture.py -q` and finish only after verification.",
+      "kind": "mutation",
+      "mutation_expected": true,
+      "oracle": {
+        "forbidden": [
+          "return 4"
+        ],
+        "path": "src/edit_target.py",
+        "required": [
+          "return 7"
+        ]
+      },
+      "task_id": "mutate-offset",
+      "verification_argv": [
+        "pytest",
+        "tests/test_fixture.py",
+        "-q"
+      ]
+    },
+    {
+      "expected_answer_terms": [],
+      "expected_paths": [
+        "src/edit_target.py"
+      ],
+      "instruction": "Governed mutation task. Update format_label() in src/edit_target.py so the prefix is `new:` instead of `old:` while preserving the input text. Do not modify tests. Run exactly `pytest tests/test_fixture.py -q` and finish only after verification.",
+      "kind": "mutation",
+      "mutation_expected": true,
+      "oracle": {
+        "forbidden": [
+          "return f\"old:{value}\""
+        ],
+        "path": "src/edit_target.py",
+        "required": [
+          "return f\"new:{value}\""
+        ]
+      },
+      "task_id": "mutate-label",
+      "verification_argv": [
+        "pytest",
+        "tests/test_fixture.py",
+        "-q"
+      ]
+    },
+    {
+      "expected_answer_terms": [],
+      "expected_paths": [
+        "src/edit_target.py"
+      ],
+      "instruction": "Governed mutation task. Update transform() in src/edit_target.py so it computes `(value + 2) * 2` instead of `(value + 1) * 2`. Do not modify tests. Run exactly `pytest tests/test_fixture.py -q` and finish only after the latest mutation is verified.",
+      "kind": "mutation",
+      "mutation_expected": true,
+      "oracle": {
+        "forbidden": [
+          "return (value + 1) * 2"
+        ],
+        "path": "src/edit_target.py",
+        "required": [
+          "return (value + 2) * 2"
+        ]
+      },
+      "task_id": "mutate-transform",
+      "verification_argv": [
+        "pytest",
+        "tests/test_fixture.py",
+        "-q"
+      ]
+    }
+  ],
+  "wait_timeout_seconds": 300
+}
