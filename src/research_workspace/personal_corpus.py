@@ -18,6 +18,7 @@ import secrets
 import shutil
 import sqlite3
 import stat
+import tempfile
 import unicodedata
 import uuid
 import zipfile
@@ -169,8 +170,11 @@ def _identifier(value: str, *, label: str) -> str:
 def _atomic_private_bytes(path: Path, value: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(path.parent, 0o700)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(6)}.tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    # Keep the temporary basename short.  The owner-scoped staging path is
+    # already bounded, but the previous PID/token basename exceeded Windows'
+    # legacy MAX_PATH limit for otherwise valid uploads.
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".tmp-", dir=path.parent)
+    temporary = Path(temporary_name)
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(value)
@@ -593,6 +597,25 @@ class PersonalCorpusStore:
         os.chmod(value, 0o700)
         return value
 
+    def _staging_directory(
+        self,
+        owner_user_id: str,
+        corpus_id: str,
+        upload_id: str,
+        *,
+        existing: bool = False,
+    ) -> Path:
+        """Return the owner-isolated staging directory without Windows path overflow."""
+
+        owner_root = self._owner_root(owner_user_id)
+        if os.name != "nt":
+            return owner_root / corpus_id / "staging" / upload_id
+        preferred = owner_root / "staging" / upload_id
+        legacy = owner_root / corpus_id / "staging" / upload_id
+        if existing and not preferred.exists() and legacy.exists():
+            return legacy
+        return preferred
+
     def _event(
         self,
         event: str,
@@ -847,7 +870,7 @@ class PersonalCorpusStore:
                 """,
                 (upload_id, owner_user_id, corpus_id, idempotency_key, now, now),
             )
-        staging = self._owner_root(owner_user_id) / corpus_id / "staging" / upload_id
+        staging = self._staging_directory(owner_user_id, corpus_id, upload_id)
         staging.mkdir(parents=True, exist_ok=False, mode=0o700)
         self._event(
             "UPLOAD_CREATE",
@@ -962,13 +985,12 @@ class PersonalCorpusStore:
                 self._require_disk_space(len(content))
                 self._require_owner_quota(connection, owner_user_id, len(content))
                 staging_name = f"{uuid.uuid4().hex}.source"
-                target = (
-                    self._owner_root(owner_user_id)
-                    / str(upload["corpus_id"])
-                    / "staging"
-                    / upload_id
-                    / staging_name
-                )
+                target = self._staging_directory(
+                    owner_user_id,
+                    str(upload["corpus_id"]),
+                    upload_id,
+                    existing=True,
+                ) / staging_name
                 _atomic_private_bytes(target, content)
             try:
                 connection.execute(
@@ -996,10 +1018,12 @@ class PersonalCorpusStore:
             except sqlite3.IntegrityError as exc:
                 if staging_name:
                     (
-                        self._owner_root(owner_user_id)
-                        / str(upload["corpus_id"])
-                        / "staging"
-                        / upload_id
+                        self._staging_directory(
+                            owner_user_id,
+                            str(upload["corpus_id"]),
+                            upload_id,
+                            existing=True,
+                        )
                         / staging_name
                     ).unlink(missing_ok=True)
                 raise CorpusError("duplicate_or_normalization_collision") from exc
@@ -1179,11 +1203,11 @@ class PersonalCorpusStore:
                 """,
                 (_now(), upload_id, owner_user_id),
             )
-        staging = (
-            self._owner_root(owner_user_id)
-            / str(upload["corpus_id"])
-            / "staging"
-            / upload_id
+        staging = self._staging_directory(
+            owner_user_id,
+            str(upload["corpus_id"]),
+            upload_id,
+            existing=True,
         )
         shutil.rmtree(staging, ignore_errors=True)
         self._event(
@@ -1230,13 +1254,9 @@ class PersonalCorpusStore:
         deduplicated = 0
         try:
             for row in rows:
-                staging = (
-                    self._owner_root(owner_user_id)
-                    / corpus_id
-                    / "staging"
-                    / upload_id
-                    / str(row["staging_name"])
-                )
+                staging = self._staging_directory(
+                    owner_user_id, corpus_id, upload_id, existing=True
+                ) / str(row["staging_name"])
                 content = staging.read_bytes()
                 extracted = _extract_bounded(
                     str(row["logical_path"]), content, self.policy
@@ -1352,17 +1372,13 @@ class PersonalCorpusStore:
                         "SELECT 1 FROM sources WHERE source_id=?", (source_id,)
                     ).fetchone()
                     if exists is None and target.exists():
-                        quarantine = (
-                            self._owner_root(owner_user_id)
-                            / corpus_id
-                            / "staging"
-                            / upload_id
-                            / f"recovered-{target.name}"
-                        )
+                        quarantine = self._staging_directory(
+                            owner_user_id, corpus_id, upload_id, existing=True
+                        ) / f"recovered-{target.name}"
                         os.replace(target, quarantine)
             raise
-        staging_root = (
-            self._owner_root(owner_user_id) / corpus_id / "staging" / upload_id
+        staging_root = self._staging_directory(
+            owner_user_id, corpus_id, upload_id, existing=True
         )
         shutil.rmtree(staging_root, ignore_errors=True)
         result = {

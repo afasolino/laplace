@@ -41,6 +41,16 @@ research_workspace = ["operator_web/*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "cross_platform_deterministic: deterministic tests supported on the current host",
+    "linux_posix_required: deterministic tests requiring POSIX runtime semantics",
+    "windows_privilege_required: tests blocked by Windows privilege or native policy",
+    "optional_dependency: tests requiring a declared but unavailable dependency or toolchain",
+    "interactive_e2e: tests requiring an interactive console or browser",
+    "gpu_smoke: lightweight GPU checks that do not certify production hardware",
+    "a6000_required: checks deferred to the RTX A6000 production host",
+    "external_live: checks requiring an external live service or model",
+]
 
 [tool.ruff]
 line-length = 100

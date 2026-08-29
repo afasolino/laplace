@@ -1,8 +1,9 @@
-"""Session-bound verifier persistence for ``laplace chat``.
+"""Session verifier persistence for ``laplace chat``.
 
 The remote repository agent remains authoritative for verifier admission and
-execution.  This store only remembers the exact caller-selected argv so a local
-CLI resume does not silently drop or replace the previously bound contract.
+execution. The local store remembers the latest caller-selected verifier for
+resume convenience; verifier replacement is allowed during development and
+remote candidate-assurance state remains authoritative for verification claims.
 """
 from __future__ import annotations
 
@@ -120,5 +121,5 @@ def resolve_verification(
     if explicit is None:
         return persisted
     if explicit != persisted:
-        raise ChatVerificationError("resume_verification_conflict")
-    return persisted
+        store.save(session_id, explicit)
+    return explicit

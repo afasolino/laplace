@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Mapping, TypeAlias, cast
 
+from .candidate_assurance import AssuranceState, CandidateAssurance, VerificationBinding
 from .repository_authorization import (
     RepositoryAuthorizationError,
     RepositoryAuthorizationStore,
@@ -94,6 +95,7 @@ _GC_TERMINAL_STATES = (
     "STALE_GRANT",
     "CLEANUP_PENDING",
 )
+_MAX_EVENTS_PER_SESSION = 512
 
 
 class AgentSandboxManager:
@@ -187,6 +189,11 @@ class AgentSandboxManager:
                     executor_boot_id TEXT,
                     wall_deadline_utc TEXT,
                     last_heartbeat_utc TEXT,
+                    mutation_epoch INTEGER NOT NULL DEFAULT 0,
+                    verified_epoch INTEGER NOT NULL DEFAULT 0,
+                    verified_fingerprint TEXT NOT NULL DEFAULT '',
+                    verifier_digest TEXT NOT NULL DEFAULT '',
+                    assurance_state TEXT NOT NULL DEFAULT 'clean',
                     UNIQUE(user_id, idempotency_key)
                 );
                 CREATE TABLE IF NOT EXISTS worktree_events (
@@ -204,6 +211,7 @@ class AgentSandboxManager:
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(worktree_sessions)")
             }
+            legacy_assurance = "assurance_state" not in columns
             migrations = {
                 "ownership_token": "ALTER TABLE worktree_sessions ADD COLUMN ownership_token TEXT",
                 "cleanup_eligible": (
@@ -230,6 +238,26 @@ class AgentSandboxManager:
                 "last_heartbeat_utc": (
                     "ALTER TABLE worktree_sessions ADD COLUMN last_heartbeat_utc TEXT"
                 ),
+                "mutation_epoch": (
+                    "ALTER TABLE worktree_sessions ADD COLUMN mutation_epoch INTEGER "
+                    "NOT NULL DEFAULT 0"
+                ),
+                "verified_epoch": (
+                    "ALTER TABLE worktree_sessions ADD COLUMN verified_epoch INTEGER "
+                    "NOT NULL DEFAULT 0"
+                ),
+                "verified_fingerprint": (
+                    "ALTER TABLE worktree_sessions ADD COLUMN verified_fingerprint TEXT "
+                    "NOT NULL DEFAULT ''"
+                ),
+                "verifier_digest": (
+                    "ALTER TABLE worktree_sessions ADD COLUMN verifier_digest TEXT "
+                    "NOT NULL DEFAULT ''"
+                ),
+                "assurance_state": (
+                    "ALTER TABLE worktree_sessions ADD COLUMN assurance_state TEXT "
+                    "NOT NULL DEFAULT 'clean'"
+                ),
                 "current_task_label": (
                     "ALTER TABLE worktree_sessions ADD COLUMN current_task_label TEXT"
                 ),
@@ -237,6 +265,13 @@ class AgentSandboxManager:
             for name, statement in migrations.items():
                 if name not in columns:
                     connection.execute(statement)
+            if legacy_assurance:
+                # Old rows did not carry an epoch/fingerprint/verifier binding.
+                # Do not turn that absence into a semantically false clean result.
+                connection.execute(
+                    "UPDATE worktree_sessions SET assurance_state='legacy_unverified' "
+                    "WHERE assurance_state='clean'"
+                )
             # v1 Zetsu rows recorded terminal events but left their lifecycle
             # state ACTIVE/FAILED. Reclassify only unmistakable Zetsu sessions;
             # evidence and cleanliness are validated later before any release.
@@ -291,7 +326,7 @@ class AgentSandboxManager:
             connection.execute(
                 """
                 INSERT INTO worktree_schema (singleton, schema_version, updated_at_utc)
-                VALUES (1, 2, ?)
+                VALUES (1, 4, ?)
                 ON CONFLICT(singleton) DO UPDATE SET
                     schema_version=excluded.schema_version,
                     updated_at_utc=excluded.updated_at_utc
@@ -719,6 +754,23 @@ class AgentSandboxManager:
         )
         if cursor.lastrowid is None:
             raise AgentSandboxError("agent_event_sequence_unavailable")
+        event_count = connection.execute(
+            "SELECT COUNT(*) FROM worktree_events WHERE session_id=? AND user_id=?",
+            (binding.session_id, binding.user_id),
+        ).fetchone()[0]
+        if int(event_count) > _MAX_EVENTS_PER_SESSION:
+            connection.execute(
+                "DELETE FROM worktree_events WHERE session_id=? AND user_id=? AND sequence < "
+                "COALESCE((SELECT sequence FROM worktree_events WHERE session_id=? AND user_id=? "
+                "ORDER BY sequence DESC LIMIT 1 OFFSET ?), 0)",
+                (
+                    binding.session_id,
+                    binding.user_id,
+                    binding.session_id,
+                    binding.user_id,
+                    _MAX_EVENTS_PER_SESSION - 1,
+                ),
+            )
         return int(cursor.lastrowid)
 
     def record_progress(
@@ -750,6 +802,7 @@ class AgentSandboxManager:
             "TASK_YIELDED_RESUMABLE",
             "TASK_COMPLETED",
             "TASK_FAILED",
+            "TASK_EVIDENCE_FAILED",
             "TASK_CANCELLED",
             "TURN_COMPLETED",
             "TURN_FAILED",
@@ -865,18 +918,23 @@ class AgentSandboxManager:
         )
         if status.returncode != 0 or status.stdout.strip():
             changed_paths, diff_hash = self._diff_summary(binding)
-            self._update_diff(binding, changed_paths, diff_hash)
+            assurance = self._observe_candidate(binding, changed_paths, diff_hash)
             self._set_state(
                 binding,
                 "DIRTY",
                 "CLOSE_PRESERVED_DIRTY",
-                {"changed_paths": list(changed_paths), "diff_hash": diff_hash},
+                {
+                    "changed_paths": list(changed_paths),
+                    "diff_hash": diff_hash,
+                    **self._assurance_public(assurance),
+                },
             )
             return {
                 "status": "PRESERVED_DIRTY_WORKTREE",
                 "session_id": session_id,
                 "changed_paths": list(changed_paths),
                 "diff_hash": diff_hash,
+                **self._assurance_public(assurance),
             }
         remove = self._runner(
             [
@@ -916,7 +974,8 @@ class AgentSandboxManager:
                 """
                 SELECT repo_id, base_revision, grant_revision, state, changed_paths_json,
                        diff_hash, verification_summary, physical_state, result_id,
-                       current_task_label
+                       current_task_label, mutation_epoch, verified_epoch,
+                       verified_fingerprint, verifier_digest, assurance_state
                 FROM worktree_sessions WHERE session_id=? AND user_id=?
                 """,
                 (identifier, user_id),
@@ -935,6 +994,7 @@ class AgentSandboxManager:
                 "changed_paths": json.loads(str(historical["changed_paths_json"])),
                 "diff_hash": historical["diff_hash"],
                 "verification_summary": historical["verification_summary"],
+                **self._assurance_public(self._assurance_from_row(historical)),
                 "result_id": historical["result_id"],
                 "task_label": (
                     str(historical["current_task_label"])
@@ -958,7 +1018,7 @@ class AgentSandboxManager:
             )
         dirty = bool(status.stdout.strip())
         changed_paths, diff_hash = self._diff_summary(binding)
-        self._update_diff(binding, changed_paths, diff_hash)
+        assurance = self._observe_candidate(binding, changed_paths, diff_hash)
         state = "DIRTY" if dirty else "ACTIVE"
         with self._connect() as connection:
             row = connection.execute(
@@ -984,6 +1044,7 @@ class AgentSandboxManager:
             "changed_paths": list(changed_paths),
             "diff_hash": diff_hash,
             "verification_summary": historical["verification_summary"],
+            **self._assurance_public(assurance),
             "result_id": historical["result_id"],
             "task_label": (
                 str(historical["current_task_label"])
@@ -1010,14 +1071,15 @@ class AgentSandboxManager:
             check=False,
             timeout=30,
         )
+        if names.returncode != 0:
+            raise AgentSandboxError("candidate_git_observation_failed")
         paths: list[str] = []
-        if names.returncode == 0:
-            for line in names.stdout.splitlines():
-                path = line[3:] if len(line) > 3 else ""
-                if " -> " in path:
-                    path = path.split(" -> ", 1)[1]
-                if path:
-                    paths.append(path)
+        for line in names.stdout.splitlines():
+            path = line[3:] if len(line) > 3 else ""
+            if " -> " in path:
+                path = path.split(" -> ", 1)[1]
+            if path:
+                paths.append(path)
         diff = self._runner(
             ["git", "-C", str(root), "diff", "--binary", "--no-ext-diff", "HEAD"],
             capture_output=True,
@@ -1032,39 +1094,378 @@ class AgentSandboxManager:
             check=False,
             timeout=30,
         )
+        if diff.returncode != 0 or untracked.returncode != 0:
+            raise AgentSandboxError("candidate_git_observation_failed")
         material = diff.stdout
-        if untracked.returncode == 0:
-            for path in sorted(untracked.stdout.splitlines()):
-                candidate = root / path
-                try:
-                    content = candidate.read_bytes()
-                except OSError:
-                    continue
-                material += f"\nuntracked:{path}:{hashlib.sha256(content).hexdigest()}"
+        for path in sorted(untracked.stdout.splitlines()):
+            candidate = root / path
+            try:
+                content = candidate.read_bytes()
+            except OSError as exc:
+                raise AgentSandboxError("candidate_git_observation_failed") from exc
+            material += f"\nuntracked:{path}:{hashlib.sha256(content).hexdigest()}"
         digest = hashlib.sha256(material.encode("utf-8")).hexdigest() if material else None
         return tuple(sorted(set(paths))), digest
 
-    def _update_diff(
-        self,
-        binding: AgentSessionBinding,
-        changed_paths: tuple[str, ...],
-        diff_hash: str | None,
-    ) -> None:
-        with self._connect() as connection:
+    def _record_observation_failure(
+        self, binding: AgentSessionBinding, category: str
+    ) -> JsonObject:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM worktree_sessions WHERE session_id=? AND user_id=?",
+                (binding.session_id, binding.user_id),
+            ).fetchone()
+            if row is None:
+                raise AgentSandboxError("unknown_agent_session")
+            assurance = self._assurance_from_row(row).observation_failed()
             connection.execute(
-                """
-                UPDATE worktree_sessions
-                SET changed_paths_json=?, diff_hash=?, updated_at_utc=?
-                WHERE session_id=? AND user_id=?
-                """,
+                "UPDATE worktree_sessions SET assurance_state=?, verification_summary=?, "
+                "updated_at_utc=? WHERE session_id=? AND user_id=?",
                 (
-                    json.dumps(list(changed_paths), separators=(",", ":")),
-                    diff_hash,
+                    assurance.state.value,
+                    f"OBSERVATION_FAILED:{category}",
                     datetime.now(UTC).isoformat(),
                     binding.session_id,
                     binding.user_id,
                 ),
             )
+            self._event(
+                connection,
+                binding,
+                "CANDIDATE_OBSERVATION_FAILED",
+                assurance.state.value,
+                {"category": category},
+            )
+        return {
+            "session_id": binding.session_id,
+            "base_revision": binding.base_revision,
+            "changed_paths": json.loads(str(row["changed_paths_json"])),
+            "diff_hash": row["diff_hash"],
+            "observation_error": category,
+            **self._assurance_public(assurance),
+        }
+
+    @staticmethod
+    def _assurance_from_row(row: sqlite3.Row) -> CandidateAssurance:
+        try:
+            state = AssuranceState(str(row["assurance_state"]))
+            mutation_epoch = int(row["mutation_epoch"])
+            verified_epoch = int(row["verified_epoch"])
+            candidate_fingerprint = str(row["diff_hash"] or "")
+            verified_fingerprint = str(row["verified_fingerprint"] or "")
+            verifier_digest = str(row["verifier_digest"] or "")
+            return CandidateAssurance(
+                base_revision=str(row["base_revision"]),
+                mutation_epoch=mutation_epoch,
+                verified_epoch=verified_epoch,
+                candidate_fingerprint=candidate_fingerprint,
+                verified_fingerprint=verified_fingerprint,
+                verifier_digest=verifier_digest,
+                state=state,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AgentSandboxError("candidate_assurance_state_invalid") from exc
+
+    @staticmethod
+    def _assurance_public(assurance: CandidateAssurance) -> JsonObject:
+        binding: JsonObject | None = None
+        if assurance.is_currently_verified and assurance.verifier_digest:
+            binding = asdict(assurance.binding())
+        return {
+            "assurance_state": assurance.state.value,
+            "mutation_epoch": assurance.mutation_epoch,
+            "verified_epoch": assurance.verified_epoch,
+            "candidate_fingerprint": assurance.candidate_fingerprint or None,
+            "verified_fingerprint": assurance.verified_fingerprint or None,
+            "verifier_digest": assurance.verifier_digest or None,
+            "currently_verified": assurance.is_currently_verified,
+            "promotion_eligible": assurance.promotion_eligible,
+            "verification_binding": binding,
+        }
+
+    def _observe_candidate(
+        self,
+        binding: AgentSessionBinding,
+        changed_paths: tuple[str, ...],
+        diff_hash: str | None,
+    ) -> CandidateAssurance:
+        """Synchronize durable assurance with one authoritative worktree read."""
+
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM worktree_sessions WHERE session_id=? AND user_id=?",
+                (binding.session_id, binding.user_id),
+            ).fetchone()
+            if row is None:
+                raise AgentSandboxError("unknown_agent_session")
+            assurance = self._assurance_from_row(row)
+            observed = (
+                assurance.observe_candidate(diff_hash)
+                if diff_hash is not None
+                else assurance.observe_clean()
+            )
+            fingerprint_changed = str(row["diff_hash"] or "") != (diff_hash or "")
+            assurance_changed = observed != assurance
+            connection.execute(
+                """
+                UPDATE worktree_sessions
+                SET changed_paths_json=?, diff_hash=?, mutation_epoch=?, verified_epoch=?,
+                    verified_fingerprint=?, verifier_digest=?, assurance_state=?,
+                    updated_at_utc=?
+                WHERE session_id=? AND user_id=?
+                """,
+                (
+                    json.dumps(list(changed_paths), separators=(",", ":")),
+                    diff_hash,
+                    observed.mutation_epoch,
+                    observed.verified_epoch,
+                    observed.verified_fingerprint,
+                    observed.verifier_digest,
+                    observed.state.value,
+                    datetime.now(UTC).isoformat(),
+                    binding.session_id,
+                    binding.user_id,
+                ),
+            )
+            if assurance_changed and fingerprint_changed:
+                self._event(
+                    connection,
+                    binding,
+                    "CANDIDATE_OBSERVED",
+                    observed.state.value,
+                    {
+                        "changed_paths": list(changed_paths),
+                        "candidate_fingerprint": diff_hash,
+                        "mutation_epoch": observed.mutation_epoch,
+                        "verified_epoch": observed.verified_epoch,
+                        "assurance_state": observed.state.value,
+                    },
+                )
+        return observed
+
+    def observe_worktree(self, session_id: str, *, user_id: str) -> JsonObject:
+        """Recompute the candidate fingerprint and return durable assurance state."""
+
+        binding = self.require_active(session_id, user_id=user_id)
+        try:
+            changed_paths, diff_hash = self._diff_summary(binding)
+        except AgentSandboxError as exc:
+            return self._record_observation_failure(binding, exc.category)
+        assurance = self._observe_candidate(binding, changed_paths, diff_hash)
+        return {
+            "session_id": binding.session_id,
+            "base_revision": binding.base_revision,
+            "changed_paths": list(changed_paths),
+            "diff_hash": diff_hash,
+            **self._assurance_public(assurance),
+        }
+
+    def begin_verification(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        verifier_digest: str,
+    ) -> JsonObject:
+        """Bind a verifier attempt to the current candidate without freezing the session."""
+
+        if re.fullmatch(r"[a-f0-9]{64}", verifier_digest) is None:
+            raise AgentSandboxError("verifier_digest_invalid")
+        observed = self.observe_worktree(session_id, user_id=user_id)
+        if "observation_error" in observed:
+            raise AgentSandboxError("candidate_observation_failed")
+        if not observed["candidate_fingerprint"]:
+            raise AgentSandboxError("verification_candidate_required")
+        binding = self.require_active(session_id, user_id=user_id)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM worktree_sessions WHERE session_id=? AND user_id=?",
+                (binding.session_id, binding.user_id),
+            ).fetchone()
+            if row is None:
+                raise AgentSandboxError("unknown_agent_session")
+            assurance = self._assurance_from_row(row)
+            try:
+                next_assurance = assurance.start_verification(verifier_digest)
+            except ValueError as exc:
+                raise AgentSandboxError("verification_candidate_required") from exc
+            connection.execute(
+                """
+                UPDATE worktree_sessions
+                SET verifier_digest=?, assurance_state=?, verification_summary=?, updated_at_utc=?
+                WHERE session_id=? AND user_id=?
+                """,
+                (
+                    verifier_digest,
+                    next_assurance.state.value,
+                    f"VERIFYING:epoch={next_assurance.mutation_epoch}"[:2_000],
+                    datetime.now(UTC).isoformat(),
+                    binding.session_id,
+                    binding.user_id,
+                ),
+            )
+            self._event(
+                connection,
+                binding,
+                "VERIFICATION_STARTED",
+                next_assurance.state.value,
+                {
+                    "mutation_epoch": next_assurance.mutation_epoch,
+                    "candidate_fingerprint": next_assurance.candidate_fingerprint,
+                    "verifier_digest": verifier_digest,
+                },
+            )
+        return self.inspect(session_id, user_id=user_id)
+
+    def complete_verification(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        verifier_digest: str,
+        passed: bool,
+        summary: str,
+    ) -> JsonObject:
+        """Record one bounded verification outcome against the current candidate."""
+
+        if re.fullmatch(r"[a-f0-9]{64}", verifier_digest) is None:
+            raise AgentSandboxError("verifier_digest_invalid")
+        binding = self.require_active(session_id, user_id=user_id)
+        observed = self.observe_worktree(session_id, user_id=user_id)
+        if "observation_error" in observed:
+            raise AgentSandboxError("candidate_observation_failed")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM worktree_sessions WHERE session_id=? AND user_id=?",
+                (binding.session_id, binding.user_id),
+            ).fetchone()
+            if row is None:
+                raise AgentSandboxError("unknown_agent_session")
+            assurance = self._assurance_from_row(row)
+            actual_pass = bool(passed)
+            if actual_pass and assurance.state is AssuranceState.VERIFYING:
+                try:
+                    next_assurance = assurance.verification_passed(verifier_digest)
+                except ValueError:
+                    actual_pass = False
+                    next_assurance = assurance.verification_failed()
+            elif assurance.state is AssuranceState.VERIFYING:
+                next_assurance = assurance.verification_failed()
+            else:
+                next_assurance = assurance
+                actual_pass = False
+            bounded_summary = summary[:2_000]
+            connection.execute(
+                """
+                UPDATE worktree_sessions
+                SET verified_epoch=?, verified_fingerprint=?, verifier_digest=?,
+                    assurance_state=?, verification_summary=?, updated_at_utc=?
+                WHERE session_id=? AND user_id=?
+                """,
+                (
+                    next_assurance.verified_epoch,
+                    next_assurance.verified_fingerprint,
+                    next_assurance.verifier_digest,
+                    next_assurance.state.value,
+                    ("PASSED:" if actual_pass else "FAILED:") + bounded_summary,
+                    datetime.now(UTC).isoformat(),
+                    binding.session_id,
+                    binding.user_id,
+                ),
+            )
+            self._event(
+                connection,
+                binding,
+                "VERIFICATION_COMPLETED",
+                next_assurance.state.value,
+                {
+                    "passed": actual_pass,
+                    "base_revision": binding.base_revision,
+                    "mutation_epoch": next_assurance.mutation_epoch,
+                    "verified_epoch": next_assurance.verified_epoch,
+                    "candidate_fingerprint": next_assurance.candidate_fingerprint,
+                    "verified_fingerprint": next_assurance.verified_fingerprint,
+                    "verifier_digest": next_assurance.verifier_digest,
+                    "summary": bounded_summary,
+                },
+            )
+        return self.inspect(session_id, user_id=user_id)
+
+    def require_verified_candidate(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        verifier_digest: str,
+    ) -> VerificationBinding:
+        """Require an exact current assurance binding for repository promotion."""
+
+        observed = self.observe_worktree(session_id, user_id=user_id)
+        if (
+            observed["assurance_state"] not in {
+                AssuranceState.VERIFIED_CANDIDATE.value,
+                AssuranceState.PROMOTED.value,
+            }
+            or not observed["currently_verified"]
+            or observed["verifier_digest"] != verifier_digest
+        ):
+            raise AgentSandboxError("candidate_not_verified")
+        verified_epoch = observed.get("verified_epoch")
+        if not isinstance(verified_epoch, int) or isinstance(verified_epoch, bool):
+            raise AgentSandboxError("candidate_assurance_state_invalid")
+        return VerificationBinding(
+            base_revision=str(observed["base_revision"]),
+            mutation_epoch=verified_epoch,
+            candidate_fingerprint=str(observed["candidate_fingerprint"]),
+            verifier_digest=str(observed["verifier_digest"]),
+        )
+
+    def mark_promoted(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        binding: VerificationBinding,
+    ) -> JsonObject:
+        """Record promotion only after the exact verified binding was consumed."""
+
+        current = self.require_verified_candidate(
+            session_id, user_id=user_id, verifier_digest=binding.verifier_digest
+        )
+        if current != binding:
+            raise AgentSandboxError("candidate_assurance_binding_mismatch")
+        owner = self.require_active(session_id, user_id=user_id)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM worktree_sessions WHERE session_id=? AND user_id=?",
+                (owner.session_id, owner.user_id),
+            ).fetchone()
+            if row is None:
+                raise AgentSandboxError("unknown_agent_session")
+            assurance = self._assurance_from_row(row)
+            try:
+                promoted = assurance.promoted()
+            except ValueError as exc:
+                raise AgentSandboxError("candidate_not_promotion_eligible") from exc
+            connection.execute(
+                "UPDATE worktree_sessions SET assurance_state=?, export_state=?, updated_at_utc=? "
+                "WHERE session_id=? AND user_id=?",
+                (
+                    promoted.state.value,
+                    "PROMOTED",
+                    datetime.now(UTC).isoformat(),
+                    owner.session_id,
+                    owner.user_id,
+                ),
+            )
+            self._event(
+                connection,
+                owner,
+                "CANDIDATE_PROMOTED",
+                promoted.state.value,
+                {"verification_binding": asdict(binding)},
+            )
+        return self.inspect(session_id, user_id=user_id)
 
     def list_mine(self, user_id: str) -> list[JsonObject]:
         with self._connect() as connection:
@@ -1111,6 +1512,7 @@ class AgentSandboxManager:
         changed_paths = json.loads(str(row["changed_paths_json"]))
         clean = isinstance(changed_paths, list) and not changed_paths and row["diff_hash"] is None
         state = str(row["state"])
+        assurance = AgentSandboxManager._assurance_from_row(row)
         physical_present = str(row["physical_state"]) == "PRESENT"
         value: JsonObject = {
             "session_id": str(row["session_id"]),
@@ -1134,6 +1536,7 @@ class AgentSandboxManager:
             "changed_paths": changed_paths,
             "diff_hash": row["diff_hash"],
             "verification_summary": row["verification_summary"],
+            **AgentSandboxManager._assurance_public(assurance),
             "export_state": str(row["export_state"]),
             "retention_expires_at_utc": row["retention_expires_at_utc"],
             "result_id": row["result_id"],
@@ -1271,6 +1674,7 @@ class AgentSandboxManager:
             raise AgentSandboxError("result_state_invalid")
         binding = self.require_active(session_id, user_id=user_id)
         changed_paths, diff_hash = self._diff_summary(binding)
+        assurance = self._observe_candidate(binding, changed_paths, diff_hash)
         if resumable:
             state = "INTERRUPTED_RESUMABLE"
         elif terminal:
@@ -1316,6 +1720,7 @@ class AgentSandboxManager:
                 "changed_paths": list(changed_paths),
                 "diff_hash": diff_hash,
                 "result_id": result_id,
+                **self._assurance_public(assurance),
             }
             if current is not None and current["current_task_label"]:
                 details["task_label"] = str(current["current_task_label"])
@@ -1409,7 +1814,7 @@ class AgentSandboxManager:
     def resume(self, session_id: str, *, user_id: str) -> JsonObject:
         binding = self.require_active(session_id, user_id=user_id)
         self._set_state(binding, "ACTIVE", "RESUMED", {})
-        return self.inspect(session_id, user_id=user_id)
+        return self.status(session_id, user_id=user_id)
 
     def cancel(self, session_id: str, *, user_id: str) -> JsonObject:
         binding = self.require_active(session_id, user_id=user_id)
@@ -2371,7 +2776,15 @@ class AgentSandboxManager:
         self, session_id: str, *, user_id: str, promotion: bool = False
     ) -> JsonObject:
         binding = self.require_active(session_id, user_id=user_id)
-        state = "PROMOTION_REQUESTED" if promotion else "EXPORT_REQUESTED"
+        observed = self.observe_worktree(session_id, user_id=user_id)
+        eligible = bool(observed.get("promotion_eligible"))
+        state = (
+            "PROMOTION_REQUESTED"
+            if promotion and eligible
+            else "PROMOTION_REQUESTED_INELIGIBLE"
+            if promotion
+            else "EXPORT_REQUESTED"
+        )
         with self._connect() as connection:
             connection.execute(
                 """
@@ -2381,7 +2794,11 @@ class AgentSandboxManager:
                 (state, datetime.now(UTC).isoformat(), session_id, user_id),
             )
             self._event(connection, binding, state, state, {})
-        return {"status": state, "session_id": session_id}
+        return {
+            "status": state,
+            "session_id": session_id,
+            "promotion_eligible": eligible,
+        }
 
     def patch(self, session_id: str, *, user_id: str) -> bytes:
         binding = self.require_active(session_id, user_id=user_id)
@@ -2514,11 +2931,12 @@ class AgentSandboxManager:
     def fixed_environment(binding: AgentSessionBinding) -> dict[str, str]:
         operator_bin = str(Path(sys.executable).parent)
         base = {
-            "PATH": f"{operator_bin}:/usr/local/bin:/usr/bin:/bin",
+            "PATH": os.pathsep.join((operator_bin, "/usr/local/bin", "/usr/bin", "/bin")),
             "LANG": "C.UTF-8",
             "TZ": "UTC",
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTEST_ADDOPTS": "-p no:cacheprovider",
+            "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
         }
         base.update(binding.environment)
         base["LAPLACE_AGENT_SESSION"] = binding.session_id

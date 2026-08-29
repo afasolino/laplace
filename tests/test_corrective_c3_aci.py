@@ -162,7 +162,7 @@ def test_chunk_conflict_order_hash_mismatch_and_abort_are_safe(tmp_path: Path) -
 def test_finalize_hash_drift_and_cancellation_preserve_previous_state(tmp_path: Path) -> None:
     root = _repo(tmp_path / "repo")
     target = root / "source.py"
-    target.write_text("old\n", encoding="utf-8")
+    target.write_bytes(b"old\n")
     aci = _aci(root)
     base_hash = hashlib.sha256(b"old\n").hexdigest()
     transaction = aci.begin_file_write(path="source.py", expected_base_sha256=base_hash)
@@ -175,7 +175,7 @@ def test_finalize_hash_drift_and_cancellation_preserve_previous_state(tmp_path: 
         content=value,
         chunk_sha256=hashlib.sha256(value.encode()).hexdigest(),
     )
-    target.write_text("external\n", encoding="utf-8")
+    target.write_bytes(b"external\n")
     with pytest.raises(BoundedACIError, match="aci_write_target_drift"):
         aci.finalize_file_write(
             transaction_id=transaction_id,

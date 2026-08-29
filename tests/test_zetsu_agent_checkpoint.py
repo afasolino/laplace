@@ -11,6 +11,7 @@ import pytest
 
 from research_workspace.agent_sandbox import AgentSessionBinding, AgentToolPolicy
 from research_workspace.service_tiers import LanePolicy, ModelLane, ModelRoute, ServiceTierError
+from research_workspace.task_evidence import TaskEvidenceStore
 from research_workspace.zetsu_agent import (
     AgentCheckpointStore,
     AgentExecutionState,
@@ -1156,6 +1157,15 @@ def test_adaptive_quantum_continues_same_objective_to_finish(tmp_path: Path) -> 
     assert checkpoint["step"] == 3
     assert checkpoint["continuation_count"] == 1
     assert checkpoint["next_state"] == "finished"
+    evidence_root = tiered.sandboxes.sandbox_root / "task_evidence"
+    evidence_paths = list(evidence_root.rglob("*.json"))
+    assert len(evidence_paths) == 1
+    evidence = TaskEvidenceStore(evidence_root).load(
+        owner_id="user-a", project_id="repo", task_id=evidence_paths[0].stem
+    )
+    assert evidence.outcome == "verified_success"
+    assert evidence.manager_decision == "bypass"
+    assert evidence.specialist_decision == "not_selected"
 
 
 def test_standalone_agent_uses_independent_command_budget_across_quantum(tmp_path: Path) -> None:
@@ -1507,8 +1517,8 @@ def test_checkpoint_resume_binds_route_and_required_verifier(tmp_path: Path, mon
         user="user-a",
         verification_argv=("pytest", "tests/test_y.py", "-q"),
     )
-    with pytest.raises(ServiceTierError, match="zetsu_agent_resume_verifier_mismatch"):
-        coordinator._restore(changed_verifier, "objective")
+    restored = coordinator._restore(changed_verifier, "objective")
+    assert restored.required_verification_argv == ["pytest", "tests/test_y.py", "-q"]
 
 
 def test_checkpoint_rejects_malformed_semantic_state_and_telemetry(

@@ -271,7 +271,7 @@ class WebController:
 
 def build_app(controller: WebController):  # type: ignore[no-untyped-def]
     try:
-        import gradio as gr
+        import gradio as gr  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover
         raise LaplaceWebError("gradio_dependency_missing:install_pip_editable_with_v3_extra") from exc
 

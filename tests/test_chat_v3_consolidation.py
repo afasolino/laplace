@@ -10,7 +10,6 @@ from research_workspace.chat_discovery import command_names, render_capabilities
 from research_workspace.chat_input import _history_path, build_chat_input
 from research_workspace.chat_session import ChatSessionStore
 from research_workspace.chat_verification import (
-    ChatVerificationError,
     ChatVerificationStore,
     resolve_verification,
 )
@@ -83,17 +82,19 @@ def _shell(
     )
 
 
-def test_verification_contract_roundtrip_restore_and_conflict(tmp_path: Path) -> None:
+def test_verification_contract_roundtrip_restore_and_replacement(tmp_path: Path) -> None:
     store = ChatVerificationStore(tmp_path / "verifiers")
     argv = ("pytest", "tests/test_task_labels.py")
 
     assert resolve_verification(store, "chat-a", argv) == argv
     assert resolve_verification(store, "chat-a", None) == argv
-    with pytest.raises(ChatVerificationError, match="resume_verification_conflict"):
-        resolve_verification(store, "chat-a", ("pytest", "tests/test_other.py"))
+    replacement = ("pytest", "tests/test_other.py")
+    assert resolve_verification(store, "chat-a", replacement) == replacement
+    assert store.load("chat-a") == replacement
 
-    mode = store._path("chat-a").stat().st_mode & 0o777
-    assert mode == 0o600
+    if os.name != "nt":
+        mode = store._path("chat-a").stat().st_mode & 0o777
+        assert mode == 0o600
 
 
 def test_help_completion_and_capability_discovery_are_deterministic() -> None:

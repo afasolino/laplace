@@ -23,6 +23,13 @@ from .logical_subagents import (
     LogicalSubagentTask,
     SubagentExecutor,
 )
+from .manager_control import (
+    ManagerControl,
+    ManagerAdmission,
+    ManagerProvider,
+    ManagerUnavailableError,
+    TaskComplexity,
+)
 from .personal_corpus import PersonalCorpusStore
 from .repository_agent_service import (
     RepositoryAgentConversationService,
@@ -89,6 +96,7 @@ class LaplaceCore:
         hooks: HookService | None = None,
         consolidation: IdleConsolidator | None = None,
         logical_subagents: GpuAwareSubagentScheduler | None = None,
+        manager_provider: ManagerProvider | None = None,
     ) -> None:
         self.repository_root = repository_root.resolve()
         self.corpus = corpus
@@ -107,6 +115,7 @@ class LaplaceCore:
         if repository_agent_service is not None and agent_coordinator is not None:
             raise LaplaceCoreError("repository_agent_service_conflict")
         self._repository_agent_service = repository_agent_service or agent_coordinator
+        self._manager_control = ManagerControl(manager_provider)
         self._repository_agent_lock = threading.Lock()
         self._repository_context_lock = threading.Lock()
         self._skill_registry_lock = threading.Lock()
@@ -199,6 +208,28 @@ class LaplaceCore:
             raise LaplaceCoreError("repository_agent_unavailable")
         return service
 
+    def _admit_repository_agent(
+        self,
+        *,
+        repo_id: str,
+        instruction: str,
+        task_complexity: TaskComplexity | None,
+        task_label: str | None,
+    ) -> ManagerAdmission:
+        """Use the sole advisory manager seam before either repository entry point."""
+
+        try:
+            return self._manager_control.admit(
+                repo_id=repo_id,
+                instruction=instruction,
+                complexity=task_complexity,
+                task_label=task_label,
+            )
+        except ManagerUnavailableError as exc:
+            raise LaplaceCoreError("manager_provider_unavailable") from exc
+        except ValueError as exc:
+            raise LaplaceCoreError("manager_plan_invalid") from exc
+
     def _require(self, user_id: str, capability: Capability) -> None:
         capabilities = self.tiered.effective_capabilities(user_id)
         if capability not in capabilities:
@@ -277,13 +308,23 @@ class LaplaceCore:
         verification_argv: Sequence[str] | None,
         apply_to_repository: bool,
         wait_timeout_seconds: int,
+        task_complexity: TaskComplexity | None = None,
+        task_label: str | None = None,
+        allow_mutation: bool = True,
     ) -> JsonObject:
-        """Run the bounded Qwen repository agent without an MCP dependency."""
+        """Run the bounded repository agent, optionally through one manager plan."""
 
-        return self._require_repository_agent().run(
-            user_id=user_id,
+        worker = self._require_repository_agent()
+        admission = self._admit_repository_agent(
             repo_id=repo_id,
             instruction=instruction,
+            task_complexity=task_complexity,
+            task_label=task_label,
+        )
+        result = worker.run(
+            user_id=user_id,
+            repo_id=repo_id,
+            instruction=admission.instruction_for_worker(instruction),
             lane=lane,
             session_id=session_id,
             max_steps=max_steps,
@@ -291,7 +332,10 @@ class LaplaceCore:
             verification_argv=list(verification_argv) if verification_argv is not None else None,
             apply_to_repository=apply_to_repository,
             wait_timeout_seconds=wait_timeout_seconds,
+            task_label=task_label,
+            allow_mutation=allow_mutation,
         )
+        return admission.annotate(result)
 
     def repository_agent_turn(
         self,
@@ -307,6 +351,7 @@ class LaplaceCore:
         wait_timeout_seconds: float,
         task_label: str | None = None,
         allow_mutation: bool = False,
+        task_complexity: TaskComplexity | None = None,
     ) -> JsonObject:
         """Run one bounded turn in an explicitly persistent repository session."""
 
@@ -314,10 +359,16 @@ class LaplaceCore:
         if not callable(getattr(service, "run_turn", None)):
             raise LaplaceCoreError("repository_agent_conversation_unavailable")
         conversation = cast(RepositoryAgentConversationService, service)
-        return conversation.run_turn(
-            user_id=user_id,
+        admission = self._admit_repository_agent(
             repo_id=repo_id,
             instruction=instruction,
+            task_complexity=task_complexity,
+            task_label=task_label,
+        )
+        result = conversation.run_turn(
+            user_id=user_id,
+            repo_id=repo_id,
+            instruction=admission.instruction_for_worker(instruction),
             lane=lane,
             session_id=session_id,
             max_steps=max_steps,
@@ -327,6 +378,7 @@ class LaplaceCore:
             task_label=task_label,
             allow_mutation=allow_mutation,
         )
+        return admission.annotate(result)
 
     def repository_result_page(
         self,

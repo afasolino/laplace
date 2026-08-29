@@ -71,7 +71,11 @@ def _atomic_write(path: Path, payload: Mapping[str, object]) -> None:
     )
     temporary = Path(temporary_name)
     try:
-        os.fchmod(descriptor, 0o600)
+        # ``mkstemp`` already creates a private descriptor on Windows.  The
+        # POSIX-only descriptor operation is retained on Linux, where the
+        # private mode is part of the session-state contract.
+        if os.name != "nt":
+            os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             json.dump(dict(payload), handle, ensure_ascii=False, sort_keys=True, indent=2)
             handle.write("\n")

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from research_workspace.service_tiers import ServiceTierError
+from research_workspace.laplace_core import LaplaceCore
 from research_workspace.zetsu_mcp import (
     ZetsuError,
     ZetsuMcpDispatcher,
@@ -39,6 +41,12 @@ def _service(agent: _Agent) -> ZetsuService:
     service.corpus = object()
     service.tiered = object()
     service._agent_coordinator = agent
+    service.core = LaplaceCore(
+        service.repository_root,
+        cast(object, service.corpus),
+        cast(object, service.tiered),
+        repository_agent_service=cast(object, agent),
+    )
     service.available_tools = lambda _user_id: tuple(  # type: ignore[method-assign]
         item for item in tool_definitions() if item["name"] == "agent_task"
     )

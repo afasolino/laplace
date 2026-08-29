@@ -30,11 +30,18 @@ from .agent_sandbox import (
     AgentToolPolicy,
 )
 from .bounded_aci import BoundedACIError, BoundedRepositoryACI
+from .candidate_assurance import VerificationBinding
 from .context_planner import DEFAULT_COMPACTION_RATIO, ContextPlanner, ContextPlannerError
 from .personal_corpus import CorpusError, PersonalCorpusStore
 from .repository_authorization import RepositoryAuthorizationError, validate_workspace_path
 from .service_tiers import ModelLane, ServiceTierError, TieredServingService
 from .task_labels import derive_task_label
+from .task_evidence import (
+    TaskEvidenceError,
+    TaskEvidenceStore,
+    TaskOutcomeEvidence,
+    recent_evidence_for_policy,
+)
 from .verification_policy import validate_verification_argv
 from .zetsu_context import compact_personal_results
 from .result_store import ResultStore, ResultStoreError
@@ -222,6 +229,10 @@ class AgentExecutionState:
     next_state: str = "choose_action"
     mutation_epoch: int = 0
     last_verified_epoch: int = -1
+    candidate_fingerprint: str = ""
+    verified_fingerprint: str = ""
+    verifier_digest: str = ""
+    assurance_state: str = "clean"
     command_count: int = 0
     consumed_wall_seconds: float = 0.0
     target_initial_head: str = ""
@@ -323,6 +334,9 @@ class ZetsuAgentCoordinator:
         )
         self.results = result_store or ResultStore(
             tiered.sandboxes.sandbox_root / "zetsu_agent_results"
+        )
+        self.task_evidence = TaskEvidenceStore(
+            tiered.sandboxes.sandbox_root / "task_evidence"
         )
         scheduler_capable = all(
             hasattr(tiered.sandboxes, name)
@@ -514,6 +528,56 @@ class ZetsuAgentCoordinator:
             unique_changed[:_MAX_CHANGED_PATHS],
         )
 
+    @staticmethod
+    def _verification_digest(argv: Sequence[str]) -> str:
+        encoded = json.dumps(list(argv), separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _sync_authoritative_assurance(
+        self, ctx: AgentRunContext, state: AgentExecutionState
+    ) -> JsonObject | None:
+        """Mirror sandbox-owned candidate assurance into the resumable checkpoint."""
+
+        observer = getattr(self.tiered.sandboxes, "observe_worktree", None)
+        if not callable(observer):
+            return None
+        try:
+            value = observer(ctx.session_id, user_id=ctx.user_id)
+        except AgentSandboxError as exc:
+            raise ServiceTierError(exc.category, exc.evidence) from exc
+        if not isinstance(value, Mapping):
+            raise ServiceTierError("zetsu_agent_assurance_state_invalid")
+        mutation_epoch = value.get("mutation_epoch")
+        verified_epoch = value.get("verified_epoch")
+        changed_paths = value.get("changed_paths")
+        if (
+            isinstance(mutation_epoch, bool)
+            or not isinstance(mutation_epoch, int)
+            or mutation_epoch < 0
+            or isinstance(verified_epoch, bool)
+            or not isinstance(verified_epoch, int)
+            or verified_epoch < 0
+            or verified_epoch > mutation_epoch
+            or not isinstance(changed_paths, list)
+            or not all(isinstance(path, str) for path in changed_paths)
+        ):
+            raise ServiceTierError("zetsu_agent_assurance_state_invalid")
+        state.mutation_epoch = mutation_epoch
+        state.last_verified_epoch = verified_epoch
+        state.changed_paths = list(changed_paths)
+        for field_name in ("candidate_fingerprint", "verified_fingerprint", "verifier_digest"):
+            field_value = value.get(field_name)
+            if field_value is not None and (
+                not isinstance(field_value, str) or len(field_value) > 128
+            ):
+                raise ServiceTierError("zetsu_agent_assurance_state_invalid")
+            setattr(state, field_name, field_value or "")
+        assurance_state = value.get("assurance_state")
+        if not isinstance(assurance_state, str) or not assurance_state:
+            raise ServiceTierError("zetsu_agent_assurance_state_invalid")
+        state.assurance_state = assurance_state
+        return dict(value)
+
     def _raise_materialization_failure_if_needed(
         self, ctx: AgentRunContext, relative_path: str
     ) -> None:
@@ -651,6 +715,24 @@ class ZetsuAgentCoordinator:
             return {"requested": False, "applied": False}
         if not self._finish_allowed(state) or state.mutation_epoch < 1 or not state.changed_paths:
             raise ServiceTierError("zetsu_agent_apply_without_verified_mutation")
+        authoritative_binding: VerificationBinding | None = None
+        require_verified = getattr(self.tiered.sandboxes, "require_verified_candidate", None)
+        if callable(require_verified):
+            if ctx.required_verification_argv is None:
+                raise ServiceTierError("zetsu_agent_apply_without_verifier")
+            try:
+                candidate = require_verified(
+                    ctx.session_id,
+                    user_id=ctx.user_id,
+                    verifier_digest=self._verification_digest(ctx.required_verification_argv),
+                )
+            except AgentSandboxError as exc:
+                raise ServiceTierError(exc.category, exc.evidence) from exc
+            if not isinstance(candidate, VerificationBinding):
+                raise ServiceTierError("zetsu_agent_assurance_binding_invalid")
+            if candidate.base_revision != ctx.binding.base_revision:
+                raise ServiceTierError("zetsu_agent_assurance_base_revision_mismatch")
+            authoritative_binding = candidate
         patch_path_value = handoff.get("patch_path")
         patch_sha = handoff.get("patch_sha256")
         if not isinstance(patch_path_value, str) or not isinstance(patch_sha, str):
@@ -667,6 +749,20 @@ class ZetsuAgentCoordinator:
             raise ServiceTierError("zetsu_agent_handoff_patch_unavailable") from exc
         if observed_patch_sha != patch_sha:
             raise ServiceTierError("zetsu_agent_handoff_patch_identity_mismatch")
+
+        def finalize_promotion(result: JsonObject) -> JsonObject:
+            if authoritative_binding is not None:
+                mark_promoted = getattr(self.tiered.sandboxes, "mark_promoted", None)
+                if callable(mark_promoted):
+                    try:
+                        mark_promoted(
+                            ctx.session_id,
+                            user_id=ctx.user_id,
+                            binding=authoritative_binding,
+                        )
+                    except AgentSandboxError as exc:
+                        raise ServiceTierError(exc.category, exc.evidence) from exc
+            return result
 
         try:
             target = Path(ctx.binding.canonical_repository_root).resolve(strict=True)
@@ -685,12 +781,12 @@ class ZetsuAgentCoordinator:
                     and status_sha == state.target_applied_status_sha256
                     and changed == state.changed_paths
                 ):
-                    return {
+                    return finalize_promotion({
                         "requested": True,
                         "applied": True,
                         "already_applied": True,
                         "target_status_sha256": status_sha,
-                    }
+                    })
                 raise ServiceTierError("zetsu_agent_apply_target_drift")
             if head == state.target_initial_head and changed:
                 target_patch_sha = hashlib.sha256(
@@ -699,13 +795,13 @@ class ZetsuAgentCoordinator:
                 if changed == state.changed_paths and target_patch_sha == patch_sha:
                     state.applied_patch_sha256 = patch_sha
                     state.target_applied_status_sha256 = status_sha
-                    return {
+                    return finalize_promotion({
                         "requested": True,
                         "applied": True,
                         "already_applied": True,
                         "recovered_after_checkpoint_gap": True,
                         "target_status_sha256": status_sha,
-                    }
+                    })
                 raise ServiceTierError("zetsu_agent_apply_target_drift")
             if (
                 head != state.target_initial_head
@@ -742,12 +838,13 @@ class ZetsuAgentCoordinator:
                 raise ServiceTierError("zetsu_agent_apply_postcondition_failed")
             state.applied_patch_sha256 = patch_sha
             state.target_applied_status_sha256 = after_status
-            return {
+            result = {
                 "requested": True,
                 "applied": True,
                 "already_applied": False,
                 "target_status_sha256": after_status,
             }
+        return finalize_promotion(result)
 
     @staticmethod
     def _check_text(value: str, *, maximum: int) -> None:
@@ -1036,6 +1133,10 @@ class ZetsuAgentCoordinator:
             unresolved_failures=unresolved,
             mutation_epoch=prior.mutation_epoch,
             last_verified_epoch=prior.last_verified_epoch,
+            candidate_fingerprint=prior.candidate_fingerprint,
+            verified_fingerprint=prior.verified_fingerprint,
+            verifier_digest=prior.verifier_digest,
+            assurance_state=prior.assurance_state,
             command_count=prior.command_count,
             consumed_wall_seconds=prior.consumed_wall_seconds,
             target_initial_head=prior.target_initial_head,
@@ -1092,6 +1193,14 @@ class ZetsuAgentCoordinator:
             "mutation_epoch": state.mutation_epoch,
             "last_verified_epoch": state.last_verified_epoch,
             "unresolved_failures": state.unresolved_failures,
+            "assurance": {
+                "state": state.assurance_state,
+                "mutation_epoch": state.mutation_epoch,
+                "verified_epoch": state.last_verified_epoch,
+                "candidate_fingerprint": state.candidate_fingerprint or None,
+                "verified_fingerprint": state.verified_fingerprint or None,
+                "verifier_digest": state.verifier_digest or None,
+            },
             "evidence_refs": state.evidence_refs,
             "latest_validation_passed": (
                 latest_validation.get("passed")
@@ -1210,6 +1319,19 @@ class ZetsuAgentCoordinator:
         timeout = min(600.0, self._remaining_wall(ctx, state))
         deadline = time.monotonic() + timeout
         before_head, before_status, before_changed = self._worktree_state(ctx.worktree)
+        verifier_digest = self._verification_digest(argv)
+        assurance_started = False
+        begin_verification = getattr(self.tiered.sandboxes, "begin_verification", None)
+        if callable(begin_verification) and before_changed:
+            try:
+                begin_verification(
+                    ctx.session_id,
+                    user_id=ctx.user_id,
+                    verifier_digest=verifier_digest,
+                )
+            except AgentSandboxError as exc:
+                raise ServiceTierError(exc.category, exc.evidence) from exc
+            assurance_started = True
         returncode: int | None = None
         stdout = ""
         stderr = ""
@@ -1292,6 +1414,23 @@ class ZetsuAgentCoordinator:
         state.validation_history.append(record)
         state.validation_history = state.validation_history[-16:]
         state.telemetry.verification_calls += 1
+        complete_verification = getattr(
+            self.tiered.sandboxes, "complete_verification", None
+        )
+        if assurance_started and callable(complete_verification):
+            try:
+                complete_verification(
+                    ctx.session_id,
+                    user_id=ctx.user_id,
+                    verifier_digest=verifier_digest,
+                    passed=passed,
+                    summary=(
+                        f"command={command_id};returncode={returncode};"
+                        f"aborted={aborted_category or ''}"
+                    ),
+                )
+            except AgentSandboxError as exc:
+                raise ServiceTierError(exc.category, exc.evidence) from exc
         self._progress(
             ctx,
             "VERIFICATION_COMPLETED",
@@ -1353,6 +1492,10 @@ class ZetsuAgentCoordinator:
             "next_state": state.next_state,
             "mutation_epoch": state.mutation_epoch,
             "last_verified_epoch": state.last_verified_epoch,
+            "candidate_fingerprint": state.candidate_fingerprint,
+            "verified_fingerprint": state.verified_fingerprint,
+            "verifier_digest": state.verifier_digest,
+            "assurance_state": state.assurance_state,
             "command_count": state.command_count,
             "output_cap_continuations": state.output_cap_continuations,
             "continuation_count": state.continuation_count,
@@ -1454,6 +1597,7 @@ class ZetsuAgentCoordinator:
         state.worktree_head = head
         state.worktree_status_sha256 = status_sha256
         state.changed_paths = changed
+        self._sync_authoritative_assurance(ctx, state)
         elapsed = time.monotonic() - ctx.run_started
         consumed = state.consumed_wall_seconds + elapsed
         return {
@@ -1484,6 +1628,10 @@ class ZetsuAgentCoordinator:
             "next_state": state.next_state,
             "mutation_epoch": state.mutation_epoch,
             "last_verified_epoch": state.last_verified_epoch,
+            "candidate_fingerprint": state.candidate_fingerprint,
+            "verified_fingerprint": state.verified_fingerprint,
+            "verifier_digest": state.verifier_digest,
+            "assurance_state": state.assurance_state,
             "command_count": state.command_count,
             "output_cap_continuations": state.output_cap_continuations,
             "continuation_count": state.continuation_count,
@@ -1558,13 +1706,12 @@ class ZetsuAgentCoordinator:
             or raw.get("context_limit") != ctx.context_limit
         ):
             raise ServiceTierError("zetsu_agent_resume_route_mismatch")
-        expected_verifier = (
-            list(ctx.required_verification_argv)
-            if ctx.required_verification_argv is not None
-            else None
-        )
-        if raw.get("required_verification_argv") != expected_verifier:
-            raise ServiceTierError("zetsu_agent_resume_verifier_mismatch")
+        persisted_verifier = raw.get("required_verification_argv")
+        if persisted_verifier is not None:
+            try:
+                self._verify_argv(ctx.worktree, persisted_verifier)
+            except (ServiceTierError, TypeError, ValueError) as exc:
+                raise ServiceTierError("zetsu_agent_checkpoint_verifier_invalid") from exc
 
         def integer(name: str, *, minimum: int = 0) -> int:
             value = raw.get(name)
@@ -1652,6 +1799,10 @@ class ZetsuAgentCoordinator:
             or last_verified_raw < -1
         ):
             raise ServiceTierError("zetsu_agent_checkpoint_state_invalid")
+        candidate_fingerprint = optional_string("candidate_fingerprint", maximum=128)
+        verified_fingerprint = optional_string("verified_fingerprint", maximum=128)
+        verifier_digest = optional_string("verifier_digest", maximum=128)
+        assurance_state = optional_string("assurance_state", maximum=64) or "legacy"
         command_count = integer("command_count")
         output_cap_continuations_raw = raw.get("output_cap_continuations", 0)
         if (
@@ -1756,6 +1907,10 @@ class ZetsuAgentCoordinator:
             next_state=next_state,
             mutation_epoch=mutation_epoch,
             last_verified_epoch=last_verified_raw,
+            candidate_fingerprint=candidate_fingerprint,
+            verified_fingerprint=verified_fingerprint,
+            verifier_digest=verifier_digest,
+            assurance_state=assurance_state,
             command_count=command_count,
             output_cap_continuations=output_cap_continuations_raw,
             continuation_count=continuation_count_raw,
@@ -1874,17 +2029,101 @@ class ZetsuAgentCoordinator:
         terminal: bool = True,
     ) -> None:
         try:
+            preserve_unverified = bool(state.changed_paths) and not self._finish_allowed(state)
             self.tiered.sandboxes.record_result(
                 ctx.session_id,
                 user_id=ctx.user_id,
                 command_count=state.command_count,
                 verification_summary=f"FAILED:{category}",
                 failed=True,
-                terminal=terminal,
+                terminal=terminal and not preserve_unverified,
             )
         except Exception:
             # Preserve the original failure/cancellation category.
             pass
+
+    def _persist_task_evidence(
+        self,
+        ctx: AgentRunContext,
+        state: AgentExecutionState,
+        *,
+        result_id: str,
+        outcome: str,
+        failure_category: str | None,
+    ) -> str:
+        """Record one bounded Laplace outcome without changing execution policy."""
+
+        evidence_id = self._task_evidence_id(ctx, result_id)
+        failures = (failure_category,) if failure_category else ()
+        evidence = TaskOutcomeEvidence(
+            task_id=evidence_id,
+            owner_id=ctx.user_id,
+            project_id=ctx.repo_id,
+            outcome=outcome,
+            roles=("implementation",),
+            runtime_profiles=(ctx.model_id,),
+            manager_decision="bypass",
+            specialist_decision="not_selected",
+            verifier_digest=(
+                self._verification_digest(ctx.required_verification_argv)
+                if ctx.required_verification_argv is not None
+                else ""
+            ),
+            failure_classes=failures,
+            context_refs=tuple(state.evidence_refs),
+            turns=state.step,
+            tool_calls=state.telemetry.tool_calls,
+            reported_input_tokens=state.telemetry.qwen_input_tokens or None,
+            reported_output_tokens=state.telemetry.qwen_output_tokens or None,
+            # A resumed terminal result reuses the deterministic result/evidence ID.
+            # Do not make an immutable record depend on wall-clock timing between
+            # retries; a later policy layer may attach separately keyed telemetry.
+            wall_time_ms=None,
+        )
+        try:
+            self.task_evidence.append(evidence)
+        except FileExistsError:
+            # Result IDs are immutable; a retry may only reuse an identical record.
+            try:
+                existing = self.task_evidence.load(
+                    owner_id=ctx.user_id,
+                    project_id=ctx.repo_id,
+                    task_id=evidence_id,
+                )
+            except TaskEvidenceError as exc:
+                raise ServiceTierError("task_evidence_persistence_failed") from exc
+            if existing != evidence:
+                raise ServiceTierError("task_evidence_duplicate_conflict")
+        except (OSError, ValueError) as exc:
+            raise ServiceTierError("task_evidence_persistence_failed") from exc
+        return evidence_id
+
+    def _advisory_task_evidence(self, ctx: AgentRunContext) -> str | None:
+        """Create bounded, non-authoritative context from prior same-scope outcomes."""
+
+        records = recent_evidence_for_policy(
+            self.task_evidence, owner_id=ctx.user_id, project_id=ctx.repo_id
+        )
+        if not records:
+            return None
+        return json.dumps(
+            [
+                {
+                    "outcome": record.outcome,
+                    "failure_classes": list(record.failure_classes),
+                    "runtime_profiles": list(record.runtime_profiles),
+                }
+                for record in records
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def _task_evidence_id(ctx: AgentRunContext, result_id: str) -> str:
+        return "task-" + hashlib.sha256(
+            f"{ctx.session_id}:{ctx.task_label}:{result_id}".encode("utf-8")
+        ).hexdigest()
 
     def _release_setup_session_best_effort(
         self, *, user_id: str, session_id: str, creating: bool
@@ -1939,6 +2178,10 @@ class ZetsuAgentCoordinator:
                 "handoff": handoff,
                 "telemetry": state.telemetry.as_dict(),
             }
+            failure["task_evidence_id"] = self._task_evidence_id(
+                ctx,
+                self.results.result_id(ctx.user_id, ctx.repo_id, ctx.session_id),
+            )
             artifacts: dict[str, Path | bytes | str] = {
                 "result.json": json.dumps(
                     failure, indent=2, sort_keys=True, ensure_ascii=False
@@ -1964,7 +2207,7 @@ class ZetsuAgentCoordinator:
                 command_count=state.command_count,
                 verification_summary=f"FAILED:{category}",
                 failed=True,
-                terminal=terminal,
+                terminal=terminal and not (bool(changed) and not self._finish_allowed(state)),
             )
             cleanup = getattr(self.tiered.sandboxes, "authorize_terminal_cleanup", None)
             if terminal and callable(cleanup):
@@ -1974,6 +2217,21 @@ class ZetsuAgentCoordinator:
                     result_id=str(delivery["result_id"]),
                 )
             self.results.clear_staging(ctx.session_id)
+            try:
+                self._persist_task_evidence(
+                    ctx,
+                    state,
+                    result_id=str(delivery["result_id"]),
+                    outcome="failure",
+                    failure_category=category,
+                )
+            except ServiceTierError as evidence_exc:
+                self.tiered.sandboxes.record_progress(
+                    ctx.session_id,
+                    user_id=ctx.user_id,
+                    event="TASK_EVIDENCE_FAILED",
+                    details={"category": evidence_exc.category},
+                )
         except Exception:
             self._record_failure_best_effort(ctx, state, category, terminal=terminal)
 
@@ -2339,23 +2597,7 @@ class ZetsuAgentCoordinator:
                 prior_objective = prior_raw.get("objective")
                 if not isinstance(prior_objective, str) or not prior_objective:
                     raise ServiceTierError("zetsu_agent_checkpoint_state_invalid")
-                prior_verifier_raw = prior_raw.get("required_verification_argv")
-                verifier_upgrade = (
-                    prior_verifier_raw is None
-                    and required_verification_argv is not None
-                )
-                restore_ctx = (
-                    replace(ctx, required_verification_argv=None)
-                    if verifier_upgrade
-                    else ctx
-                )
-                prior = self._restore(restore_ctx, prior_objective)
-                if verifier_upgrade and (
-                    prior.mutation_epoch != 0
-                    or prior.last_verified_epoch not in {-1, 0}
-                    or prior.changed_paths
-                ):
-                    raise ServiceTierError("zetsu_agent_verifier_upgrade_unsafe")
+                prior = self._restore(ctx, prior_objective)
                 state = self._restart_objective_state(
                     prior,
                     instruction=instruction,
@@ -2366,6 +2608,13 @@ class ZetsuAgentCoordinator:
                 )
         else:
             state = self._restore(ctx, instruction)
+        self._sync_authoritative_assurance(ctx, state)
+        advisory_evidence = self._advisory_task_evidence(ctx)
+        if advisory_evidence is not None and not any(
+            item.startswith("ADVISORY_TASK_EVIDENCE:") for item in state.recent_observations
+        ):
+            state.recent_observations.append(f"ADVISORY_TASK_EVIDENCE:{advisory_evidence}")
+            state.recent_observations = state.recent_observations[-_MAX_RECENT_OBSERVATIONS:]
         if creating or restart_objective:
             head, status_sha256, changed = self._worktree_state(worktree)
             state.worktree_head = head
@@ -2501,13 +2750,20 @@ class ZetsuAgentCoordinator:
                     if not isinstance(value, str) or not value.strip():
                         raise ServiceTierError("zetsu_agent_finish_invalid")
                     if not self._finish_allowed(state):
-                        observation = "FINISH_REJECTED: deterministic verification required after latest mutation"
+                        observation = (
+                            "FINISH_PRESERVED: candidate remains unverified after the latest "
+                            "mutation; continue with an authorized verifier before promotion"
+                        )
                         state.recent_observations.append(
                             f"STEP {step} ACTION finish\n{observation}"
                         )
-                        state.next_state = "verify_latest_mutation"
+                        state.next_state = "unverified_candidate"
+                        final_result = value.strip()
+                        status = "INCOMPLETE"
+                        failure_category = "unverified_candidate"
+                        state.summary = final_result
                         self._checkpoint(ctx, state)
-                        continue
+                        break
                     final_result = value.strip()
                     status = "SUCCESS"
                     state.summary = final_result
@@ -2570,8 +2826,6 @@ class ZetsuAgentCoordinator:
                                 paths=tuple(cast(str, item) for item in paths)
                             )
                         elif action_name == "edit_region":
-                            if ctx.required_verification_argv is None:
-                                raise ServiceTierError("zetsu_agent_mutation_requires_verifier")
                             result = aci.edit_region(
                                 path=cast(str, action.get("path")),
                                 old_text=cast(str, action.get("old_text")),
@@ -2587,8 +2841,6 @@ class ZetsuAgentCoordinator:
                                 self._mutation_marker(state.mutation_epoch)
                             )
                         elif action_name == "create_text_file":
-                            if ctx.required_verification_argv is None:
-                                raise ServiceTierError("zetsu_agent_mutation_requires_verifier")
                             result = aci.create_text_file(
                                 path=cast(str, action.get("path")),
                                 content=cast(str, action.get("content")),
@@ -2614,8 +2866,6 @@ class ZetsuAgentCoordinator:
                 elif action_name == "retrieve":
                     observation = self._retrieve(ctx, state, action)
                 elif action_name == "edit":
-                    if ctx.required_verification_argv is None:
-                        raise ServiceTierError("zetsu_agent_mutation_requires_verifier")
                     observation = self._edit(ctx, action)
                     state.mutation_epoch += 1
                     state.unresolved_failures = [
@@ -2625,8 +2875,6 @@ class ZetsuAgentCoordinator:
                     ]
                     state.unresolved_failures.append(self._mutation_marker(state.mutation_epoch))
                 elif action_name == "create":
-                    if ctx.required_verification_argv is None:
-                        raise ServiceTierError("zetsu_agent_mutation_requires_verifier")
                     observation = self._create(ctx, action)
                     state.mutation_epoch += 1
                     state.unresolved_failures = [
@@ -2645,6 +2893,7 @@ class ZetsuAgentCoordinator:
                 state.worktree_head = head
                 state.worktree_status_sha256 = worktree_status_sha256
                 state.changed_paths = changed
+                self._sync_authoritative_assurance(ctx, state)
                 state.recent_observations.append(
                     f"STEP {step} ACTION {action_name}\n{observation[-_MAX_OBSERVATION_CHARS:]}"
                 )
@@ -2729,6 +2978,7 @@ class ZetsuAgentCoordinator:
         state.worktree_head = head
         state.worktree_status_sha256 = worktree_status_sha256
         state.changed_paths = changed
+        self._sync_authoritative_assurance(ctx, state)
         if not final_result:
             final_result = {
                 "agent_stagnation_exhausted": (
@@ -2764,7 +3014,9 @@ class ZetsuAgentCoordinator:
                 ctx, state, exc.category, terminal=not persistent_session
             )
             raise
-        resumable = persistent_session and status == "INCOMPLETE"
+        preserve_unverified = bool(changed) and not self._finish_allowed(state)
+        resumable = (persistent_session or preserve_unverified) and status == "INCOMPLETE"
+        terminal_result = not persistent_session and not preserve_unverified
         verification_summary = (
             f"PASSED:verified_epoch={state.last_verified_epoch}"
             if status == "SUCCESS"
@@ -2786,6 +3038,14 @@ class ZetsuAgentCoordinator:
             "verification": state.validation_history[-1] if state.validation_history else None,
             "validation_history": state.validation_history,
             "unresolved_failures": state.unresolved_failures,
+            "assurance": {
+                "state": state.assurance_state,
+                "mutation_epoch": state.mutation_epoch,
+                "verified_epoch": state.last_verified_epoch,
+                "candidate_fingerprint": state.candidate_fingerprint or None,
+                "verified_fingerprint": state.verified_fingerprint or None,
+                "verifier_digest": state.verifier_digest or None,
+            },
             "evidence_refs": state.evidence_refs,
             "failure_category": failure_category,
             "cumulative_steps": state.step,
@@ -2799,6 +3059,10 @@ class ZetsuAgentCoordinator:
             "elapsed_seconds": round(time.monotonic() - run_started, 3),
             "telemetry": state.telemetry.as_dict(),
         }
+        planned_result_id = self.results.result_id(user_id, repo_id, effective_session)
+        task_evidence_id = self._task_evidence_id(ctx, planned_result_id)
+        authoritative["task_evidence_id"] = task_evidence_id
+        authoritative["task_evidence_status"] = "PENDING_PUBLICATION"
         artifacts: dict[str, Path | bytes | str] = {
             "result.json": json.dumps(
                 authoritative, indent=2, sort_keys=True, ensure_ascii=False
@@ -2831,14 +3095,20 @@ class ZetsuAgentCoordinator:
             command_count=state.command_count,
             verification_summary=verification_summary,
             failed=status != "SUCCESS" and not resumable,
-            terminal=not persistent_session,
+            terminal=terminal_result,
             resumable=resumable,
             result_id=result_id,
         )
         cleanup = getattr(self.tiered.sandboxes, "authorize_terminal_cleanup", None)
         worktree_release = (
-            {"action": "PRESERVED_FOR_CONTINUATION"}
-            if persistent_session
+            {
+                "action": (
+                    "PRESERVED_UNVERIFIED_CANDIDATE"
+                    if preserve_unverified and not persistent_session
+                    else "PRESERVED_FOR_CONTINUATION"
+                )
+            }
+            if persistent_session or preserve_unverified
             else (
                 cleanup(effective_session, user_id=user_id, result_id=result_id)
                 if callable(cleanup)
@@ -2846,10 +3116,37 @@ class ZetsuAgentCoordinator:
             )
         )
         self.results.clear_staging(effective_session)
+        task_evidence: JsonObject = {"status": "PUBLISHED", "task_evidence_id": task_evidence_id}
+        try:
+            persisted_task_evidence_id = self._persist_task_evidence(
+                ctx,
+                state,
+                result_id=result_id,
+                outcome=(
+                    "verified_success"
+                    if status == "SUCCESS"
+                    else "unverified_candidate"
+                    if preserve_unverified
+                    else "failure"
+                ),
+                failure_category=failure_category,
+            )
+            if persisted_task_evidence_id != task_evidence_id:
+                raise ServiceTierError("task_evidence_identity_mismatch")
+        except ServiceTierError as exc:
+            task_evidence = {"status": "FAILED", "failure_category": exc.category}
+            self.tiered.sandboxes.record_progress(
+                effective_session,
+                user_id=user_id,
+                event="TASK_EVIDENCE_FAILED",
+                details={"category": exc.category},
+            )
         return {
             **authoritative,
             "content": final_result,
             "result_id": result_id,
+            "task_evidence_id": task_evidence_id,
+            "task_evidence": task_evidence,
             "result_artifacts": delivery["artifacts"],
             "delivery_status": "PAGED" if truncated else "BOUNDED",
             "worktree_release": worktree_release,

@@ -47,3 +47,14 @@ details and environment-limitation status are in
 PYTHONPATH=src .venv/bin/python scripts/run_release_candidate_v8_certification.py \
   --output-root outputs
 ```
+
+## Non-A6000 campaign baseline
+
+The non-A6000 campaign runner executes only deterministic hardware-independent
+checks and records explicit deferred inventories for optional 8 GB-safe checks,
+A6000-required checks, and external live checks. It never starts a model server.
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_non_a6000_certification.py \
+  --output-root .runtime/v3-non-a6000/3.6
+```

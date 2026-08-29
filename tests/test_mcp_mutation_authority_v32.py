@@ -1,8 +1,10 @@
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from research_workspace.zetsu_mcp import ZetsuError, ZetsuService, tool_definitions
+from research_workspace.laplace_core import LaplaceCore
 
 
 class Agent:
@@ -17,7 +19,15 @@ class Agent:
 def service(agent: Agent) -> ZetsuService:
     value = object.__new__(ZetsuService)
     value.repository_root = Path.cwd()
+    value.corpus = object()
+    value.tiered = object()
     value._agent_coordinator = agent
+    value.core = LaplaceCore(
+        value.repository_root,
+        cast(object, value.corpus),
+        cast(object, value.tiered),
+        repository_agent_service=cast(object, agent),
+    )
     value.available_tools = lambda _user_id: tuple(
         item for item in tool_definitions() if item["name"] == "agent_task"
     )
