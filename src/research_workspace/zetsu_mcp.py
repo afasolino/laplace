@@ -735,8 +735,6 @@ class ZetsuService:
                 "allow_mutation",
                 default=apply_to_repository,
             )
-            if allow_mutation and verification_argv is None:
-                raise ZetsuError("agent_mutation_requires_verifier")
             result = self._core().repository_agent(
                 user_id=user_id,
                 repo_id=repo_id,

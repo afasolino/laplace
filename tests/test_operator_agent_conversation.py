@@ -12,6 +12,7 @@ import pytest
 from research_workspace.agent_sandbox import AgentSandboxManager
 from research_workspace.conversations import ConversationStore
 from research_workspace.laplace_core import LaplaceCore
+from research_workspace.manager_control import ManagerPlan
 from research_workspace.operator_api import (
     AuthCredential,
     OperatorApiSettings,
@@ -153,6 +154,15 @@ class _PersistentService:
         return {"patch": None}
 
 
+class _Manager:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def plan(self, **kwargs: object) -> ManagerPlan:
+        self.calls.append(dict(kwargs))
+        return ManagerPlan(objective="Inspect", milestones=("Inspect", "Verify"))
+
+
 @pytest.mark.anyio
 async def test_operator_persistent_agent_messages_transcript_and_paged_result(
     tmp_path: Path,
@@ -202,12 +212,14 @@ async def test_operator_persistent_agent_messages_transcript_and_paged_result(
         audit_log=TierAuditLog(tmp_path / "tier-audit.jsonl"),
     )
     persistent = _PersistentService(tiered.sandboxes)
+    manager = _Manager()
     operator = OperatorService(ROOT, tmp_path / "operator")
     core = LaplaceCore(
         ROOT,
         PersonalCorpusStore(operator.state_root),
         tiered,
         repository_agent_service=persistent,  # type: ignore[arg-type]
+        manager_provider=manager,
     )
     app = create_operator_app(
         operator,
@@ -253,10 +265,17 @@ async def test_operator_persistent_agent_messages_transcript_and_paged_result(
                     "lane": "quality",
                     "instruction": instruction,
                     "domain": "python",
+                    "manager_complexity": {"architecture_sensitive": True},
                 },
             )
             assert response.status_code == 200, response.text
             results.append(response.json())
+
+        assert len(manager.calls) == 2
+        assert results[0]["manager_control"]["decision"] == "plan"
+        assert "Advisory manager plan" in str(persistent.calls[0]["instruction"])
+        assert persistent.calls[0]["allow_mutation"] is False
+        assert persistent.calls[0]["verification_argv"] is None
 
         assert [item["session_id"] for item in results] == ["agent-one", "agent-one"]
         assert [item["session_id"] for item in persistent.calls] == [

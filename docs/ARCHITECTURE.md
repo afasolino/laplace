@@ -1,6 +1,6 @@
-# Laplace v2 architecture
+# Laplace architecture generation 3
 
-Laplace v2 is a local control plane with a neutral Core and explicit adapters.
+Laplace architecture generation 3 is a local control plane with a neutral Core and explicit adapters.
 `LaplaceCore` composes routing, retrieval, memory, rules, repository intelligence,
 trajectories, hooks, skills, consolidation, logical scheduling, and deterministic
 verification. It can be constructed without importing or initializing MCP/Zetsu.
@@ -69,7 +69,8 @@ session-scoped.
 ## Production boundary and rollback
 
 Development changes belong in `/home/giando/work/laplace-v2` on
-`feature/laplace-v2`. `/home/giando/work/laplace` on `production/v1` is an
+the active review branch. Production checkout locations are deliberately not
+part of this architecture contract.
 immutable production/control-plane checkout. No test, runtime topology switch,
 worktree, or certification step may modify it. Rollback is an explicit deployment
 operation to the recorded certified v1 commit; it is never implemented by

@@ -13,6 +13,8 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Callable, Sequence, TypeAlias
 
+from .agent_infrastructure.git import run_git as _run_git
+
 JsonObject: TypeAlias = dict[str, object]
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -71,21 +73,6 @@ def _sqlite_filesystem_id(value: int) -> int:
     )
 
 
-def _git(
-    root: Path,
-    arguments: Sequence[str],
-    *,
-    runner: CommandRunner = subprocess.run,
-) -> subprocess.CompletedProcess[str]:
-    return runner(
-        ["git", "-C", str(root), *arguments],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    )
-
-
 class RepositoryAuthorizationStore:
     """Registry and grants whose roots can only be selected by an operator."""
 
@@ -141,7 +128,7 @@ class RepositoryAuthorizationStore:
     def register(self, repo_id: str, root: Path) -> RegisteredRepository:
         normalized = _identifier(repo_id, label="repo_id")
         canonical = root.resolve(strict=True)
-        result = _git(canonical, ("rev-parse", "--show-toplevel"), runner=self._runner)
+        result = _run_git(canonical, ("rev-parse", "--show-toplevel"), runner=self._runner)
         if result.returncode != 0:
             raise RepositoryAuthorizationError(
                 "not_a_git_repository",
@@ -178,7 +165,7 @@ class RepositoryAuthorizationStore:
     def grant(self, user_id: str, repo_id: str, *, base_revision: str = "HEAD") -> RepositoryGrant:
         user = _identifier(user_id, label="user_id")
         repository = self.repository(repo_id)
-        revision_result = _git(
+        revision_result = _run_git(
             repository.canonical_root,
             ("rev-parse", "--verify", f"{base_revision}^{{commit}}"),
             runner=self._runner,
@@ -335,12 +322,12 @@ class RepositoryAuthorizationStore:
                     )
                 old_grant_revision = int(row["revision"])
                 old_base_revision = str(row["base_revision"])
-                head_result = _git(
+                head_result = _run_git(
                     repository.canonical_root,
                     ("rev-parse", "--verify", "HEAD^{commit}"),
                     runner=self._runner,
                 )
-                status_result = _git(
+                status_result = _run_git(
                     repository.canonical_root,
                     ("status", "--porcelain=v1", "--untracked-files=all"),
                     runner=self._runner,
@@ -450,7 +437,7 @@ class RepositoryAuthorizationStore:
             "revision_sync_required": False,
             "state": "repository_not_registered",
         }
-        top = _git(canonical, ("rev-parse", "--show-toplevel"), runner=self._runner)
+        top = _run_git(canonical, ("rev-parse", "--show-toplevel"), runner=self._runner)
         if top.returncode != 0:
             result["state"] = "repository_not_git"
             return result
@@ -470,12 +457,12 @@ class RepositoryAuthorizationStore:
         result["registered"] = True
         try:
             repository = self.repository(repo_id)
-            head_result = _git(
+            head_result = _run_git(
                 repository.canonical_root,
                 ("rev-parse", "--verify", "HEAD^{commit}"),
                 runner=self._runner,
             )
-            status_result = _git(
+            status_result = _run_git(
                 repository.canonical_root,
                 ("status", "--porcelain=v1", "--untracked-files=all"),
                 runner=self._runner,

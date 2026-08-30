@@ -53,7 +53,15 @@ class CandidateAssurance:
 
     @property
     def is_currently_verified(self) -> bool:
+        """Whether the current candidate is in a promotable verified state.
+
+        A matching historical fingerprint is useful diagnostic information, but
+        it must not be exposed as current verification while a replacement
+        verifier is running or after an observation/verification failure.
+        """
         return (
+            self.state in {AssuranceState.VERIFIED_CANDIDATE, AssuranceState.PROMOTED}
+            and
             self.mutation_epoch == self.verified_epoch
             and bool(self.candidate_fingerprint)
             and self.candidate_fingerprint == self.verified_fingerprint

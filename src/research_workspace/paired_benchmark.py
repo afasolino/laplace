@@ -32,7 +32,7 @@ from .engineering import (
     AgentTaskStore,
     JsonObject,
     LocalToolRunner,
-    _write_json_atomic,
+    write_json_atomic,
     collect_cuda_evidence,
     normalize_task_spec,
 )
@@ -106,7 +106,7 @@ def _write_reports(output_root: Path, payload: JsonObject) -> JsonObject:
     json_path = output_root / "codex_vs_laplace_results.json"
     csv_path = output_root / "codex_vs_laplace_results.csv"
     markdown_path = output_root / "codex_vs_laplace_summary.md"
-    _write_json_atomic(json_path, payload)
+    write_json_atomic(json_path, payload)
     tasks = payload.get("tasks")
     rows = tasks if isinstance(tasks, list) else []
     csv_rows: list[dict[str, object]] = []
@@ -715,6 +715,12 @@ def _await_lane(process: subprocess.Popen[str], *, timeout_seconds: int) -> Json
     }
 
 
+def await_lane(process: subprocess.Popen[str], *, timeout_seconds: int) -> JsonObject:
+    """Public lane-waiting interface retaining the legacy implementation seam."""
+
+    return _await_lane(process, timeout_seconds=timeout_seconds)
+
+
 def _task_environment(task: BenchmarkTask, fixture_root: Path) -> dict[str, str]:
     if task.domain == "python":
         return {"PYTHONPATH": str(fixture_root)}
@@ -787,7 +793,7 @@ def _write_lane_request(
         "result_path": str(result_path),
     }
     target = run_root / "lane_requests" / f"{task.task_id}.json"
-    _write_json_atomic(target, request)
+    write_json_atomic(target, request)
     return target
 
 
@@ -850,7 +856,7 @@ def run_laplace_lane(request_path: Path) -> JsonObject:
     result = LocalTeamRunner(repository_root, project_root, candidate).run(
         task.task_id, query=query
     )
-    _write_json_atomic(result_path, result)
+    write_json_atomic(result_path, result)
     return result
 
 
@@ -1083,6 +1089,14 @@ def _evaluate_lane(
     }
 
 
+# Package-internal quality evaluation interfaces.  The implementation names
+# remain available for legacy tests while production callers use these names.
+BENCHMARK_TASKS = _BENCHMARK_TASKS
+task_spec = _task_spec
+git = _git
+evaluate_lane = _evaluate_lane
+
+
 def _lane_record(
     lane: str,
     started_at: str,
@@ -1183,7 +1197,7 @@ def run_valid_paired_benchmark(
         spec = _shared_task_specification(task, python_executable)
         validate_root = root
         normalized = normalize_task_spec(validate_root, task.domain, spec)
-        _write_json_atomic(run_root / "task_specs" / f"{task.task_id}.json", normalized)
+        write_json_atomic(run_root / "task_specs" / f"{task.task_id}.json", normalized)
         lane_root = run_root / "lane_worktrees" / task.task_id
         codex_root = lane_root / "codex_direct"
         laplace_outer_root = lane_root / "laplace_outer"

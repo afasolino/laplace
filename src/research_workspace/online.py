@@ -630,6 +630,9 @@ def _blocked_host(host: str) -> bool:
         return True
 
 
+blocked_host = _blocked_host
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(
         self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str

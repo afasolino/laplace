@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .engineering import Domain, EngineeringError, JsonObject, _inside, _safe_relative
+from .engineering import Domain, EngineeringError, JsonObject, inside, safe_relative
 
 
 class StructuredOutputError(EngineeringError):
@@ -81,8 +81,8 @@ def source_state(root: Path, allowed_paths: list[str], domain: Domain) -> list[J
     """Return complete current source state with hashes for model-bound replacements."""
     records: list[JsonObject] = []
     for raw_path in allowed_paths:
-        relative = _safe_relative(raw_path, label="allowed source path")
-        path = _inside(root, root / relative)
+        relative = safe_relative(raw_path, label="allowed source path")
+        path = inside(root, root / relative)
         if not path.is_file():
             continue
         content = path.read_text(encoding="utf-8", errors="strict")
@@ -110,7 +110,7 @@ def replacement_content_character_limits(source_records: object) -> dict[str, in
         content = raw.get("content")
         if not isinstance(path, str) or not isinstance(content, str):
             raise StructuredOutputError(f"Source record {index} is incomplete")
-        normalized = _safe_relative(path, label="source record path").as_posix()
+        normalized = safe_relative(path, label="source record path").as_posix()
         if normalized in limits:
             raise StructuredOutputError(f"Source record path is duplicated: {normalized}")
         growth_limit = max(
@@ -132,7 +132,7 @@ def replacement_plan_json_schema(
 ) -> JsonObject:
     """Return the strict request-time schema; worktree checks remain deterministic."""
     normalized_paths = sorted(
-        {_safe_relative(path, label="allowed path").as_posix() for path in allowed_paths}
+        {safe_relative(path, label="allowed path").as_posix() for path in allowed_paths}
     )
     if not normalized_paths:
         raise StructuredOutputError("Replacement schema requires at least one allowed path")
@@ -174,7 +174,7 @@ def replacement_plan_json_schema(
             digest = raw.get("sha256")
             if not isinstance(path, str):
                 raise StructuredOutputError(f"Source record {index} path is invalid")
-            normalized = _safe_relative(path, label="source record path").as_posix()
+            normalized = safe_relative(path, label="source record path").as_posix()
             if normalized not in allowed:
                 raise StructuredOutputError(
                     f"Source record path is outside replacement scope: {normalized}"
@@ -303,6 +303,10 @@ def _require_exact_keys(value: JsonObject, expected: set[str], *, label: str) ->
         )
 
 
+single_json_object = _single_json_object
+require_exact_keys = _require_exact_keys
+
+
 def parse_replacement_plan(
     model_text: str,
     *,
@@ -322,7 +326,7 @@ def parse_replacement_plan(
     if not isinstance(raw_replacements, list) or not raw_replacements:
         raise StructuredOutputError("Replacement plan must contain at least one replacement")
     allowed = {
-        _safe_relative(path, label="allowed path").as_posix(): path for path in allowed_paths
+        safe_relative(path, label="allowed path").as_posix(): path for path in allowed_paths
     }
     seen: set[str] = set()
     total_bytes = 0
@@ -343,7 +347,7 @@ def parse_replacement_plan(
         content = item.get("content")
         if not isinstance(path_value, str):
             raise StructuredOutputError(f"Replacement {index} path must be a string")
-        path = _safe_relative(path_value, label="replacement path").as_posix()
+        path = safe_relative(path_value, label="replacement path").as_posix()
         if path not in allowed:
             raise StructuredOutputError(f"Replacement path is outside task scope: {path}")
         if path in seen:
@@ -367,7 +371,7 @@ def parse_replacement_plan(
             raise StructuredOutputError(f"Replacement {path} content must be non-empty text")
         if "\x00" in content:
             raise StructuredOutputError(f"Replacement {path} contains a NUL byte")
-        current = _inside(root, root / Path(path))
+        current = inside(root, root / Path(path))
         if not current.is_file():
             raise StructuredOutputError(f"Replacement target does not exist: {path}")
         current_hash = file_sha256(current)
@@ -399,7 +403,7 @@ def build_local_patch(plan: ReplacementPlan, *, root: Path) -> str:
     chunks: list[str] = []
     for replacement in plan.replacements:
         relative = Path(replacement.path)
-        source = _inside(root, root / relative)
+        source = inside(root, root / relative)
         current = source.read_text(encoding="utf-8", errors="strict")
         diff = "".join(
             difflib.unified_diff(

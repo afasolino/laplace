@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, Literal
 
-from .engineering import EngineeringError, JsonObject, _write_json_atomic
+from .engineering import EngineeringError, JsonObject, write_json_atomic
 from .inference import ServingCandidate, backend_for
 from .llm import (
     GenerationResult,
@@ -596,7 +596,7 @@ class AuditedModelCaller:
                 "context_packet": context_packet,
                 **payload,
             }
-            _write_json_atomic(path, record, readonly=True)
+            write_json_atomic(path, record, readonly=True)
 
         structured_cap = decision.candidate.structured_serialization_max_output_tokens
         if structured_cap is None:

@@ -8,12 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .engineering import Domain, JsonObject, _inside, _safe_relative
+from .engineering import Domain, JsonObject, inside, safe_relative
 from .repair_protocol import (
     StructuredOutputError,
-    _require_exact_keys,
-    _single_json_object,
     file_sha256,
+    require_exact_keys,
+    single_json_object,
 )
 
 
@@ -81,7 +81,7 @@ def _validate_parameters(value: object) -> None:
         if not isinstance(raw, dict):
             raise StructuredOutputError(f"RTL contract parameter {index} must be an object")
         item = dict(raw)
-        _require_exact_keys(
+        require_exact_keys(
             item,
             {"name", "type", "default", "constraints"},
             label=f"RTL contract parameter {index}",
@@ -107,7 +107,7 @@ def _validate_ports(value: object) -> set[str]:
         if not isinstance(raw, dict):
             raise StructuredOutputError(f"RTL contract port {index} must be an object")
         item = dict(raw)
-        _require_exact_keys(
+        require_exact_keys(
             item,
             {"name", "direction", "width", "signed", "description"},
             label=f"RTL contract port {index}",
@@ -133,15 +133,15 @@ def _validate_clock_reset(value: object, *, port_names: set[str]) -> None:
     if not isinstance(value, dict):
         raise StructuredOutputError("RTL contract clock_reset must be an object")
     item = dict(value)
-    _require_exact_keys(item, {"clock", "reset"}, label="RTL contract clock_reset")
+    require_exact_keys(item, {"clock", "reset"}, label="RTL contract clock_reset")
     clock = item.get("clock")
     reset = item.get("reset")
     if not isinstance(clock, dict) or not isinstance(reset, dict):
         raise StructuredOutputError("RTL contract clock and reset must be objects")
     clock_item = dict(clock)
     reset_item = dict(reset)
-    _require_exact_keys(clock_item, {"name", "edge"}, label="RTL contract clock")
-    _require_exact_keys(
+    require_exact_keys(clock_item, {"name", "edge"}, label="RTL contract clock")
+    require_exact_keys(
         reset_item,
         {"name", "active_level", "synchronous", "reset_values"},
         label="RTL contract reset",
@@ -177,7 +177,7 @@ def _validate_diagnostics(value: object) -> None:
         if not isinstance(raw, dict):
             raise StructuredOutputError(f"RTL contract diagnostic {index} must be an object")
         item = dict(raw)
-        _require_exact_keys(
+        require_exact_keys(
             item,
             {"attempt", "tool", "observed", "expected", "source_locations"},
             label=f"RTL contract diagnostic {index}",
@@ -558,8 +558,8 @@ def build_rtl_worker_contract(
     defect_report: JsonObject | None,
 ) -> RtlWorkerContract:
     """Construct the specialist handoff from trusted task metadata and source state."""
-    normalized_path = _safe_relative(editable_path, label="contract editable path").as_posix()
-    source_path = _inside(root, root / Path(normalized_path))
+    normalized_path = safe_relative(editable_path, label="contract editable path").as_posix()
+    source_path = inside(root, root / Path(normalized_path))
     if not source_path.is_file():
         raise StructuredOutputError("RTL worker editable source does not exist")
     content = source_path.read_text(encoding="utf-8", errors="strict")
@@ -642,7 +642,7 @@ def parse_rtl_worker_contract(
     """Reject incomplete, stale, ambiguous, or out-of-scope main-model handoffs."""
     if language not in {"verilog", "systemverilog"}:
         raise StructuredOutputError("RTL worker contracts require Verilog or SystemVerilog")
-    value = _single_json_object(model_text, label="RTL contract")
+    value = single_json_object(model_text, label="RTL contract")
     expected = {
         "schema_version",
         "task_id",
@@ -662,7 +662,7 @@ def parse_rtl_worker_contract(
         "verification",
         "diagnostics",
     }
-    _require_exact_keys(value, expected, label="RTL contract")
+    require_exact_keys(value, expected, label="RTL contract")
     if value.get("schema_version") != 1:
         raise StructuredOutputError("RTL contract schema_version must equal 1")
     if value.get("task_id") != task_id:
@@ -675,17 +675,17 @@ def parse_rtl_worker_contract(
         raise StructuredOutputError("RTL contract module_name is invalid")
     if value.get("language") != language:
         raise StructuredOutputError("RTL contract language does not match the active task")
-    normalized_path = _safe_relative(editable_path, label="contract editable path").as_posix()
+    normalized_path = safe_relative(editable_path, label="contract editable path").as_posix()
     if value.get("editable_path") != normalized_path:
         raise StructuredOutputError("RTL contract editable_path does not match deterministic scope")
-    source = _inside(root, root / Path(normalized_path))
+    source = inside(root, root / Path(normalized_path))
     if not source.is_file():
         raise StructuredOutputError("RTL contract editable source does not exist")
     source_value = value.get("current_source")
     if not isinstance(source_value, dict):
         raise StructuredOutputError("RTL contract current_source must be an object")
     source_item = dict(source_value)
-    _require_exact_keys(source_item, {"sha256", "content"}, label="RTL contract current_source")
+    require_exact_keys(source_item, {"sha256", "content"}, label="RTL contract current_source")
     if source_item.get("sha256") != file_sha256(source):
         raise StructuredOutputError("RTL contract current_source hash is stale")
     content = source.read_text(encoding="utf-8", errors="strict")
@@ -707,7 +707,7 @@ def parse_rtl_worker_contract(
     if not isinstance(verification, dict):
         raise StructuredOutputError("RTL contract verification must be an object")
     verification_item = dict(verification)
-    _require_exact_keys(
+    require_exact_keys(
         verification_item,
         {"commands", "acceptance_criteria"},
         label="RTL contract verification",

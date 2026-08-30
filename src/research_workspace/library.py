@@ -11,7 +11,7 @@ from typing import Any
 
 from pypdf import PdfReader
 
-from .documents import Chunk, _chunks, _db, _safe_text
+from .documents import Chunk, chunk_document_text, open_document_store, read_document_text
 from .projects import ProjectPaths, formalscience_root, load_project
 
 
@@ -102,7 +102,7 @@ def ingest_library(
     if not library_dir.is_dir():
         raise FileNotFoundError(library_dir)
     database = paths.data / "Metadata" / "workspace.db"
-    conn = _db(database)
+    conn = open_document_store(database)
     existing = _existing_metadata(conn)
     report: dict[str, Any] = {
         "project": project,
@@ -143,7 +143,7 @@ def ingest_library(
             reader = PdfReader(source)
             chunks: list[Chunk] = []
             for page_number, page in enumerate(reader.pages, 1):
-                for index, text in enumerate(_chunks(page.extract_text() or "")):
+                for index, text in enumerate(chunk_document_text(page.extract_text() or "")):
                     chunks.append(
                         Chunk(
                             metadata["document_id"],
@@ -204,7 +204,7 @@ def ingest_library(
 def ingest_downloads(project: str, *, root: Path | None = None) -> dict[str, Any]:
     paths, _ = load_project(project, root=root)
     database = paths.data / "Metadata" / "workspace.db"
-    conn = _db(database)
+    conn = open_document_store(database)
     existing = {row[0] for row in conn.execute("SELECT sha256 FROM documents").fetchall()}
     sources = list((paths.data / "Downloads" / "OpenAccess").glob("*.pdf")) + list(
         (paths.data / "Downloads" / "IEEE" / "Downloaded").glob("*.pdf")
@@ -223,11 +223,11 @@ def ingest_downloads(project: str, *, root: Path | None = None) -> dict[str, Any
             )
             continue
         try:
-            pages = _safe_text(source)
+            pages = read_document_text(source)
             document_id = digest[:20]
             chunks: list[Chunk] = []
             for page, text in pages:
-                for index, value in enumerate(_chunks(text)):
+                for index, value in enumerate(chunk_document_text(text)):
                     chunks.append(
                         Chunk(
                             document_id,

@@ -106,3 +106,29 @@ def validate_verification_argv(worktree: Path, value: object) -> list[str]:
     if skip_next_value:
         raise ServiceTierError("zetsu_agent_verify_argv_invalid")
     return argv
+
+
+def verification_qualifies_for_promotion(argv: Sequence[str]) -> bool:
+    """Return whether an admitted verifier is an actual read-only final check.
+
+    Admission validates path containment and executable safety. Qualification
+    additionally rejects informational and collection-only invocations, which
+    cannot establish a promotion binding.
+    """
+
+    if not argv:
+        return False
+    executable = Path(argv[0]).name
+    lowered = [item.casefold() for item in argv[1:]]
+    informational = {"--help", "-h", "--version", "-v", "--collect-only", "--co", "--setup-plan"}
+    if any(item in informational for item in lowered):
+        return False
+    if executable == "pytest":
+        return True
+    if executable == "ruff":
+        return bool(argv[1:]) and argv[1] == "check" and not any(
+            item in {"--show-files", "--show-settings"} for item in lowered
+        )
+    if executable == "mypy":
+        return "--install-types" not in lowered and any(not item.startswith("-") for item in argv[1:])
+    return False

@@ -12,7 +12,7 @@ from .engineering import (
     JsonObject,
     ReferenceLibrary,
     ReferencePolicyError,
-    _inside,
+    inside,
 )
 
 
@@ -70,7 +70,7 @@ def load_bundled_corpus_manifest(repository_root: Path) -> JsonObject:
     licence_hash = value.get("licence_sha256")
     if not isinstance(licence_raw, str) or not isinstance(licence_hash, str):
         raise ReferencePolicyError("Bundled corpus licence metadata is malformed")
-    licence = _inside(repository_root.resolve(), repository_root.resolve() / licence_raw)
+    licence = inside(repository_root.resolve(), repository_root.resolve() / licence_raw)
     if not licence.is_file() or _sha256(licence) != licence_hash:
         raise ReferencePolicyError("Bundled corpus licence hash verification failed")
     references = value.get("references")
@@ -109,7 +109,7 @@ def load_bundled_corpus_manifest(repository_root: Path) -> JsonObject:
                 or not all(isinstance(topic, str) and topic for topic in topics)
             ):
                 raise ReferencePolicyError("Bundled selected-file metadata is malformed")
-            source = _inside(repository_root.resolve(), repository_root.resolve() / source_path)
+            source = inside(repository_root.resolve(), repository_root.resolve() / source_path)
             if not source.is_file() or _sha256(source) != digest:
                 raise ReferencePolicyError(f"Bundled selected-file hash failed: {source_path}")
     return value
@@ -185,7 +185,7 @@ def load_installed_external_manifest(repository_root: Path) -> JsonObject:
         licence_hash = source.get("licence_sha256")
         if not isinstance(licence_path, str) or not isinstance(licence_hash, str):
             raise ReferencePolicyError("External licence metadata is malformed")
-        licence = _inside(root, root / licence_path)
+        licence = inside(root, root / licence_path)
         if not licence.is_file() or _sha256(licence) != licence_hash:
             raise ReferencePolicyError(f"External licence hash failed: {licence_path}")
         files = source.get("files")
@@ -209,7 +209,7 @@ def load_installed_external_manifest(repository_root: Path) -> JsonObject:
                 or not all(isinstance(topic, str) and topic for topic in topics)
             ):
                 raise ReferencePolicyError("External selected-file metadata is malformed")
-            selected = _inside(root, root / file_path)
+            selected = inside(root, root / file_path)
             if not selected.is_file() or _sha256(selected) != digest:
                 raise ReferencePolicyError(f"External selected-file hash failed: {file_path}")
     if domains != {"c", "verilog"}:
@@ -275,7 +275,7 @@ def _copy_registered_domain(base_root: Path, overlay_root: Path, domain: Domain)
 def bootstrap_bundled_extensions(repository_root: Path, overlay_root: Path) -> JsonObject:
     root = repository_root.resolve()
     manifest = load_bundled_corpus_manifest(root)
-    licence = _inside(root, root / str(manifest["licence_path"]))
+    licence = inside(root, root / str(manifest["licence_path"]))
     references = manifest["references"]
     if not isinstance(references, list):
         raise ReferencePolicyError("Bundled reference list is malformed")
@@ -302,7 +302,7 @@ def bootstrap_bundled_extensions(repository_root: Path, overlay_root: Path) -> J
                 raise ReferencePolicyError("Bundled selected file topics are malformed")
             selected.append(
                 (
-                    _inside(root, root / str(item["path"])),
+                    inside(root, root / str(item["path"])),
                     str(item["selected_topic"]),
                     tuple(topics),
                 )
@@ -348,7 +348,7 @@ def bootstrap_external_extensions(repository_root: Path, overlay_root: Path) -> 
             item = _object(raw_file, label="External selected file")
             selected.append(
                 (
-                    _inside(root, root / str(item["path"])),
+                    inside(root, root / str(item["path"])),
                     str(item["selected_topic"]),
                     tuple(cast(list[str], item["topics"])),
                 )
@@ -359,7 +359,7 @@ def bootstrap_external_extensions(repository_root: Path, overlay_root: Path) -> 
                 repository=str(source["repository"]),
                 release=str(source["revision"]),
                 licence_identifier=str(source["licence_identifier"]),
-                licence_path=_inside(root, root / str(source["licence_path"])),
+                licence_path=inside(root, root / str(source["licence_path"])),
                 selected_files=selected,
                 permitted_use=str(source["permitted_use"]),
                 attribution=str(source["attribution"]),
@@ -370,7 +370,7 @@ def bootstrap_external_extensions(repository_root: Path, overlay_root: Path) -> 
                 repository=str(source["repository"]),
                 commit=str(source["revision"]),
                 licence_identifier=str(source["licence_identifier"]),
-                licence_path=_inside(root, root / str(source["licence_path"])),
+                licence_path=inside(root, root / str(source["licence_path"])),
                 selected_files=selected,
                 permitted_use=str(source["permitted_use"]),
                 attribution=str(source["attribution"]),

@@ -20,7 +20,7 @@ from .research_models import (
     DiscoveredSource,
     FetchedSource,
     ResearchAdapter,
-    _assert_public_hostname,
+    assert_public_hostname,
     canonicalize_url,
 )
 
@@ -47,7 +47,7 @@ class BoundedWebClient:
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme != "https" or parsed.hostname is None:
             raise WebAdapterError("web adapters require public HTTPS endpoints")
-        _assert_public_hostname(parsed.hostname)
+        assert_public_hostname(parsed.hostname)
         return parsed
 
     def _rate_limit(self, hostname: str) -> None:

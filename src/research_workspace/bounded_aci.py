@@ -16,7 +16,6 @@ import json
 import os
 import re
 import shutil
-import signal
 import subprocess  # nosec B404 - argv is allowlisted and shell=False
 import tempfile
 import time
@@ -27,6 +26,7 @@ from typing import Literal, TypeAlias, cast
 
 from .repository_authorization import RepositoryAuthorizationError, validate_workspace_path
 from .repository_context import RepoMap, RepositoryContextService
+from .agent_infrastructure.process import stop_process_tree
 
 JsonObject: TypeAlias = dict[str, object]
 ACIPathOperation = Literal[
@@ -370,7 +370,7 @@ class BoundedRepositoryACI:
                 try:
                     returncode = process.wait(timeout=30)
                 except subprocess.TimeoutExpired as exc:
-                    self._terminate(process)
+                    stop_process_tree(process)
                     raise BoundedACIError("aci_git_timeout") from exc
             except OSError as exc:
                 raise BoundedACIError("aci_git_unavailable") from exc
@@ -378,20 +378,6 @@ class BoundedRepositoryACI:
             total = output.tell()
             output.seek(0)
             return returncode, output.read(max_bytes + 1), total
-
-    @staticmethod
-    def _terminate(process: subprocess.Popen[bytes]) -> None:
-        try:
-            if process.poll() is None and os.name == "posix":
-                os.killpg(process.pid, signal.SIGTERM)
-            elif process.poll() is None:
-                process.terminate()
-            process.wait(timeout=2)
-        except (OSError, ProcessLookupError, subprocess.TimeoutExpired):
-            try:
-                process.kill()
-            except (OSError, ProcessLookupError):
-                pass
 
     def git_state(self) -> JsonObject:
         head_code, head_raw, _ = self._run_git_capture(("rev-parse", "--verify", "HEAD"), max_bytes=256)
@@ -794,11 +780,11 @@ class BoundedRepositoryACI:
                 while process.poll() is None:
                     if self.is_cancelled():
                         aborted = "aci_verify_cancelled"
-                        self._terminate(process)
+                        stop_process_tree(process)
                         break
                     if time.monotonic() >= deadline:
                         aborted = "aci_verify_timeout"
-                        self._terminate(process)
+                        stop_process_tree(process)
                         break
                     time.sleep(0.05)
                 if aborted is None:

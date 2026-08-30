@@ -17,14 +17,14 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: python -m pip install --disable-pip-version-check -r requirements.lock
-      - run: python scripts/run_release_candidate_v8_certification.py --output-root outputs/ci/release
+      - run: python scripts/run_non_a6000_certification.py --output-root .runtime/v3-non-a6000/remote-ci
         env:
           PYTHONPATH: src
           LAPLACE_FIXTURE_ONLY: "1"
           NO_PROXY: "*"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-candidate-v8-certification
-          path: outputs/ci/release
+          name: non-a6000-certification
+          path: .runtime/v3-non-a6000/remote-ci
           retention-days: 7
           if-no-files-found: error

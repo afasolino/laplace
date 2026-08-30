@@ -56,5 +56,5 @@ A6000-required checks, and external live checks. It never starts a model server.
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/run_non_a6000_certification.py \
-  --output-root .runtime/v3-non-a6000/3.6
+  --output-root .runtime/v3-non-a6000/current
 ```

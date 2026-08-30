@@ -12,5 +12,15 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
     del config
     for item in items:
-        category = category_for_nodeid(item.nodeid)
+        try:
+            category = category_for_nodeid(item.nodeid)
+        except ValueError as exc:
+            raise pytest.UsageError(str(exc)) from exc
+        declared = {marker.name for marker in item.own_markers if marker.name in {
+            "cross_platform_deterministic", "linux_posix_required", "interactive_e2e",
+            "optional_dependency", "gpu_smoke", "a6000_required", "external_live",
+            "windows_privilege_required",
+        }}
+        if declared and declared != {category}:
+            raise pytest.UsageError(f"multiple_test_classifications:{item.nodeid}")
         item.add_marker(getattr(pytest.mark, category))

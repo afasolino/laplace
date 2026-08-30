@@ -73,6 +73,11 @@ def _unlock_file(handle: BinaryIO) -> None:
     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+# Explicit package-internal interfaces shared by durable append-only stores.
+lock_file = _lock_file
+unlock_file = _unlock_file
+
+
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 

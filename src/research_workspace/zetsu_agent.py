@@ -6,19 +6,17 @@ semantic aids only; exact resumable state is checkpointed independently.
 
 from __future__ import annotations
 
-import difflib
 import hashlib
 import io
 import json
 import os
 import shutil
-import signal
 import subprocess  # nosec B404 - argv is allowlisted and shell=False
 import tempfile
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO, Mapping, Sequence, cast
@@ -26,9 +24,10 @@ from typing import BinaryIO, Mapping, Sequence, cast
 from .agent_sandbox import (
     AgentSandboxError,
     AgentSandboxManager,
-    AgentSessionBinding,
     AgentToolPolicy,
 )
+from .agent_infrastructure.git import run_git
+from .agent_infrastructure.process import stop_process_tree
 from .bounded_aci import BoundedACIError, BoundedRepositoryACI
 from .candidate_assurance import VerificationBinding
 from .context_planner import DEFAULT_COMPACTION_RATIO, ContextPlanner, ContextPlannerError
@@ -42,8 +41,13 @@ from .task_evidence import (
     TaskOutcomeEvidence,
     recent_evidence_for_policy,
 )
-from .verification_policy import validate_verification_argv
-from .zetsu_context import compact_personal_results
+from .verification_policy import validate_verification_argv, verification_qualifies_for_promotion
+from .zetsu_checkpoint import AgentCheckpointStore
+from .zetsu_handoff import ZetsuHandoffStore
+from .zetsu_state import AgentExecutionState, AgentRunContext, AgentTelemetry
+from .zetsu_tools import read as read_tool
+from .zetsu_tools import retrieve as retrieve_tool
+from .zetsu_tools import search as search_tool
 from .result_store import ResultStore, ResultStoreError
 from .zetsu_scheduler import (
     AgentAdmission,
@@ -54,14 +58,11 @@ from .zetsu_scheduler import (
 
 JsonObject = dict[str, object]
 
-_MAX_READ_CHARS = 64_000
 _MAX_NEW_FILE_CHARS = 256_000
-_MAX_SEARCH_MATCHES = 80
 _MAX_OBSERVATION_CHARS = 80_000
 _MAX_RECENT_OBSERVATIONS = 8
 _MAX_CHANGED_PATHS = 256
 _MAX_GIT_STATUS_BYTES = 4 * 1024 * 1024
-_MAX_CHECKPOINT_BYTES = 2 * 1024 * 1024
 _MAX_VERIFY_CAPTURE_BYTES = 32 * 1024
 _CHECKPOINT_SCHEMA = 3
 _MAX_OUTPUT_CAP_CONTINUATIONS = 4
@@ -92,228 +93,6 @@ def _rough_tokens(value: str) -> int:
     return max(1, (len(value.encode("utf-8")) + 3) // 4)
 
 
-def _usage_tokens(value: Mapping[str, object]) -> tuple[int | None, int | None, int | None]:
-    response = value.get("response")
-    usage = response.get("usage") if isinstance(response, Mapping) else None
-    if not isinstance(usage, Mapping):
-        return None, None, None
-
-    def read(*names: str) -> int | None:
-        for name in names:
-            raw = usage.get(name)
-            if isinstance(raw, int) and raw >= 0:
-                return raw
-        return None
-
-    return (
-        read("prompt_tokens", "input_tokens"),
-        read("completion_tokens", "output_tokens"),
-        read("cached_tokens", "cached_input_tokens"),
-    )
-
-
-@dataclass
-class AgentTelemetry:
-    qwen_input_tokens: int = 0
-    qwen_output_tokens: int = 0
-    qwen_cached_tokens: int = 0
-    qwen_usage_reported_calls: int = 0
-    qwen_calls: int = 0
-    agent_steps: int = 0
-    tool_calls: int = 0
-    verification_calls: int = 0
-    compactions: int = 0
-    compaction_input_tokens: int = 0
-    compaction_output_tokens: int = 0
-    approximate_active_context_tokens_before_last_compaction: int = 0
-    approximate_active_context_tokens_after_last_compaction: int = 0
-    last_model_reported_input_tokens: int | None = None
-
-    def add_usage(self, value: Mapping[str, object], *, compaction: bool = False) -> None:
-        prompt, completion, cached = _usage_tokens(value)
-        self.qwen_calls += 1
-        if prompt is not None or completion is not None or cached is not None:
-            self.qwen_usage_reported_calls += 1
-        if prompt is not None:
-            self.qwen_input_tokens += prompt
-            self.last_model_reported_input_tokens = prompt
-        if completion is not None:
-            self.qwen_output_tokens += completion
-        if cached is not None:
-            self.qwen_cached_tokens += cached
-        if compaction:
-            self.compaction_input_tokens += prompt or 0
-            self.compaction_output_tokens += completion or 0
-
-    @classmethod
-    def from_mapping(cls, value: object) -> "AgentTelemetry":
-        if not isinstance(value, Mapping):
-            raise ServiceTierError("zetsu_agent_checkpoint_telemetry_invalid")
-        telemetry = cls()
-        integer_fields = set(telemetry.__dataclass_fields__) - {"last_model_reported_input_tokens"}
-        allowed = integer_fields | {
-            "last_model_reported_input_tokens",
-            "qwen_token_usage_source",
-            "qwen_token_usage_complete",
-            "approximate_context_token_method",
-        }
-        if set(value) - allowed:
-            raise ServiceTierError("zetsu_agent_checkpoint_telemetry_invalid")
-        for name in integer_fields:
-            raw = value.get(name)
-            if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
-                raise ServiceTierError("zetsu_agent_checkpoint_telemetry_invalid")
-            setattr(telemetry, name, raw)
-        raw_last = value.get("last_model_reported_input_tokens")
-        if raw_last is not None and (
-            isinstance(raw_last, bool) or not isinstance(raw_last, int) or raw_last < 0
-        ):
-            raise ServiceTierError("zetsu_agent_checkpoint_telemetry_invalid")
-        telemetry.last_model_reported_input_tokens = raw_last
-        if value.get("qwen_token_usage_source") != "model_reported_per_request":
-            raise ServiceTierError("zetsu_agent_checkpoint_telemetry_invalid")
-        if value.get("approximate_context_token_method") != "utf8_json_bytes_div4":
-            raise ServiceTierError("zetsu_agent_checkpoint_telemetry_invalid")
-        complete = value.get("qwen_token_usage_complete")
-        if not isinstance(complete, bool) or complete != (
-            telemetry.qwen_usage_reported_calls == telemetry.qwen_calls
-        ):
-            raise ServiceTierError("zetsu_agent_checkpoint_telemetry_invalid")
-        if (
-            telemetry.qwen_usage_reported_calls > telemetry.qwen_calls
-            or telemetry.verification_calls > telemetry.tool_calls
-            or telemetry.compactions > telemetry.qwen_calls
-            or telemetry.qwen_calls != telemetry.agent_steps + telemetry.compactions
-        ):
-            raise ServiceTierError("zetsu_agent_checkpoint_telemetry_invalid")
-        return telemetry
-
-    def as_dict(self) -> JsonObject:
-        return {
-            "qwen_input_tokens": self.qwen_input_tokens,
-            "qwen_output_tokens": self.qwen_output_tokens,
-            "qwen_cached_tokens": self.qwen_cached_tokens,
-            "qwen_usage_reported_calls": self.qwen_usage_reported_calls,
-            "qwen_calls": self.qwen_calls,
-            "qwen_token_usage_source": "model_reported_per_request",
-            "qwen_token_usage_complete": self.qwen_usage_reported_calls == self.qwen_calls,
-            "approximate_context_token_method": "utf8_json_bytes_div4",
-            "agent_steps": self.agent_steps,
-            "tool_calls": self.tool_calls,
-            "verification_calls": self.verification_calls,
-            "compactions": self.compactions,
-            "compaction_input_tokens": self.compaction_input_tokens,
-            "compaction_output_tokens": self.compaction_output_tokens,
-            "approximate_active_context_tokens_before_last_compaction": self.approximate_active_context_tokens_before_last_compaction,
-            "approximate_active_context_tokens_after_last_compaction": self.approximate_active_context_tokens_after_last_compaction,
-            "last_model_reported_input_tokens": self.last_model_reported_input_tokens,
-        }
-
-
-@dataclass
-class AgentExecutionState:
-    objective: str
-    step: int = 0
-    summary: str = ""
-    recent_observations: list[str] = field(default_factory=list)
-    changed_paths: list[str] = field(default_factory=list)
-    worktree_head: str = ""
-    worktree_status_sha256: str = ""
-    lane: str = ""
-    model_id: str = ""
-    context_limit: int = 0
-    required_verification_argv: list[str] | None = None
-    validation_history: list[JsonObject] = field(default_factory=list)
-    unresolved_failures: list[str] = field(default_factory=list)
-    evidence_refs: list[str] = field(default_factory=list)
-    next_state: str = "choose_action"
-    mutation_epoch: int = 0
-    last_verified_epoch: int = -1
-    candidate_fingerprint: str = ""
-    verified_fingerprint: str = ""
-    verifier_digest: str = ""
-    assurance_state: str = "clean"
-    command_count: int = 0
-    consumed_wall_seconds: float = 0.0
-    target_initial_head: str = ""
-    target_initial_status_sha256: str = ""
-    target_applied_status_sha256: str = ""
-    applied_patch_sha256: str = ""
-    output_cap_continuations: int = 0
-    continuation_count: int = 0
-    stagnation_count: int = 0
-    exploration_only_quanta: int = 0
-    recent_action_fingerprints: list[str] = field(default_factory=list)
-    quantum_action_fingerprints: list[str] = field(default_factory=list)
-    quantum_exploration_only: bool = True
-    telemetry: AgentTelemetry = field(default_factory=AgentTelemetry)
-
-
-@dataclass(frozen=True)
-class AgentRunContext:
-    user_id: str
-    session_id: str
-    repo_id: str
-    lane: ModelLane
-    binding: AgentSessionBinding
-    worktree: Path
-    max_steps: int
-    max_chars: int
-    compaction_ratio: float
-    model_id: str
-    context_limit: int
-    required_verification_argv: tuple[str, ...] | None
-    run_started: float
-    remaining_wall_seconds: float
-    task_label: str = "Repository Task"
-    apply_to_repository: bool = False
-    allow_mutation: bool = True
-
-
-class AgentCheckpointStore:
-    """Atomic owner-independent files keyed by opaque session digest."""
-
-    def __init__(self, root: Path) -> None:
-        self.root = root.resolve()
-        self.root.mkdir(parents=True, exist_ok=True)
-        if os.name != "nt":
-            os.chmod(self.root, 0o700)
-
-    def path(self, session_id: str) -> Path:
-        digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
-        return self.root / f"{digest}.json"
-
-    def write(self, session_id: str, value: Mapping[str, object]) -> Path:
-        target = self.path(session_id)
-        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump(dict(value), handle, indent=2, sort_keys=True)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, target)
-        finally:
-            temporary.unlink(missing_ok=True)
-        return target
-
-    def read(self, session_id: str) -> JsonObject | None:
-        target = self.path(session_id)
-        if not target.is_file():
-            return None
-        try:
-            size = target.stat().st_size
-            if size > _MAX_CHECKPOINT_BYTES:
-                raise ServiceTierError("zetsu_agent_checkpoint_too_large")
-            value: object = json.loads(target.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ServiceTierError("zetsu_agent_checkpoint_invalid") from exc
-        if not isinstance(value, dict):
-            raise ServiceTierError("zetsu_agent_checkpoint_invalid")
-        return cast(JsonObject, value)
-
-
 class ZetsuAgentCoordinator:
     """Iterative Qwen agent confined to one owner-authorized worktree."""
 
@@ -332,6 +111,7 @@ class ZetsuAgentCoordinator:
         self.checkpoints = checkpoint_store or AgentCheckpointStore(
             tiered.sandboxes.sandbox_root / "zetsu_agent_checkpoints"
         )
+        self.handoffs = ZetsuHandoffStore(self.checkpoints)
         self.results = result_store or ResultStore(
             tiered.sandboxes.sandbox_root / "zetsu_agent_results"
         )
@@ -496,13 +276,7 @@ class ZetsuAgentCoordinator:
     def _run_git(
         worktree: Path, argv: Sequence[str], *, timeout: float = 30.0
     ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["git", "-C", str(worktree), *argv],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=max(1.0, timeout),
-        )
+        return run_git(worktree, argv, timeout_seconds=timeout)
 
     @classmethod
     def _worktree_state(cls, worktree: Path) -> tuple[str, str, list[str]]:
@@ -616,37 +390,7 @@ class ZetsuAgentCoordinator:
             )
 
     def _exact_patch(self, worktree: Path, changed_paths: Sequence[str]) -> str:
-        tracked = self._run_git(
-            worktree,
-            ["diff", "--no-ext-diff", "--binary", "HEAD", "--"],
-        )
-        if tracked.returncode != 0:
-            raise ServiceTierError("zetsu_agent_handoff_patch_unavailable")
-        patch = tracked.stdout
-        for relative in changed_paths:
-            listed = self._run_git(
-                worktree,
-                ["ls-files", "--error-unmatch", "--", relative],
-            )
-            if listed.returncode == 0:
-                continue
-            target = self._relative_target(worktree, relative)
-            if not target.is_file() or target.stat().st_size > _MAX_NEW_FILE_CHARS:
-                raise ServiceTierError("zetsu_agent_handoff_new_file_unavailable")
-            try:
-                content = target.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError) as exc:
-                raise ServiceTierError("zetsu_agent_handoff_new_file_not_text") from exc
-            patch += f"diff --git a/{relative} b/{relative}\nnew file mode 100644\n"
-            patch += "".join(
-                difflib.unified_diff(
-                    (),
-                    content.splitlines(keepends=True),
-                    fromfile="/dev/null",
-                    tofile=f"b/{relative}",
-                )
-            )
-        return patch
+        return self.handoffs.exact_patch(worktree, changed_paths)
 
     def _handoff_patch(
         self,
@@ -656,52 +400,15 @@ class ZetsuAgentCoordinator:
         *,
         max_chars: int,
     ) -> JsonObject:
-        """Capture exact verified code separately from disposable agent narration."""
-
-        del max_chars
-        patch = self._exact_patch(worktree, changed_paths)
-        digest = hashlib.sha256(patch.encode("utf-8")).hexdigest()
-        artifact = self.checkpoints.path(session_id).with_suffix(".patch")
-        temporary = artifact.with_name(f".{artifact.name}.{uuid.uuid4().hex}.tmp")
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(patch)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, artifact)
-        finally:
-            temporary.unlink(missing_ok=True)
-        return {
-            "patch": None,
-            "patch_inline": False,
-            "patch_chars": len(patch),
-            "patch_sha256": digest,
-            "patch_path": str(artifact),
-        }
+        return self.handoffs.create(
+            worktree,
+            session_id,
+            changed_paths,
+            max_chars=max_chars,
+        )
 
     def handoff_evidence(self, session_id: str, *, max_chars: int) -> JsonObject:
-        """Expand a persisted exact handoff only when an authorized caller asks."""
-
-        artifact = self.checkpoints.path(session_id).with_suffix(".patch")
-        if not artifact.is_file():
-            raise ServiceTierError("zetsu_agent_handoff_patch_unavailable")
-        try:
-            size = artifact.stat().st_size
-            content = artifact.read_text(encoding="utf-8") if size <= max_chars else None
-        except (OSError, UnicodeDecodeError) as exc:
-            raise ServiceTierError("zetsu_agent_handoff_patch_unavailable") from exc
-        try:
-            digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
-        except OSError as exc:
-            raise ServiceTierError("zetsu_agent_handoff_patch_unavailable") from exc
-        return {
-            "patch": content,
-            "patch_inline": content is not None,
-            "patch_chars": size,
-            "patch_sha256": digest,
-            "patch_path": str(artifact),
-        }
+        return self.handoffs.evidence(session_id, max_chars=max_chars)
 
     def _apply_verified_handoff(
         self,
@@ -854,80 +561,21 @@ class ZetsuAgentCoordinator:
     def _search(
         self, ctx: AgentRunContext, state: AgentExecutionState, action: Mapping[str, object]
     ) -> str:
-        worktree = ctx.worktree
-        self._ensure_active(ctx, state)
-        query = action.get("query")
-        pattern = action.get("glob", "*")
-        if not isinstance(query, str) or not query or len(query) > 4_000:
-            raise ServiceTierError("zetsu_agent_search_invalid")
-        if (
-            not isinstance(pattern, str)
-            or not pattern
-            or len(pattern) > 200
-            or ".." in Path(pattern).parts
-        ):
-            raise ServiceTierError("zetsu_agent_glob_invalid")
-        matches: list[str] = []
-        for path_index, path in enumerate(worktree.rglob(pattern)):
-            if path_index % 16 == 0:
-                self._ensure_active(ctx, state)
-            if len(matches) >= _MAX_SEARCH_MATCHES:
-                break
-            relative = path.relative_to(worktree).as_posix()
-            if ".git" in path.relative_to(worktree).parts:
-                continue
-            try:
-                safe_path = self._relative_target(worktree, relative)
-                if not safe_path.is_file() or safe_path.stat().st_size > 1_000_000:
-                    continue
-                text = safe_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError, ServiceTierError):
-                continue
-            for line_number, line in enumerate(text.splitlines(), start=1):
-                if query in line:
-                    matches.append(f"{relative}:{line_number}:{line[:500]}")
-                    if len(matches) >= _MAX_SEARCH_MATCHES:
-                        break
-        return "\n".join(matches) if matches else "NO_MATCHES"
+        return search_tool(
+            ctx,
+            state,
+            action,
+            ensure_active=self._ensure_active,
+            relative_target=self._relative_target,
+        )
 
     def _read(self, ctx: AgentRunContext | Path, action: Mapping[str, object]) -> str:
-        # Preserve the path-based helper contract used by older deterministic
-        # tests; materialization checks require the full run context.
-        worktree = ctx.worktree if isinstance(ctx, AgentRunContext) else ctx
-        values = action.get("paths")
-        if values is None:
-            values = [action.get("path")]
-        if (
-            not isinstance(values, Sequence)
-            or isinstance(values, (str, bytes))
-            or not 1 <= len(values) <= 8
-            or len(set(str(item) for item in values)) != len(values)
-        ):
-            raise ServiceTierError("zetsu_agent_read_paths_invalid")
-        result: dict[str, str] = {}
-        remaining = _MAX_READ_CHARS
-        for value in values:
-            target = self._relative_target(worktree, value)
-            if not target.is_file() or target.stat().st_size > 2_000_000:
-                if (
-                    not target.exists()
-                    and isinstance(value, str)
-                    and isinstance(ctx, AgentRunContext)
-                ):
-                    self._raise_materialization_failure_if_needed(ctx, value)
-                raise ServiceTierError("zetsu_agent_read_target_unavailable")
-            try:
-                content = target.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError) as exc:
-                raise ServiceTierError("zetsu_agent_read_target_not_text") from exc
-            relative = target.relative_to(worktree).as_posix()
-            result[relative] = content[:remaining]
-            remaining -= len(result[relative])
-            if remaining <= 0:
-                break
-        if len(result) == 1 and action.get("paths") is None:
-            return next(iter(result.values()))
-        return json.dumps(result, sort_keys=True, ensure_ascii=False)
+        return read_tool(
+            ctx,
+            action,
+            relative_target=self._relative_target,
+            materialization_failure=self._raise_materialization_failure_if_needed,
+        )
 
     def _read_observation(self, ctx: AgentRunContext, action: Mapping[str, object]) -> str:
         """Recover only from an ordinary missing legacy-read target."""
@@ -963,23 +611,13 @@ class ZetsuAgentCoordinator:
     def _retrieve(
         self, ctx: AgentRunContext, state: AgentExecutionState, action: Mapping[str, object]
     ) -> str:
-        if self.corpus is None:
-            raise ServiceTierError("zetsu_agent_retrieval_unavailable")
-        self._ensure_active(ctx, state)
-        query = action.get("query")
-        if not isinstance(query, str) or not query.strip() or len(query) > 4_000:
-            raise ServiceTierError("zetsu_agent_retrieval_query_invalid")
-        raw = self.corpus.search(ctx.user_id, query.strip(), limit=8)
-        self._ensure_active(ctx, state)
-        packet = compact_personal_results(query.strip(), raw, max_results=6, max_chars=8_000)
-        evidence = packet.get("evidence")
-        if isinstance(evidence, list):
-            for item in evidence:
-                if isinstance(item, Mapping):
-                    chunk_id = item.get("chunk_id")
-                    if isinstance(chunk_id, str) and chunk_id not in state.evidence_refs:
-                        state.evidence_refs.append(chunk_id)
-        return json.dumps(packet, sort_keys=True, ensure_ascii=False)
+        return retrieve_tool(
+            ctx,
+            state,
+            action,
+            corpus=self.corpus,
+            ensure_active=self._ensure_active,
+        )
 
     def _typed_aci(self, ctx: AgentRunContext, state: AgentExecutionState) -> BoundedRepositoryACI:
         """Construct the structured ACI while retaining coordinator ownership checks."""
@@ -1087,13 +725,11 @@ class ZetsuAgentCoordinator:
     def _verification_qualifies(
         argv: Sequence[str], required_verification_argv: Sequence[str] | None
     ) -> bool:
-        if required_verification_argv is None or list(argv) != list(required_verification_argv):
-            return False
-        executable = Path(argv[0]).name
-        lowered = {item.casefold() for item in argv[1:]}
-        if executable == "pytest":
-            return not bool(lowered & {"--collect-only", "--co", "--help", "-h", "--version"})
-        return False
+        return (
+            required_verification_argv is not None
+            and list(argv) == list(required_verification_argv)
+            and verification_qualifies_for_promotion(argv)
+        )
 
     @staticmethod
     def _mutation_marker(epoch: int) -> str:
@@ -1260,34 +896,6 @@ class ZetsuAgentCoordinator:
         }
 
     @staticmethod
-    def _stop_process_tree(process: subprocess.Popen[bytes]) -> None:
-        if process.poll() is not None:
-            return
-        try:
-            if os.name == "posix":
-                os.killpg(process.pid, signal.SIGTERM)
-            else:
-                process.terminate()
-        except (OSError, ProcessLookupError):
-            pass
-        try:
-            process.wait(timeout=2.0)
-            return
-        except subprocess.TimeoutExpired:
-            pass
-        try:
-            if os.name == "posix":
-                os.killpg(process.pid, signal.SIGKILL)
-            else:
-                process.kill()
-        except (OSError, ProcessLookupError):
-            pass
-        try:
-            process.wait(timeout=2.0)
-        except subprocess.TimeoutExpired:
-            pass
-
-    @staticmethod
     def _read_file_tail(file_handle: BinaryIO, *, limit: int = _MAX_VERIFY_CAPTURE_BYTES) -> str:
         # TemporaryFile is seekable. Read only a bounded suffix to avoid loading noisy
         # verification output into coordinator memory.
@@ -1357,7 +965,7 @@ class ZetsuAgentCoordinator:
                 returncode = process.returncode
             except ServiceTierError as exc:
                 aborted_category = exc.category
-                self._stop_process_tree(process)
+                stop_process_tree(process)
                 returncode = process.returncode
             finally:
                 verification_number = len(state.validation_history) + 1
@@ -2061,8 +1669,9 @@ class ZetsuAgentCoordinator:
             project_id=ctx.repo_id,
             outcome=outcome,
             roles=("implementation",),
-            runtime_profiles=(ctx.model_id,),
-            manager_decision="bypass",
+            model_ids=(ctx.model_id,),
+            runtime_profiles=(),
+            manager_decision="unknown",
             specialist_decision="not_selected",
             verifier_digest=(
                 self._verification_digest(ctx.required_verification_argv)
@@ -2092,7 +1701,7 @@ class ZetsuAgentCoordinator:
                 )
             except TaskEvidenceError as exc:
                 raise ServiceTierError("task_evidence_persistence_failed") from exc
-            if existing != evidence:
+            if replace(existing, publication_sequence=0) != evidence:
                 raise ServiceTierError("task_evidence_duplicate_conflict")
         except (OSError, ValueError) as exc:
             raise ServiceTierError("task_evidence_persistence_failed") from exc
@@ -2111,6 +1720,7 @@ class ZetsuAgentCoordinator:
                 {
                     "outcome": record.outcome,
                     "failure_classes": list(record.failure_classes),
+                    "model_ids": list(record.model_ids),
                     "runtime_profiles": list(record.runtime_profiles),
                 }
                 for record in records
@@ -3062,7 +2672,6 @@ class ZetsuAgentCoordinator:
         planned_result_id = self.results.result_id(user_id, repo_id, effective_session)
         task_evidence_id = self._task_evidence_id(ctx, planned_result_id)
         authoritative["task_evidence_id"] = task_evidence_id
-        authoritative["task_evidence_status"] = "PENDING_PUBLICATION"
         artifacts: dict[str, Path | bytes | str] = {
             "result.json": json.dumps(
                 authoritative, indent=2, sort_keys=True, ensure_ascii=False

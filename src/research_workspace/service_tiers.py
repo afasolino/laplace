@@ -48,6 +48,20 @@ class ModelLane(StrEnum):
     ECONOMY = "economy"
 
 
+class LogicalModelRole(StrEnum):
+    MANAGER = "manager"
+    IMPLEMENTATION = "implementation"
+    REVIEW = "review"
+    RTL_SPECIALIST = "rtl_specialist"
+
+
+class ResourceClass(StrEnum):
+    GPU_RESIDENT = "gpu_resident"
+    CPU_RESIDENT = "cpu_resident"
+    STORAGE_STREAMED = "storage_streamed"
+    REMOTE_EXTERNAL = "remote_external"
+
+
 class ServiceTierError(RuntimeError):
     """A tier, lane, or validation policy rejected a request."""
 
@@ -65,10 +79,17 @@ class ModelRoute:
     priority: int
     context_limit: int = 32_768
     output_limit: int = 2_048
+    role: LogicalModelRole = LogicalModelRole.IMPLEMENTATION
+    resource_class: ResourceClass = ResourceClass.GPU_RESIDENT
+    runtime_profile: str | None = None
 
     def __post_init__(self) -> None:
         if self.context_limit < 2_048 or self.output_limit < 1:
             raise ValueError("invalid model route limits")
+        if self.runtime_profile is not None and (
+            not self.runtime_profile or len(self.runtime_profile) > 160
+        ):
+            raise ValueError("invalid runtime profile")
 
 
 @dataclass(frozen=True)

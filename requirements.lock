@@ -1,4 +1,4 @@
-# Laplace v7 CPU/fixture development lock.
+# CPU/fixture deterministic CI lock for Laplace architecture generation 3.
 # Generated from the isolated certification environment on 2026-07-28.
 # GPU/model runtime packages are intentionally excluded.
 annotated-doc==0.0.4

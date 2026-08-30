@@ -27,7 +27,7 @@ from typing import Literal, TypeAlias
 
 import yaml
 
-from .documents import _chunks, _db
+from .documents import chunk_document_text, open_document_store
 from .retrieval import embed
 from .verification_gates import VerificationGateRegistry
 
@@ -205,6 +205,12 @@ def _inside(root: Path, candidate: Path) -> Path:
     return resolved
 
 
+# Explicit package-internal interfaces for repository execution adapters.
+write_json_atomic = _write_json_atomic
+safe_relative = _safe_relative
+inside = _inside
+
+
 def _as_str_list(value: JsonValue | None, *, label: str) -> list[str]:
     if value is None:
         return []
@@ -229,6 +235,50 @@ def _schema_type_matches(value: JsonValue, expected: str) -> bool:
     if expected == "null":
         return value is None
     return True
+
+
+_LAPLACE_TASK_SCHEMA_KEYWORDS = frozenset(
+    {
+        "$schema",
+        "$id",
+        "title",
+        "description",
+        "type",
+        "additionalProperties",
+        "required",
+        "properties",
+        "const",
+        "enum",
+        "minLength",
+        "pattern",
+        "minItems",
+        "items",
+        "exclusiveMinimum",
+    }
+)
+
+
+def _validate_laplace_task_schema_contract(schema: JsonObject, path: str = "$") -> None:
+    """Reject keywords outside the intentionally small task-schema subset.
+
+    This validator is not a general JSON Schema implementation.  Task schemas
+    may use only the keywords listed in ``_LAPLACE_TASK_SCHEMA_KEYWORDS``;
+    nested ``properties`` and object-valued ``items`` follow the same rule.
+    """
+    unsupported = sorted(set(schema) - _LAPLACE_TASK_SCHEMA_KEYWORDS)
+    if unsupported:
+        raise SchemaValidationError(
+            f"{path}: unsupported Laplace task-schema keyword(s): {', '.join(unsupported)}"
+        )
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        for name, child in properties.items():
+            if not isinstance(name, str) or not isinstance(child, dict):
+                raise SchemaValidationError(f"{path}.properties must map names to schema objects")
+            _validate_laplace_task_schema_contract(child, f"{path}.properties.{name}")
+    items = schema.get("items")
+    if isinstance(items, dict):
+        _validate_laplace_task_schema_contract(items, f"{path}.items")
 
 
 def _validate_schema(value: JsonValue, schema: JsonObject, path: str, errors: list[str]) -> None:
@@ -289,6 +339,7 @@ def _validate_schema(value: JsonValue, schema: JsonObject, path: str, errors: li
 
 def validate_task_spec(specification: JsonObject, schema_path: Path) -> None:
     schema = _load_json_object(schema_path)
+    _validate_laplace_task_schema_contract(schema)
     errors: list[str] = []
     _validate_schema(specification, schema, "$", errors)
     if errors:
@@ -760,7 +811,7 @@ class ReferenceLibrary:
     def ingest(self, database: Path | None = None) -> JsonObject:
         """Index selected reference text in the existing project SQLite database."""
         target_database = (database or self.index_database).resolve()
-        conn = _db(target_database)
+        conn = open_document_store(target_database)
         conn.execute(
             "CREATE TABLE IF NOT EXISTS reference_ingestions(reference_id TEXT NOT NULL, selected_path TEXT NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY(reference_id, selected_path))"
         )
@@ -829,7 +880,7 @@ class ReferenceLibrary:
                             json.dumps(metadata, sort_keys=True),
                         ),
                     )
-                    for index, chunk in enumerate(_chunks(text)):
+                    for index, chunk in enumerate(chunk_document_text(text)):
                         chunk_id = f"reference:{manifest.reference_id}:{record.sha256[:16]}:{index}"
                         conn.execute(
                             "INSERT OR IGNORE INTO chunks VALUES(?,?,?,?,?,?)",
@@ -879,7 +930,7 @@ class ReferenceLibrary:
         if verification.get("status") != "VERIFIED":
             raise ReferencePolicyError("Governed reference library failed hash verification")
         self.ingest()
-        conn = _db(self.index_database)
+        conn = open_document_store(self.index_database)
         try:
             rows = conn.execute(
                 "SELECT c.id,c.text,d.filename,d.metadata "
@@ -1156,7 +1207,11 @@ class LocalToolRunner:
         started = time.monotonic()
         environment = os.environ.copy()
         for key in tuple(environment):
-            if key.startswith("LAPLACE_ABLATION_") or key == "LAPLACE_SERVER_OWNER_TOKEN":
+            if (
+                key.startswith("LAPLACE_ABLATION_")
+                or key == "LAPLACE_SERVER_OWNER_TOKEN"
+                or key in {"COVERAGE_FILE", "COVERAGE_PROCESS_START"}
+            ):
                 environment.pop(key, None)
         try:
             # The command is built only by this module's allowlisted methods.

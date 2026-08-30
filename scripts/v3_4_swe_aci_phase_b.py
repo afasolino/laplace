@@ -20,7 +20,7 @@ from research_workspace.agent_sandbox import (
     AgentSandboxManager,
     AgentToolPolicy,
 )
-from research_workspace.operator_server import _selected_lane_policy
+from research_workspace.operator_server import selected_lane_policy
 from research_workspace.personal_corpus import PersonalCorpusStore
 from research_workspace.repository_authorization import RepositoryAuthorizationStore
 from research_workspace.service_tiers import (
@@ -276,7 +276,7 @@ def _validate_phase_a(repo: Path) -> str:
 
 
 def _quality_route(repo: Path) -> tuple[LanePolicy, ModelRoute, str]:
-    policy = _selected_lane_policy(repo)
+    policy = selected_lane_policy(repo)
     route = policy.routes.get(ModelLane.QUALITY)
     if route is None:
         raise RuntimeError("v34_phase_b_quality_route_missing")

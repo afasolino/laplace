@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate least-privilege, pinned, non-GPU v8 workflow contracts."""
+"""Validate least-privilege, pinned, non-GPU workflow contracts."""
 
 from __future__ import annotations
 
@@ -69,29 +69,34 @@ def validate() -> dict[str, object]:
                 )
         if "pytest" in text and "LAPLACE_FIXTURE_ONLY" not in text:
             findings.append({"file": name, "category": "fixture_mode_not_explicit"})
-        if "upload-artifact" in text and "path: outputs/ci/" not in text:
-            findings.append({"file": name, "category": "artifact_path_not_sanitized"})
-        if (
-            name != "release-candidate.yml"
-            and "feature/release-candidate-review-v8" not in text
+        if "upload-artifact" in text and not (
+            "path: outputs/ci/" in text or "path: .runtime/v3-non-a6000/" in text
         ):
-            findings.append({"file": name, "category": "v8_branch_trigger_missing"})
+            findings.append({"file": name, "category": "artifact_path_not_sanitized"})
+        if name != "release-candidate.yml" and not all(
+            pattern in text for pattern in ('"feature/**"', '"review/**"')
+        ):
+            findings.append({"file": name, "category": "active_branch_trigger_missing"})
     matrix = files.get("unit-and-integration-tests.yml")
     if matrix is not None:
         text = matrix.read_text(encoding="utf-8")
         for required in ("ubuntu-24.04", "windows-2025", '"3.11"', '"3.12"'):
             if required not in text:
                 findings.append({"file": matrix.name, "category": "matrix_incomplete"})
+        if "-m cross_platform_deterministic" not in text:
+            findings.append({"file": matrix.name, "category": "taxonomy_selection_missing"})
+        if "--cov-fail-under=63.6" not in text:
+            findings.append({"file": matrix.name, "category": "coverage_regression_gate_missing"})
     release = files.get("release-candidate.yml")
     if release is not None:
         release_text = release.read_text(encoding="utf-8")
-        if "run_release_candidate_v8_certification.py" not in release_text:
+        if "run_non_a6000_certification.py" not in release_text:
             findings.append(
-                {"file": release.name, "category": "v8_certification_command_missing"}
+                {"file": release.name, "category": "non_a6000_certification_command_missing"}
             )
-        if "run_architecture_release_v7_certification.py" in release_text:
+        if "run_release_candidate_v8_certification.py" in release_text:
             findings.append(
-                {"file": release.name, "category": "stale_v7_certification_command"}
+                {"file": release.name, "category": "stale_release_candidate_command"}
             )
     return {
         "schema_version": 1,

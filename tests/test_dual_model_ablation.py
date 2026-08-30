@@ -409,6 +409,7 @@ def test_python_task_verification_is_scoped_and_sanitizes_experiment_environment
         "import os\nfrom candidate import add\n\n"
         "def test_public_contract() -> None:\n"
         "    assert 'LAPLACE_ABLATION_BASE_REVISION' not in os.environ\n"
+        "    assert 'COVERAGE_FILE' not in os.environ\n"
         "    assert add(2, 3) == 5\n",
         encoding="utf-8",
     )
@@ -417,6 +418,7 @@ def test_python_task_verification_is_scoped_and_sanitizes_experiment_environment
         encoding="utf-8",
     )
     monkeypatch.setenv("LAPLACE_ABLATION_BASE_REVISION", "a" * 40)
+    monkeypatch.setenv("COVERAGE_FILE", str(tmp_path / "inherited-coverage.data"))
     report = LocalToolRunner(tmp_path, tmp_path / "logs").run_python_quality_gates(
         ["candidate.py"], required_test_paths=["test_public.py"], timeout_seconds=60
     )

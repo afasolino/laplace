@@ -20,7 +20,8 @@ from .bounded_aci import BoundedACIError, BoundedRepositoryACI
 from .laplace_core import LaplaceCore
 from .personal_corpus import PersonalCorpusStore
 from .service_tiers import TieredServingService
-from .zetsu_agent import AgentExecutionState, AgentRunContext, ZetsuAgentCoordinator
+from .zetsu_agent import ZetsuAgentCoordinator
+from .zetsu_state import AgentExecutionState, AgentRunContext
 from .zetsu_mcp import ZetsuService
 
 JsonObject: TypeAlias = dict[str, object]

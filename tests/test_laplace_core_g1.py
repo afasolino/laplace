@@ -6,10 +6,27 @@ from typing import Any, cast
 import pytest
 
 from research_workspace.laplace_core import LaplaceCore, LaplaceCoreError
-from research_workspace.service_tiers import ModelLane
+from research_workspace.service_tiers import LogicalModelRole, ModelLane, ModelRoute, ResourceClass
 from research_workspace.user_capabilities import Capability
 from research_workspace.verification_gates import VerificationGateRegistry
 from research_workspace.zetsu_mcp import ZetsuService
+
+
+def test_model_route_keeps_lane_compatibility_and_represents_role_and_resource() -> None:
+    route = ModelRoute(
+        ModelLane.QUALITY,
+        "fixture-manager",
+        "http://127.0.0.1:8200",
+        0,
+        role=LogicalModelRole.MANAGER,
+        resource_class=ResourceClass.CPU_RESIDENT,
+        runtime_profile="fixture",
+    )
+
+    assert route.lane is ModelLane.QUALITY
+    assert route.role is LogicalModelRole.MANAGER
+    assert route.resource_class is ResourceClass.CPU_RESIDENT
+    assert route.runtime_profile == "fixture"
 
 
 class _Corpus:

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Sequence
 
 from research_workspace.engineering import LocalToolRunner, resolve_eda_executable
-from research_workspace.multilanguage_ablation import _activate_isolated_tools
+from research_workspace.multilanguage_ablation import activate_isolated_tools
 from research_workspace.verification_gates import VerificationGateRegistry
 
 
@@ -274,7 +274,7 @@ def main() -> int:
     root = Path(__file__).resolve().parents[1]
     output = arguments.output_root.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    _activate_isolated_tools(root)
+    activate_isolated_tools(root)
     python = Path(sys.executable)
     checks = [
         ("compile", [str(python), "-m", "compileall", "-q", "src", "tests"]),

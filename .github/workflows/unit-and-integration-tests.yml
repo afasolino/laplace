@@ -3,7 +3,7 @@ name: unit-and-integration-tests
 on:
   pull_request:
   push:
-    branches: [main, "feature/release-candidate-review-v8"]
+    branches: [main, "feature/**", "review/**"]
 
 permissions:
   contents: read
@@ -24,7 +24,16 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
       - run: python -m pip install --disable-pip-version-check -r requirements.lock
-      - run: python scripts/run_ci_tests.py -- --ignore=tests/test_operator_gui_e2e.py
+      - run: python scripts/run_ci_tests.py -- --strict-markers -m cross_platform_deterministic
+        env:
+          PYTHONPATH: src
+          LAPLACE_FIXTURE_ONLY: "1"
+          NO_PROXY: "*"
+      - if: matrix.os == 'windows-2025' && matrix.python == '3.12'
+        run: >-
+          python -m pytest -q --strict-markers -m cross_platform_deterministic
+          --cov=research_workspace --cov-branch --cov-fail-under=63.6
+          --cov-report=term-missing -p no:cacheprovider
         env:
           PYTHONPATH: src
           LAPLACE_FIXTURE_ONLY: "1"

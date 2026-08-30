@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .online import SearchResult, _blocked_host
+from .online import SearchResult, blocked_host
 from .projects import load_project
 from .projects import formalscience_root
 
@@ -42,7 +42,7 @@ def download_open_access(
         raise PermissionError("The candidate is not explicitly identified as open access")
     url = str(record.get("pdf_url") or "")
     parsed = urllib.parse.urlparse(url)
-    if parsed.scheme != "https" or not parsed.hostname or _blocked_host(parsed.hostname):
+    if parsed.scheme != "https" or not parsed.hostname or blocked_host(parsed.hostname):
         raise ValueError("Open-access acquisition requires a public HTTPS PDF URL")
     target_dir = paths.data / "Downloads" / "OpenAccess"
     target_dir.mkdir(parents=True, exist_ok=True)

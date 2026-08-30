@@ -82,6 +82,12 @@ def _chunks(text: str, size: int = 2600, overlap: int = 400) -> Iterable[str]:
         position = max(position + 1, end - overlap)
 
 
+# Explicit package-internal interfaces used by governed engineering retrieval.
+open_document_store = _db
+chunk_document_text = _chunks
+read_document_text = _safe_text
+
+
 def ingest(path: Path, root: Path, database: Path, document_class: str) -> dict[str, object]:
     source = path.resolve()
     if not source.is_file() or source.suffix.lower() not in ALLOWED:

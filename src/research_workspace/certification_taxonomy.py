@@ -26,7 +26,55 @@ CATEGORIES = (
 )
 DEFERRED_CATEGORIES = frozenset(CATEGORIES) - {CROSS_PLATFORM_DETERMINISTIC}
 
-# Tests absent from this map are cross-platform only when their semantics really are.
+# Every collected test module is deliberately classified. New test modules must
+# be added here or collection fails instead of silently joining the deterministic
+# certification set. Node IDs below are exceptional test-level overrides.
+MODULE_CATEGORIES: Mapping[str, str] = {
+    module: CROSS_PLATFORM_DETERMINISTIC
+    for module in """
+tests/test_agent_verification_policy.py tests/test_architecture_v7.py tests/test_ast_context_v3.py
+tests/test_import_boundaries.py
+tests/test_ast_context_v32.py tests/test_auth_provenance_security.py tests/test_bounded_aci_g6.py
+tests/test_candidate_assurance.py tests/test_candidate_assurance_worktree.py
+tests/test_capabilities_domains_worktrees_v6.py tests/test_certification_bundle.py tests/test_chat.py
+tests/test_chat_async_agent_turns.py tests/test_chat_capability_views_v31.py tests/test_chat_cli_v2.py
+tests/test_chat_domain_v31.py tests/test_chat_operator_client_v2.py tests/test_chat_routing_v31.py
+tests/test_chat_session_v2.py tests/test_chat_v3_consolidation.py tests/test_chat_verification_replacement.py
+tests/test_client_bridge.py tests/test_client_service.py tests/test_context_planner_g7.py
+tests/test_corrective_c1_results.py tests/test_corrective_c2_scheduler.py tests/test_corrective_c3_aci.py
+tests/test_corrective_c5_parser_contract.py tests/test_corrective_c6_hooks.py tests/test_corrective_c7_adapter.py
+tests/test_corrective_c9_release_surface.py tests/test_dual_model_ablation.py tests/test_engineering.py
+tests/test_evaluation_v7.py tests/test_execution_records.py tests/test_governance_v7.py
+tests/test_gpu_coordination_v8.py tests/test_hermes_externalization_v35.py tests/test_hooks_g9.py
+tests/test_idle_consolidation_g10.py tests/test_laplace.py tests/test_laplace_chat_entrypoint.py
+tests/test_laplace_core_g1.py tests/test_laplace_web_v3.py tests/test_live_gpu_preflight_v8.py
+tests/test_llm_response_channels.py tests/test_logical_subagents_g11.py tests/test_maintenance_cli.py
+tests/test_manager_control.py tests/test_mcp_mutation_authority_v32.py tests/test_memory_g2.py
+tests/test_migrations_v7.py tests/test_model_servers.py tests/test_mutation_authority_v32.py
+tests/test_non_a6000_certification.py tests/test_notifications.py tests/test_operator_agent_conversation.py
+tests/test_operator_api.py tests/test_operator_cli.py tests/test_operator_gui_e2e.py tests/test_operator_service.py
+tests/test_orchestration_certification.py tests/test_paired_benchmark.py tests/test_personal_corpus_api_v6.py
+tests/test_personal_corpus_v6.py tests/test_production_model_selection.py tests/test_production_robustness.py
+tests/test_providers_v7.py tests/test_quality_targeted.py tests/test_qwen38_certification.py
+tests/test_qwen38_deployment_templates.py tests/test_qwen38_prequantized_metadata.py
+tests/test_qwen38_prequantized_policy.py tests/test_qwen38_profiles.py tests/test_qwen38_quantization.py
+tests/test_release_certification_v7.py tests/test_release_v7.py tests/test_reliability_v7.py
+tests/test_repository_context_g4.py tests/test_repository_lifecycle_fix.py tests/test_reproducibility.py
+tests/test_research_plane.py tests/test_research_web_adapters.py tests/test_rtl_worker_correction_evidence.py
+tests/test_rtl_worker_non_thinking.py tests/test_rtl_worker_routing_patch.py tests/test_rules_g3.py
+tests/test_security_fuzz_v7.py tests/test_skills_g8.py tests/test_swe_aci_ab_v34.py
+tests/test_swe_aci_phase_b_v34.py tests/test_sync_v7.py tests/test_task_evidence.py tests/test_task_labels.py
+tests/test_team_runner_hardening.py tests/test_tiered_serving.py tests/test_trajectory_g5.py
+tests/test_upstream_ab_expanded_v33.py tests/test_upstream_ab_v33.py tests/test_upstream_consolidation_v32.py
+tests/test_verification_gate_registry.py tests/test_workspace.py tests/test_zetsu_agent_checkpoint.py
+tests/test_zetsu_agent_mcp.py tests/test_zetsu_agent_objective_isolation_v31.py tests/test_zetsu_cli.py
+tests/test_zetsu_client_api.py tests/test_zetsu_codex_v3.py tests/test_zetsu_config.py tests/test_zetsu_context.py
+tests/test_zetsu_hotfix_lifecycle.py tests/test_zetsu_mcp.py tests/test_zetsu_production_token_supervisor.py
+tests/test_zetsu_runtime.py tests/test_zetsu_runtime_codex_compat_v31.py tests/test_zetsu_sdk_stdio_v3.py
+tests/test_zetsu_sdk_stdio_v32.py tests/test_zetsu_token_benchmark.py
+""".split()
+}
+
 NODEID_CATEGORIES: Mapping[str, str] = {
     "tests/test_ast_context_v3.py::test_ast_context_refuses_escape_and_symlink": WINDOWS_PRIVILEGE_REQUIRED,
     "tests/test_ast_context_v3.py::test_real_grep_ast_provider_renders_python_scope": WINDOWS_PRIVILEGE_REQUIRED,
@@ -73,6 +121,13 @@ NODEID_CATEGORIES: Mapping[str, str] = {
 
 
 def category_for_nodeid(nodeid: str) -> str:
-    """Return the marker category for one collected test."""
+    """Return one deliberate category or reject an unknown test node."""
 
-    return NODEID_CATEGORIES.get(nodeid, CROSS_PLATFORM_DETERMINISTIC)
+    category = NODEID_CATEGORIES.get(nodeid)
+    if category is not None:
+        return category
+    module = nodeid.split("::", 1)[0]
+    try:
+        return MODULE_CATEGORIES[module]
+    except KeyError as exc:
+        raise ValueError(f"unknown_test_classification:{nodeid}") from exc

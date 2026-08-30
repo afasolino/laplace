@@ -22,16 +22,16 @@ from .engineering import (
     AgentTaskStore,
     JsonObject,
     LocalToolRunner,
-    _write_json_atomic,
+    write_json_atomic,
     normalize_task_spec,
 )
 from .inference import ServingCandidate
 from .paired_benchmark import (
+    BENCHMARK_TASKS,
     BenchmarkTask,
-    _BENCHMARK_TASKS,
-    _evaluate_lane,
-    _git,
-    _task_spec,
+    evaluate_lane,
+    git,
+    task_spec,
 )
 from .team_runner import LocalTeamRunner, TeamWorkflowOptions
 
@@ -168,7 +168,7 @@ def _task_record(
 ) -> JsonObject:
     """Run an isolated Laplace task, then score it in a fresh evaluator worktree."""
     project_root = root / "projects" / task.task_id
-    specification = normalize_task_spec(repository_root, task.domain, _task_spec(task))
+    specification = normalize_task_spec(repository_root, task.domain, task_spec(task))
     store = AgentTaskStore(project_root)
     task_state = store.create(task.domain, specification)
     started_at, started = _now(), time.monotonic()
@@ -207,7 +207,7 @@ def _task_record(
     if worktree is None:
         record["evaluation"] = {"status": "NOT_EVALUATED", "reason": "No task worktree exists."}
         return record
-    evaluated = _evaluate_lane(
+    evaluated = evaluate_lane(
         repository_root,
         root,
         task,
@@ -276,7 +276,7 @@ def run_original_rerun(
             timeout_seconds=timeout_seconds,
             shared_reference_root=shared_reference_root,
         )
-        for task in _BENCHMARK_TASKS
+        for task in BENCHMARK_TASKS
     ]
     payload: JsonObject = {
         "status": "MEASURED",
@@ -298,7 +298,7 @@ def run_original_rerun(
         "run_root": str(run_root),
         "created_at": _now(),
     }
-    _write_json_atomic(output_root / "original_tasks_rerun.json", payload)
+    write_json_atomic(output_root / "original_tasks_rerun.json", payload)
     return payload
 
 
@@ -317,7 +317,7 @@ def run_unseen_tasks(
     Their held-out strings are evaluated only after each Laplace worktree stops.
     """
     root = repository_root.resolve()
-    base_commit = _git(root, ["rev-parse", "HEAD"]).strip()
+    base_commit = git(root, ["rev-parse", "HEAD"]).strip()
     run_root = output_root / "runs" / f"unseen_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
     options = TeamWorkflowOptions(base_commit=base_commit)
     records = [
@@ -349,7 +349,7 @@ def run_unseen_tasks(
         "run_root": str(run_root),
         "created_at": _now(),
     }
-    _write_json_atomic(output_root / "unseen_tasks_results.json", payload)
+    write_json_atomic(output_root / "unseen_tasks_results.json", payload)
     return payload
 
 
@@ -391,8 +391,8 @@ def run_targeted_six(
 ) -> JsonObject:
     """Run only the six diagnosed tasks with full retrieval and operational review."""
     root = repository_root.resolve()
-    current_base = _git(root, ["rev-parse", "HEAD"]).strip()
-    original = {task.task_id: task for task in _BENCHMARK_TASKS}
+    current_base = git(root, ["rev-parse", "HEAD"]).strip()
+    original = {task.task_id: task for task in BENCHMARK_TASKS}
     unseen = {task.task_id: task for task in _UNSEEN_TASKS}
     baseline_scores = _baseline_scores(baseline_root.resolve() if baseline_root else None)
     run_root = output_root / "targeted_runs" / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -451,7 +451,7 @@ def run_targeted_six(
         "run_root": str(run_root),
         "created_at": _now(),
     }
-    _write_json_atomic(output_root / "targeted_six_results.json", payload)
+    write_json_atomic(output_root / "targeted_six_results.json", payload)
 
     fields = [
         "task_id",
@@ -643,7 +643,7 @@ def write_failure_analysis(repository_root: Path, output_root: Path) -> JsonObje
         ],
         "tasks": tasks,
     }
-    _write_json_atomic(output_root / "failure_taxonomy.json", payload)
+    write_json_atomic(output_root / "failure_taxonomy.json", payload)
     lines = ["# Laplace-team failure analysis", ""]
     for task in tasks:
         classes = task.get("causal_classes")
@@ -692,7 +692,7 @@ def run_ablations(
     shared_reference_root: Path | None = None,
 ) -> list[JsonObject]:
     """Run controlled single-factor workflow ablations on representative failures."""
-    task_by_id = {task.task_id: task for task in _BENCHMARK_TASKS}
+    task_by_id = {task.task_id: task for task in BENCHMARK_TASKS}
     ablations = (
         Ablation(
             "implementer_without_rag",
@@ -774,7 +774,7 @@ def run_ablations(
                     **{key: score_dict.get(key) for key in fields if key in score_dict},
                 }
             )
-    _write_json_atomic(
+    write_json_atomic(
         output_root / "agent_ablation_results.json",
         {
             "status": "MEASURED",

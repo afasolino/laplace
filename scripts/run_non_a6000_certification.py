@@ -9,6 +9,7 @@ are never silently converted into passing results.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -49,7 +50,7 @@ class CheckSpec:
             raise ValueError("invalid_check_spec")
 
 
-WINDOWS_CROSS_PLATFORM_CHECKS = (
+DETERMINISTIC_CHECKS = (
     CheckSpec(
         "pytest_collection",
         "cross_platform_deterministic",
@@ -203,11 +204,33 @@ def _git_value(root: Path, *argv: str) -> str:
     return completed.stdout.strip()
 
 
+def _git_optional(root: Path, *argv: str) -> str | None:
+    completed = subprocess.run(
+        ["git", *argv], cwd=root, capture_output=True, text=True, check=False, timeout=60
+    )
+    return completed.stdout.strip() if completed.returncode == 0 else None
+
+
+def _provenance(root: Path) -> dict[str, object]:
+    branch = _git_optional(root, "branch", "--show-current")
+    upstream = _git_optional(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+    status = _git_value(root, "status", "--porcelain=v1")
+    return {
+        "head_sha": _git_value(root, "rev-parse", "HEAD"),
+        "branch": branch or None,
+        "detached": branch is None,
+        "upstream": upstream,
+        "upstream_sha": _git_optional(root, "rev-parse", upstream) if upstream else None,
+        "clean": not bool(status),
+        "diff_sha256": hashlib.sha256(status.encode("utf-8")).hexdigest() if status else None,
+    }
+
+
 def classification_manifest(python: str) -> dict[str, list[dict[str, object]]]:
     """Return the immutable check-category inventory used by the runner."""
 
     checks = (
-        *WINDOWS_CROSS_PLATFORM_CHECKS,
+        *DETERMINISTIC_CHECKS,
         *SAFE_OPTIONAL_CHECKS,
         *OPTIONAL_DEPENDENCY_CHECKS,
         *DEFERRED_CHECKS,
@@ -290,24 +313,19 @@ def run_certification(output_root: Path, *, root: Path | None = None) -> dict[st
     python = sys.executable
     checks = [
         _run_check(repository, output, spec, python)
-        for spec in WINDOWS_CROSS_PLATFORM_CHECKS
+        for spec in DETERMINISTIC_CHECKS
     ]
     deferred = classification_manifest(python)
-    sha = _git_value(repository, "rev-parse", "HEAD")
-    branch = _git_value(repository, "branch", "--show-current")
-    remote_sha = _git_value(repository, "rev-parse", "origin/feature/laplace-v3")
     environment = {
         "python_executable": python,
         "python_version": sys.version,
         "platform": platform.platform(),
-        "branch": branch,
-        "head_sha": sha,
-        "origin_feature_laplace_v3_sha": remote_sha,
+        "provenance": _provenance(repository),
         "gpu_or_model_server_started": False,
         "live_model_inference_run": False,
     }
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "PASS" if all(item["status"] == "PASS" for item in checks) else "FAIL",
         "created_at_utc": datetime.now(UTC).isoformat(),
         "environment": environment,

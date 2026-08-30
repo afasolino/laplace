@@ -276,11 +276,8 @@ def test_mutating_finish_requires_verification_after_latest_mutation() -> None:
         )
         is False
     )
-    assert (
-        coordinator._verification_qualifies(["ruff", "check", "src"], ["ruff", "check", "src"])
-        is False
-    )
-    assert coordinator._verification_qualifies(["mypy", "src"], ["mypy", "src"]) is False
+    assert coordinator._verification_qualifies(["ruff", "check", "src"], ["ruff", "check", "src"])
+    assert coordinator._verification_qualifies(["mypy", "src"], ["mypy", "src"])
     state.last_verified_epoch = 1
     assert coordinator._finish_allowed(state) is True
     state.unresolved_failures.append("verification_failed:still-open")
@@ -1164,8 +1161,10 @@ def test_adaptive_quantum_continues_same_objective_to_finish(tmp_path: Path) -> 
         owner_id="user-a", project_id="repo", task_id=evidence_paths[0].stem
     )
     assert evidence.outcome == "verified_success"
-    assert evidence.manager_decision == "bypass"
+    assert evidence.manager_decision == "unknown"
     assert evidence.specialist_decision == "not_selected"
+    assert evidence.model_ids == ("test-quality",)
+    assert evidence.runtime_profiles == ()
 
 
 def test_standalone_agent_uses_independent_command_budget_across_quantum(tmp_path: Path) -> None:

@@ -24,7 +24,12 @@ from enum import StrEnum
 from pathlib import Path
 from typing import BinaryIO, Literal, TypeAlias, cast
 
-from .execution_records import _lock_file, _unlock_file, canonical_json_bytes, canonical_sha256
+from .execution_records import (
+    canonical_json_bytes,
+    canonical_sha256,
+    lock_file,
+    unlock_file,
+)
 
 JsonObject: TypeAlias = dict[str, object]
 TrajectorySourceKind = Literal[
@@ -327,7 +332,7 @@ class TrajectoryService:
     def _locked(self) -> BinaryIO:
         self.root.mkdir(parents=True, exist_ok=True)
         handle = self.lock_path.open("a+b")
-        _lock_file(handle)
+        lock_file(handle)
         return handle
 
     @staticmethod
@@ -611,7 +616,7 @@ class TrajectoryService:
                 partial_event_recovered=partial_recovered,
             )
         finally:
-            _unlock_file(handle)
+            unlock_file(handle)
             handle.close()
 
     def read_events(self, identity: TrajectoryIdentity) -> tuple[TrajectoryEvent, ...]:
@@ -696,7 +701,7 @@ class TrajectoryService:
             self._fault("after_event_fsync")
             return self._parse_event(raw, identity, len(events) + 1, previous_hash)
         finally:
-            _unlock_file(handle)
+            unlock_file(handle)
             handle.close()
 
     def checkpoint(self, identity: TrajectoryIdentity) -> Path:
@@ -735,7 +740,7 @@ class TrajectoryService:
                     os.close(directory_fd)
             return self.checkpoint_path
         finally:
-            _unlock_file(handle)
+            unlock_file(handle)
             handle.close()
 
     def migrate(self, *, target_schema_version: int = _SCHEMA_VERSION) -> JsonObject:

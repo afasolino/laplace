@@ -36,9 +36,9 @@ from .engineering import (
     LocalToolRunner,
     ReferenceLibrary,
     ReferencePolicyError,
-    _inside,
-    _safe_relative,
-    _write_json_atomic,
+    inside,
+    safe_relative,
+    write_json_atomic,
     collect_cuda_evidence,
     normalize_task_spec,
     verilator_simulation_available,
@@ -77,8 +77,8 @@ from .team_runner import (
     LocalTeamRunner,
     TeamWorkflowOptions,
     WorktreeManager,
-    _run_git,
     apply_validated_patch,
+    run_git,
 )
 
 
@@ -361,7 +361,7 @@ def load_benchmark_manifest(path: Path) -> tuple[AblationTask, ...]:
         if set(editable) & set(public):
             raise EngineeringError(f"Task {task_id} public tests cannot be editable")
         for raw_path in (*editable, *public):
-            _safe_relative(raw_path, label=f"Task {task_id} path")
+            safe_relative(raw_path, label=f"Task {task_id} path")
             lowered = raw_path.lower()
             if "heldout" in lowered or "held_out" in lowered or "solution" in lowered:
                 raise EngineeringError(
@@ -482,14 +482,14 @@ def load_experiment_configuration(
         )
     if value.get("arm_order_strategy") != "serialized_phase_then_deterministic_rotation":
         raise EngineeringError("Experiment arm order strategy is invalid")
-    manifest_path = _inside(
+    manifest_path = inside(
         root,
-        root / _safe_relative(_string(value.get("manifest"), label="manifest"), label="manifest"),
+        root / safe_relative(_string(value.get("manifest"), label="manifest"), label="manifest"),
     )
-    model_artifacts_path = _inside(
+    model_artifacts_path = inside(
         root,
         root
-        / _safe_relative(
+        / safe_relative(
             _string(value.get("model_artifacts"), label="model_artifacts"),
             label="model_artifacts",
         ),
@@ -506,9 +506,9 @@ def load_experiment_configuration(
         arm_id = arm_value.get("arm_id")
         if arm_id not in {"A", "B", "C"}:
             raise EngineeringError("Arm id must be A, B or C")
-        models_path = _inside(
+        models_path = inside(
             root,
-            root / _safe_relative(_string(arm_value.get("models"), label="models"), label="models"),
+            root / safe_relative(_string(arm_value.get("models"), label="models"), label="models"),
         )
         try:
             models = load_dual_model_configuration(models_path)
@@ -648,10 +648,10 @@ def load_experiment_configuration(
         "systemverilog",
     ]:
         raise EngineeringError("Corpus validation must require all four language domains")
-    bundled_manifest = _inside(
+    bundled_manifest = inside(
         root,
         root
-        / _safe_relative(
+        / safe_relative(
             _string(corpus_value.get("bundled_manifest"), label="bundled_manifest"),
             label="bundled_manifest",
         ),
@@ -671,18 +671,18 @@ def load_experiment_configuration(
     ):
         if execution_value.get(key) is not True:
             raise EngineeringError(f"Experiment execution {key} must be true")
-    output_root = _inside(
+    output_root = inside(
         root,
         root
-        / _safe_relative(
+        / safe_relative(
             _string(execution_value.get("output_root"), label="output_root"),
             label="output_root",
         ),
     )
-    overlay_root = _inside(
+    overlay_root = inside(
         root,
         root
-        / _safe_relative(
+        / safe_relative(
             _string(corpus_value.get("overlay_root"), label="overlay_root"),
             label="overlay_root",
         ),
@@ -1711,7 +1711,7 @@ def smoke_runtime(
             "note": "Observed pre/post snapshots are not claimed as peak VRAM.",
         },
     }
-    _write_json_atomic(
+    write_json_atomic(
         configuration.output_root
         / "runtime_smoke_logs"
         / f"{phase_id}_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json",
@@ -2115,7 +2115,7 @@ def _write_phase_manifest(
             "reports": str(_result_set_root(configuration) / "reports"),
         },
     }
-    _write_json_atomic(path, record)
+    write_json_atomic(path, record)
     return record
 
 
@@ -2248,10 +2248,10 @@ def _held_out_manifest(root: Path, tasks: tuple[AblationTask, ...]) -> JsonObjec
             raise EngineeringError(f"Held-out manifest is missing {task.task_id}")
         entry = dict(raw_entry)
         _exact_keys(entry, {"directory", "files"}, label=f"Held-out {task.task_id}")
-        directory = _inside(
+        directory = inside(
             root,
             root
-            / _safe_relative(
+            / safe_relative(
                 _string(entry.get("directory"), label="held-out directory"),
                 label="held-out directory",
             ),
@@ -2279,8 +2279,8 @@ def _held_out_manifest(root: Path, tasks: tuple[AblationTask, ...]) -> JsonObjec
         for raw_path, digest in files.items():
             if not isinstance(raw_path, str) or not isinstance(digest, str):
                 raise EngineeringError(f"Held-out {task.task_id} hash record is malformed")
-            file_path = _inside(
-                directory, directory / _safe_relative(raw_path, label="held-out file")
+            file_path = inside(
+                directory, directory / safe_relative(raw_path, label="held-out file")
             )
             if (
                 file_path.is_symlink()
@@ -2431,7 +2431,7 @@ def _evaluate_held_out(
     held_out_root: Path,
 ) -> JsonObject:
     """Apply the stopped lane's patch in a fresh worktree before hidden checks."""
-    _, patch, _ = _run_git(implementation_worktree, ["diff", "--no-ext-diff", "--unified=3"])
+    _, patch, _ = run_git(implementation_worktree, ["diff", "--no-ext-diff", "--unified=3"])
     evaluation_project = (
         configuration.output_root / "evaluation_projects" / arm.arm_id / task.task_id
     )
@@ -2450,10 +2450,10 @@ def _evaluate_held_out(
     if not isinstance(entries, dict) or not isinstance(entries.get(task.task_id), dict):
         raise EngineeringError(f"Held-out evaluator entry is missing for {task.task_id}")
     entry = cast(dict[str, object], entries[task.task_id])
-    hidden_directory = _inside(
+    hidden_directory = inside(
         held_out_root,
         held_out_root
-        / _safe_relative(
+        / safe_relative(
             _string(entry.get("directory"), label="held-out directory"),
             label="held-out directory",
         ),
@@ -2789,11 +2789,11 @@ def _execute_lane_request(
     arms = {arm.arm_id: arm for arm in configuration.arms}
     if task_id not in tasks or arm_id not in arms:
         raise EngineeringError("Lane request task or arm is unknown")
-    project = _inside(
+    project = inside(
         configuration.output_root,
         Path(_string(request.get("project"), label="lane project")).resolve(),
     )
-    result_path = _inside(
+    result_path = inside(
         configuration.output_root,
         Path(_string(request.get("result_path"), label="lane result path")).resolve(),
     )
@@ -2833,7 +2833,7 @@ def _execute_lane_request(
             "gpu_after": {"status": "UNAVAILABLE"},
             "corpus_preflight": corpus_preflight,
         }
-    _write_json_atomic(result_path, bundle)
+    write_json_atomic(result_path, bundle)
     return bundle
 
 
@@ -2844,7 +2844,7 @@ def _run_lane_subprocess(
     arm: AblationArm,
 ) -> JsonObject:
     """Launch a killable task lane using the established paired-benchmark timeout helper."""
-    from .paired_benchmark import _await_lane
+    from .paired_benchmark import await_lane
 
     attempt = uuid.uuid4().hex
     project = configuration.output_root / "projects" / arm.arm_id / task.task_id / attempt
@@ -2857,7 +2857,7 @@ def _run_lane_subprocess(
     command_log = (
         configuration.output_root / "command_logs" / task.task_id / f"{arm.arm_id}_{attempt}.log"
     )
-    _write_json_atomic(
+    write_json_atomic(
         request_path,
         {
             "schema_version": RESULT_SCHEMA_VERSION,
@@ -2898,7 +2898,7 @@ def _run_lane_subprocess(
                 start_new_session=True,
                 env=lane_environment,
             )
-            process_result = _await_lane(
+            process_result = await_lane(
                 process, timeout_seconds=configuration.default_timeout_seconds
             )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -3405,7 +3405,7 @@ def run_phase(
                     },
                 }
             _validate_terminal_pair_result(pair)
-            _write_json_atomic(result_path, pair)
+            write_json_atomic(result_path, pair)
             if pair["status"] == "COMPLETE_EVALUATED":
                 completed += 1
             else:
@@ -3815,7 +3815,7 @@ def package_results(configuration: ExperimentConfiguration) -> JsonObject:
     json_path = report_root / "results.json"
     csv_path = report_root / "results.csv"
     markdown_path = report_root / "summary.md"
-    _write_json_atomic(json_path, payload)
+    write_json_atomic(json_path, payload)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     fields = [
         "task_id",
@@ -3915,6 +3915,17 @@ def package_results(configuration: ExperimentConfiguration) -> JsonObject:
 
 def _default_config(root: Path) -> Path:
     return root / "codex_a6000" / "experiments" / EXPERIMENT_ID / "experiment.json"
+
+
+# Explicit package-internal interfaces used by the orchestration certification
+# and CPU-smoke entrypoint.  The legacy implementation names remain for tests.
+activate_isolated_tools = _activate_isolated_tools
+corpus_snapshot_hashes = _corpus_snapshot_hashes
+ensure_lane_corpus_ready = _ensure_lane_corpus_ready
+evaluate_held_out = _evaluate_held_out
+execute_task_lane = _execute_task_lane
+load_artifact = _load_artifact
+model_call_totals = _model_call_totals
 
 
 def main(argv: list[str] | None = None) -> int:

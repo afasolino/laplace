@@ -25,6 +25,11 @@ def _local_endpoint(endpoint: str) -> None:
         raise BenchmarkError(f"Refusing non-loopback Ollama endpoint: {endpoint}")
 
 
+# Shared internal interface for local HTTP clients.  Keep the original helper
+# private for compatibility with existing benchmark tests.
+validate_loopback_endpoint = _local_endpoint
+
+
 def ollama_tags(endpoint: str) -> dict[str, Any]:
     _local_endpoint(endpoint)
     try:

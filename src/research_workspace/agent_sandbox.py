@@ -14,8 +14,9 @@ import threading
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Callable, Mapping, TypeAlias, cast
+from typing import Callable, Mapping, Sequence, TypeAlias, cast
 
+from .agent_infrastructure.git import run_git
 from .candidate_assurance import AssuranceState, CandidateAssurance, VerificationBinding
 from .repository_authorization import (
     RepositoryAuthorizationError,
@@ -144,6 +145,22 @@ class AgentSandboxManager:
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA busy_timeout = 15000")
         return connection
+
+    def _git(
+        self,
+        root: Path | str,
+        arguments: Sequence[str],
+        *,
+        timeout_seconds: float,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run fixed Git arguments through the shared infrastructure primitive."""
+
+        return run_git(
+            Path(root),
+            arguments,
+            runner=self._runner,
+            timeout_seconds=timeout_seconds,
+        )
 
     def _initialize(self) -> None:
         with self._connect() as connection:
@@ -532,68 +549,35 @@ class AgentSandboxManager:
         if target.exists():
             raise AgentSandboxError("worktree_exists", {"path": str(target)})
         target.parent.mkdir(parents=True, exist_ok=True)
-        result = self._runner(
-            [
-                "git",
-                "-C",
-                str(grant.repository.canonical_root),
-                "worktree",
-                "add",
-                "--detach",
-                str(target),
-                grant.base_revision,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=120,
+        result = self._git(
+            grant.repository.canonical_root,
+            ["worktree", "add", "--detach", str(target), grant.base_revision],
+            timeout_seconds=120,
         )
         if result.returncode != 0:
             raise AgentSandboxError(
                 "worktree_creation_failed",
                 {"returncode": result.returncode, "stderr": result.stderr[-2_000:]},
             )
-        head = self._runner(
-            ["git", "-C", str(target), "rev-parse", "--verify", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
+        head = self._git(
+            target,
+            ["rev-parse", "--verify", "HEAD"],
+            timeout_seconds=30,
         )
         if head.returncode != 0 or head.stdout.strip() != grant.base_revision:
-            self._runner(
-                [
-                    "git",
-                    "-C",
-                    str(grant.repository.canonical_root),
-                    "worktree",
-                    "remove",
-                    "--force",
-                    str(target),
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=120,
+            self._git(
+                grant.repository.canonical_root,
+                ["worktree", "remove", "--force", str(target)],
+                timeout_seconds=120,
             )
             raise AgentSandboxError("base_revision_race")
         try:
             self.authorizations.assert_revision(grant)
         except RepositoryAuthorizationError as exc:
-            self._runner(
-                [
-                    "git",
-                    "-C",
-                    str(grant.repository.canonical_root),
-                    "worktree",
-                    "remove",
-                    "--force",
-                    str(target),
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=120,
+            self._git(
+                grant.repository.canonical_root,
+                ["worktree", "remove", "--force", str(target)],
+                timeout_seconds=120,
             )
             raise AgentSandboxError(exc.category, exc.evidence) from exc
         binding = AgentSessionBinding(
@@ -612,20 +596,10 @@ class AgentSandboxManager:
         try:
             self._write_ownership(binding, ownership_token)
         except OSError as exc:
-            self._runner(
-                [
-                    "git",
-                    "-C",
-                    binding.canonical_repository_root,
-                    "worktree",
-                    "remove",
-                    "--force",
-                    binding.worktree_root,
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=120,
+            self._git(
+                binding.canonical_repository_root,
+                ["worktree", "remove", "--force", binding.worktree_root],
+                timeout_seconds=120,
             )
             raise AgentSandboxError("worktree_ownership_persistence_failed") from exc
         now = binding.created_at_utc
@@ -668,20 +642,10 @@ class AgentSandboxManager:
                 )
             except sqlite3.IntegrityError as exc:
                 self._ownership_path(identifier).unlink(missing_ok=True)
-                self._runner(
-                    [
-                        "git",
-                        "-C",
-                        binding.canonical_repository_root,
-                        "worktree",
-                        "remove",
-                        "--force",
-                        binding.worktree_root,
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=120,
+                self._git(
+                    binding.canonical_repository_root,
+                    ["worktree", "remove", "--force", binding.worktree_root],
+                    timeout_seconds=120,
                 )
                 raise AgentSandboxError("session_exists") from exc
             self._event(
@@ -909,12 +873,10 @@ class AgentSandboxManager:
     def close_if_clean(self, session_id: str, *, user_id: str) -> JsonObject:
         binding = self.require_active(session_id, user_id=user_id)
         root = Path(binding.worktree_root)
-        status = self._runner(
-            ["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
+        status = self._git(
+            root,
+            ["status", "--porcelain=v1", "--untracked-files=all"],
+            timeout_seconds=30,
         )
         if status.returncode != 0 or status.stdout.strip():
             changed_paths, diff_hash = self._diff_summary(binding)
@@ -936,19 +898,10 @@ class AgentSandboxManager:
                 "diff_hash": diff_hash,
                 **self._assurance_public(assurance),
             }
-        remove = self._runner(
-            [
-                "git",
-                "-C",
-                binding.canonical_repository_root,
-                "worktree",
-                "remove",
-                str(root),
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=120,
+        remove = self._git(
+            binding.canonical_repository_root,
+            ["worktree", "remove", str(root)],
+            timeout_seconds=120,
         )
         if remove.returncode != 0:
             raise AgentSandboxError(
@@ -1004,12 +957,10 @@ class AgentSandboxManager:
             }
         binding = self.require_active(session_id, user_id=user_id)
         root = Path(binding.worktree_root)
-        status = self._runner(
-            ["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
+        status = self._git(
+            root,
+            ["status", "--porcelain=v1", "--untracked-files=all"],
+            timeout_seconds=30,
         )
         if status.returncode != 0:
             raise AgentSandboxError(
@@ -1064,12 +1015,10 @@ class AgentSandboxManager:
 
     def _diff_summary(self, binding: AgentSessionBinding) -> tuple[tuple[str, ...], str | None]:
         root = Path(binding.worktree_root)
-        names = self._runner(
-            ["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
+        names = self._git(
+            root,
+            ["status", "--porcelain=v1", "--untracked-files=all"],
+            timeout_seconds=30,
         )
         if names.returncode != 0:
             raise AgentSandboxError("candidate_git_observation_failed")
@@ -1080,19 +1029,15 @@ class AgentSandboxManager:
                 path = path.split(" -> ", 1)[1]
             if path:
                 paths.append(path)
-        diff = self._runner(
-            ["git", "-C", str(root), "diff", "--binary", "--no-ext-diff", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
+        diff = self._git(
+            root,
+            ["diff", "--binary", "--no-ext-diff", "HEAD"],
+            timeout_seconds=30,
         )
-        untracked = self._runner(
-            ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
+        untracked = self._git(
+            root,
+            ["ls-files", "--others", "--exclude-standard"],
+            timeout_seconds=30,
         )
         if diff.returncode != 0 or untracked.returncode != 0:
             raise AgentSandboxError("candidate_git_observation_failed")
@@ -1859,12 +1804,10 @@ class AgentSandboxManager:
                 raise AgentSandboxError("unknown_agent_session")
             root = binding.worktree_root
             repository = binding.canonical_repository_root
-        result = self._runner(
-            ["git", "-C", repository, "worktree", "remove", "--force", root],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=120,
+        result = self._git(
+            repository,
+            ["worktree", "remove", "--force", root],
+            timeout_seconds=120,
         )
         if result.returncode != 0:
             raise AgentSandboxError(
@@ -2229,19 +2172,15 @@ class AgentSandboxManager:
             self._sessions.pop(binding.session_id, None)
             self._live_executors.discard(binding.session_id)
             return {**item, "action": "MARKED_UNAVAILABLE", "reason": registration_reason}
-        head_result = self._runner(
-            ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
+        head_result = self._git(
+            root,
+            ["rev-parse", "--verify", "HEAD"],
+            timeout_seconds=30,
         )
-        status_result = self._runner(
-            ["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
+        status_result = self._git(
+            root,
+            ["status", "--porcelain=v1", "--untracked-files=all"],
+            timeout_seconds=30,
         )
         if head_result.returncode != 0 or status_result.returncode != 0:
             return {**item, "action": "PROTECTED", "reason": "worktree_state_unavailable"}
@@ -2529,19 +2468,10 @@ class AgentSandboxManager:
             return False, "repository_identity_unavailable"
         if str(repository.canonical_root) != binding.canonical_repository_root:
             return False, "foreign_repository"
-        listed = self._runner(
-            [
-                "git",
-                "-C",
-                binding.canonical_repository_root,
-                "worktree",
-                "list",
-                "--porcelain",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
+        listed = self._git(
+            binding.canonical_repository_root,
+            ["worktree", "list", "--porcelain"],
+            timeout_seconds=30,
         )
         if listed.returncode != 0:
             return False, "git_worktree_inventory_failed"
@@ -2561,32 +2491,20 @@ class AgentSandboxManager:
             return False, "worktree_symlink_or_realpath_mismatch"
         if paths.count(root) != 1:
             return False, "worktree_not_uniquely_registered"
-        top = self._runner(
-            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
+        top = self._git(
+            root,
+            ["rev-parse", "--show-toplevel"],
+            timeout_seconds=30,
         )
-        common = self._runner(
-            ["git", "-C", str(root), "rev-parse", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
+        common = self._git(
+            root,
+            ["rev-parse", "--git-common-dir"],
+            timeout_seconds=30,
         )
-        repository_common = self._runner(
-            [
-                "git",
-                "-C",
-                binding.canonical_repository_root,
-                "rev-parse",
-                "--git-common-dir",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
+        repository_common = self._git(
+            binding.canonical_repository_root,
+            ["rev-parse", "--git-common-dir"],
+            timeout_seconds=30,
         )
         if top.returncode != 0 or Path(top.stdout.strip()).resolve() != root:
             return False, "worktree_git_root_mismatch"
@@ -2637,12 +2555,10 @@ class AgentSandboxManager:
                 "action": "WOULD_RECOVER_RELEASE" if dry_run else "RECOVERED_RELEASE",
                 "reason": reason,
             }
-        status = self._runner(
-            ["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
+        status = self._git(
+            root,
+            ["status", "--porcelain=v1", "--untracked-files=all"],
+            timeout_seconds=30,
         )
         if status.returncode != 0:
             return {**item, "action": "PROTECTED", "reason": "worktree_status_failed"}
@@ -2664,20 +2580,10 @@ class AgentSandboxManager:
             return self._gc_item(migrated, dry_run=False)
         if dry_run:
             return {**item, "action": "WOULD_RELEASE", "reason": "durable_terminal_owned"}
-        removed = self._runner(
-            [
-                "git",
-                "-C",
-                binding.canonical_repository_root,
-                "worktree",
-                "remove",
-                *( ["--force"] if dirty else [] ),
-                binding.worktree_root,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=120,
+        removed = self._git(
+            binding.canonical_repository_root,
+            ["worktree", "remove", *(["--force"] if dirty else []), binding.worktree_root],
+            timeout_seconds=120,
         )
         if removed.returncode != 0:
             return {
@@ -2802,58 +2708,27 @@ class AgentSandboxManager:
 
     def patch(self, session_id: str, *, user_id: str) -> bytes:
         binding = self.require_active(session_id, user_id=user_id)
-        result = self._runner(
-            [
-                "git",
-                "-C",
-                binding.worktree_root,
-                "diff",
-                "--binary",
-                "--no-ext-diff",
-                "HEAD",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
+        result = self._git(
+            binding.worktree_root,
+            ["diff", "--binary", "--no-ext-diff", "HEAD"],
+            timeout_seconds=30,
         )
         if result.returncode != 0:
             raise AgentSandboxError("patch_export_failed")
         patch = result.stdout
-        untracked = self._runner(
-            [
-                "git",
-                "-C",
-                binding.worktree_root,
-                "ls-files",
-                "--others",
-                "--exclude-standard",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
+        untracked = self._git(
+            binding.worktree_root,
+            ["ls-files", "--others", "--exclude-standard"],
+            timeout_seconds=30,
         )
         if untracked.returncode != 0:
             raise AgentSandboxError("patch_export_failed")
         for relative in sorted(untracked.stdout.splitlines()):
             validate_workspace_path(Path(binding.worktree_root), relative)
-            addition = self._runner(
-                [
-                    "git",
-                    "-C",
-                    binding.worktree_root,
-                    "diff",
-                    "--no-index",
-                    "--binary",
-                    "--",
-                    "/dev/null",
-                    relative,
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=30,
+            addition = self._git(
+                binding.worktree_root,
+                ["diff", "--no-index", "--binary", "--", "/dev/null", relative],
+                timeout_seconds=30,
             )
             if addition.returncode not in {0, 1}:
                 raise AgentSandboxError("patch_export_failed")

@@ -18,6 +18,7 @@ from research_workspace.engineering import (
     SchemaValidationError,
     normalize_task_spec,
     retrieve_engineering_evidence,
+    validate_task_spec,
 )
 from research_workspace.inference import ServingCandidate
 from research_workspace.repair_protocol import build_local_patch, parse_replacement_plan
@@ -91,6 +92,17 @@ def test_task_schema_rejects_missing_required_contract() -> None:
     invalid.pop("verification_commands")
     with pytest.raises(SchemaValidationError, match="missing required property"):
         normalize_task_spec(REPOSITORY_ROOT, "python", invalid)
+
+
+def test_task_schema_rejects_unsupported_json_schema_keywords(tmp_path: Path) -> None:
+    schema_path = tmp_path / "unsupported.schema.json"
+    schema_path.write_text(
+        json.dumps({"type": "object", "unevaluatedProperties": False}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SchemaValidationError, match="unsupported Laplace task-schema keyword"):
+        validate_task_spec({}, schema_path)
 
 
 def test_governed_reference_fixture_is_read_only_hash_verified_and_indexed(tmp_path: Path) -> None:

@@ -30,3 +30,26 @@ def test_cannot_promote_stale_candidate() -> None:
     state = CandidateAssurance(base_revision="abc").observe_candidate("diff-1")
     with pytest.raises(ValueError, match="candidate_not_promotion_eligible"):
         state.promoted()
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        CandidateAssurance(base_revision="abc")
+        .observe_candidate("diff-1")
+        .start_verification("v1"),
+        CandidateAssurance(base_revision="abc")
+        .observe_candidate("diff-1")
+        .start_verification("v1")
+        .verification_failed(),
+        CandidateAssurance(base_revision="abc")
+        .observe_candidate("diff-1")
+        .start_verification("v1")
+        .verification_passed("v1")
+        .observation_failed(),
+    ],
+)
+def test_historical_fingerprint_is_not_public_current_verification_after_failure(
+    state: CandidateAssurance,
+) -> None:
+    assert not state.is_currently_verified

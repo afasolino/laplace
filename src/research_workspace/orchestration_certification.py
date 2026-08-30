@@ -21,13 +21,13 @@ from .model_servers import ModelServerController
 from .multilanguage_ablation import (
     AblationArm,
     ExperimentConfiguration,
-    _activate_isolated_tools,
-    _corpus_snapshot_hashes,
-    _ensure_lane_corpus_ready,
-    _evaluate_held_out,
-    _execute_task_lane,
-    _load_artifact,
-    _model_call_totals,
+    activate_isolated_tools,
+    corpus_snapshot_hashes,
+    ensure_lane_corpus_ready,
+    evaluate_held_out,
+    execute_task_lane,
+    load_artifact,
+    model_call_totals,
     load_benchmark_manifest,
     load_experiment_configuration,
     validate_held_out_pack,
@@ -192,7 +192,7 @@ class LiveCertificationExecutor:
             or frozen_operator_configuration.get("smoke_profile") != "codev-live"
         ):
             raise CertificationRunError("Operator request does not match the live CodeV smoke")
-        _activate_isolated_tools(self.repository_root)
+        activate_isolated_tools(self.repository_root)
         configuration, arm = self._configuration(project_root)
         task = next(
             item
@@ -230,13 +230,13 @@ class LiveCertificationExecutor:
         )
 
         with trace.span("corpus_preflight", attributes={"run_id": identity.run_id}):
-            corpus_preflight = _ensure_lane_corpus_ready(
+            corpus_preflight = ensure_lane_corpus_ready(
                 self.repository_root, configuration
             )
         held_out_validation = validate_held_out_pack(
             self.repository_root, configuration, self.held_out_root
         )
-        corpus_hashes = _corpus_snapshot_hashes(configuration.overlay_root)
+        corpus_hashes = corpus_snapshot_hashes(configuration.overlay_root)
         corpus_snapshot_sha256 = canonical_sha256(corpus_hashes)
         skill_registry = FrozenSkillRegistry(
             self.repository_root / "codex_a6000" / "skills"
@@ -318,7 +318,7 @@ class LiveCertificationExecutor:
             "native_team_runner",
             attributes={"run_id": identity.run_id, "arm_id": identity.arm_id},
         ):
-            bundle = _execute_task_lane(
+            bundle = execute_task_lane(
                 self.repository_root,
                 configuration,
                 task,
@@ -329,14 +329,14 @@ class LiveCertificationExecutor:
         lane = dict(lane_raw) if isinstance(lane_raw, dict) else {}
         task_raw = lane.get("task")
         task_value = dict(task_raw) if isinstance(task_raw, dict) else {}
-        verification = _load_artifact(task_value, "verification_report")
-        review = _load_artifact(task_value, "review_report")
-        rag = _load_artifact(task_value, "evidence_packet")
+        verification = load_artifact(task_value, "verification_report")
+        review = load_artifact(task_value, "review_report")
+        rag = load_artifact(task_value, "evidence_packet")
         _write_json(project_root / "verification_compact.json", verification)
         _write_json(project_root / "review_compact.json", review)
         _write_json(project_root / "rag_compact.json", rag)
         _project_gate_logs(project_root, verification)
-        model_calls = _model_call_totals(native_project)
+        model_calls = model_call_totals(native_project)
         calls_raw = model_calls.get("calls")
         calls = (
             [_compact_model_call(item) for item in calls_raw if isinstance(item, dict)]
@@ -353,7 +353,7 @@ class LiveCertificationExecutor:
                 "held_out_evaluation",
                 attributes={"run_id": identity.run_id, "held_out": "isolated"},
             ):
-                held_out = _evaluate_held_out(
+                held_out = evaluate_held_out(
                     self.repository_root,
                     configuration,
                     task,

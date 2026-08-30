@@ -1,4 +1,4 @@
-# Laplace v2
+# Laplace architecture generation 3
 
 Laplace is a local research and engineering workspace. v2 provides a neutral
 standalone `LaplaceCore`, an authenticated optional Zetsu/Codex adapter, private
@@ -7,8 +7,8 @@ repository-agent worktrees. It is localhost-only by default; documents,
 credentials, model prompts, and repository contents are not uploaded to a cloud
 service.
 
-The package version is `2.0.0`. The v2 development checkout is
-`/home/giando/work/laplace-v2` on `feature/laplace-v2`. The immutable certified
+Package SemVer is `2.0.0`; it is intentionally separate from the architecture
+generation and the non-A6000 certification campaign. The immutable certified
 production/control-plane checkout is `/home/giando/work/laplace` on
 `production/v1`; do not modify it while developing or validating v2.
 

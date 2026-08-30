@@ -16,7 +16,7 @@ from typing import Any, Iterator, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .real_benchmark import _local_endpoint
+from .real_benchmark import validate_loopback_endpoint
 from .retrieval import Evidence, evidence_packet, search, validate_citations
 
 
@@ -719,7 +719,7 @@ def generate_stream(
     stop: threading.Event,
     json_mode: bool = True,
 ) -> Iterator[dict[str, Any]]:
-    _local_endpoint(endpoint)
+    validate_loopback_endpoint(endpoint)
     payload = json.dumps(
         {
             "model": model,

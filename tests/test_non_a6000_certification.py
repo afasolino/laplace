@@ -55,3 +55,29 @@ def test_runner_rejects_non_campaign_output(tmp_path: Path) -> None:
         assert str(exc) == "output_must_be_repository_local_campaign_artifact"
     else:
         raise AssertionError("runner accepted an output path outside .runtime/v3-non-a6000")
+
+
+def test_unknown_test_node_is_rejected_instead_of_defaulting_to_cross_platform() -> None:
+    from research_workspace.certification_taxonomy import category_for_nodeid
+
+    try:
+        category_for_nodeid("tests/test_future_unclassified.py::test_new")
+    except ValueError as exc:
+        assert str(exc) == "unknown_test_classification:tests/test_future_unclassified.py::test_new"
+    else:
+        raise AssertionError("unknown test node was classified")
+
+
+def test_runner_uses_branch_independent_provenance() -> None:
+    module = _module()
+    assert "WINDOWS_CROSS_PLATFORM_CHECKS" not in module.__dict__
+    assert "origin/feature/laplace-v3" not in module.__dict__.get("_provenance").__code__.co_consts
+
+
+def test_routine_ci_uses_taxonomy_and_measured_coverage_threshold() -> None:
+    workflow = (ROOT / ".github/workflows/unit-and-integration-tests.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "-m cross_platform_deterministic" in workflow
+    assert "--cov-fail-under=63.6" in workflow

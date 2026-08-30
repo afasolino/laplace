@@ -3,15 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
-import signal
-import shutil
-
-# Git invocation is restricted to fixed worktree/apply operations.
-import subprocess  # nosec B404
 import sys
-import time
 import uuid
 import json
 from dataclasses import dataclass, replace
@@ -26,13 +19,14 @@ from .engineering import (
     LocalToolRunner,
     ReferenceEvidenceError,
     TaskState,
-    _inside,
-    _safe_relative,
-    _write_json_atomic,
+    inside,
+    safe_relative,
+    write_json_atomic,
     collect_cuda_evidence,
     resolve_shared_reference_root,
     retrieve_engineering_evidence,
 )
+from .agent_infrastructure.git import GitExecutionError, run_git_bounded
 from .inference import ServingCandidate
 from .llm import ModelRequired
 from .model_routing import (
@@ -102,36 +96,21 @@ class TeamWorkflowOptions:
 def _run_git(
     repository_root: Path, command: list[str], *, timeout_seconds: int = 60
 ) -> tuple[int, str, str]:
-    started = time.monotonic()
-    git = shutil.which("git")
-    if git is None:
-        raise EngineeringError("Git executable is unavailable")
     try:
-        # Command verbs and arguments are fixed by WorktreeManager and apply_validated_patch.
-        process = subprocess.Popen(  # nosec B603
-            [git, *command],
-            cwd=repository_root,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
+        return run_git_bounded(
+            repository_root,
+            command,
+            timeout_seconds=timeout_seconds,
         )
-    except OSError as exc:
-        raise EngineeringError(f"Cannot start git: {exc}") from exc
-    try:
-        stdout, stderr = process.communicate(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        if os.name == "posix":
-            os.killpg(process.pid, signal.SIGTERM)
-        else:
-            process.terminate()
-        stdout, stderr = process.communicate(timeout=10)
-        raise EngineeringError(
-            f"Git command timed out after {time.monotonic() - started:.1f}s: {stderr}"
-        )
-    if process.returncode != 0:
-        raise EngineeringError(f"Git command failed: {stderr[-2000:]}")
-    return process.returncode, stdout, stderr
+    except GitExecutionError as exc:
+        raise EngineeringError(str(exc)) from exc
+
+
+def run_git(
+    repository_root: Path, command: list[str], *, timeout_seconds: int = 60
+) -> tuple[int, str, str]:
+    """Run a fixed Git command through the team-workflow compatibility layer."""
+    return _run_git(repository_root, command, timeout_seconds=timeout_seconds)
 
 
 class WorktreeManager:
@@ -187,9 +166,9 @@ def _diff_paths(patch: str) -> list[str]:
 
 
 def _is_allowed(path: str, allowed_paths: list[str]) -> bool:
-    relative = _safe_relative(path, label="patch path").as_posix()
+    relative = safe_relative(path, label="patch path").as_posix()
     for allowed in allowed_paths:
-        permitted = _safe_relative(allowed, label="allowed path").as_posix().rstrip("/")
+        permitted = safe_relative(allowed, label="allowed path").as_posix().rstrip("/")
         if relative == permitted or relative.startswith(permitted + "/"):
             return True
     return False
@@ -204,7 +183,7 @@ def apply_validated_patch(
     if forbidden:
         raise PatchValidationError(f"Patch changes paths outside task scope: {forbidden}")
     for path in paths:
-        _inside(worktree.root, worktree.root / _safe_relative(path, label="patch path"))
+        inside(worktree.root, worktree.root / safe_relative(path, label="patch path"))
     patch_file = log_root / f"{worktree.task_id}_{uuid.uuid4().hex}.patch"
     patch_file.parent.mkdir(parents=True, exist_ok=True)
     patch_file.write_text(patch, encoding="utf-8")
@@ -216,13 +195,13 @@ def apply_validated_patch(
         worktree.root, ["apply", "--check", "--recount", str(patch_file)]
     )
     before_hashes = {
-        path: file_sha256(_inside(worktree.root, worktree.root / Path(path))) for path in paths
+        path: file_sha256(inside(worktree.root, worktree.root / Path(path))) for path in paths
     }
     _, apply_stdout, apply_stderr = _run_git(
         worktree.root, ["apply", "--whitespace=error", "--recount", str(patch_file)]
     )
     after_hashes = {
-        path: file_sha256(_inside(worktree.root, worktree.root / Path(path))) for path in paths
+        path: file_sha256(inside(worktree.root, worktree.root / Path(path))) for path in paths
     }
     report: JsonObject = {
         "status": "APPLIED",
@@ -239,7 +218,7 @@ def apply_validated_patch(
         "git_apply_stderr": apply_stderr[-4000:],
     }
     report_path = log_root / f"{worktree.task_id}_{uuid.uuid4().hex}_patch_report.json"
-    _write_json_atomic(report_path, report, readonly=True)
+    write_json_atomic(report_path, report, readonly=True)
     report["report_path"] = str(report_path)
     return report
 
@@ -542,8 +521,8 @@ class LocalTeamRunner:
             raise EngineeringError("Python task has no explicit resolved public-test paths")
         tests: list[str] = []
         for item in raw:
-            relative = _safe_relative(item, label="public Python test").as_posix()
-            absolute = _inside(worktree.root, worktree.root / relative)
+            relative = safe_relative(item, label="public Python test").as_posix()
+            absolute = inside(worktree.root, worktree.root / relative)
             if not absolute.is_file() or absolute.suffix != ".py":
                 raise EngineeringError(f"Declared public Python test is missing: {relative}")
             tests.append(relative)
@@ -652,7 +631,7 @@ class LocalTeamRunner:
         cannot change the submitted patch or expose evaluator-held tests.
         """
         source_root = str(
-            _inside(worktree.root, worktree.root / Path(_allowed_paths(task)[0]).parent)
+            inside(worktree.root, worktree.root / Path(_allowed_paths(task)[0]).parent)
         )
         task_id = task.task_id
         scripts: dict[str, str] = {
@@ -799,9 +778,9 @@ with sqlite3.connect(':memory:') as connection:
         self, runner: LocalToolRunner, task: AgentTask, worktree: Worktree
     ) -> JsonObject:
         """Compile a verifier-owned protocol testbench from public invariants."""
-        source = _inside(
+        source = inside(
             worktree.root,
-            worktree.root / _safe_relative(_allowed_paths(task)[0], label="RTL source"),
+            worktree.root / safe_relative(_allowed_paths(task)[0], label="RTL source"),
         )
         suffix = ".v" if task.domain == "verilog" else ".sv"
         generic = source.parent / f"tb_adversarial{suffix}"
@@ -1635,9 +1614,9 @@ end endmodule
                 for raw in raw_tests:
                     if not isinstance(raw, str) or Path(raw).suffix.lower() not in {".v", ".sv"}:
                         continue
-                    candidate = _inside(
+                    candidate = inside(
                         worktree.root,
-                        worktree.root / _safe_relative(raw, label="public RTL testbench"),
+                        worktree.root / safe_relative(raw, label="public RTL testbench"),
                     )
                     if candidate.is_file():
                         return raw
@@ -1651,9 +1630,9 @@ end endmodule
         )
         if allowed_testbench is not None:
             return allowed_testbench
-        source = _inside(
+        source = inside(
             worktree.root,
-            worktree.root / _safe_relative(allowed_paths[0], label="RTL source"),
+            worktree.root / safe_relative(allowed_paths[0], label="RTL source"),
         )
         candidates = sorted(source.parent.glob("tb_public.*"))
         if not candidates:

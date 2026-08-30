@@ -314,6 +314,10 @@ def _assert_public_hostname(hostname: str) -> None:
             raise ValueError("direct URL resolves to a non-public address")
 
 
+# Internal adapters share this named boundary; its implementation stays local.
+assert_public_hostname = _assert_public_hostname
+
+
 @dataclass
 class DirectUrlResearchAdapter:
     """Fetch an explicit, bounded list of public URLs with robots checks."""

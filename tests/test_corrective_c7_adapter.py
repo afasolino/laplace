@@ -12,7 +12,10 @@ from research_workspace.laplace_core import LaplaceCore, LaplaceCoreError
 from research_workspace.repository_agent_service import RepositoryAgentService
 from research_workspace.service_tiers import ModelLane
 from research_workspace.user_capabilities import Capability
-from research_workspace.verification_policy import validate_verification_argv
+from research_workspace.verification_policy import (
+    validate_verification_argv,
+    verification_qualifies_for_promotion,
+)
 from research_workspace.zetsu_agent import ZetsuAgentCoordinator
 from research_workspace.zetsu_mcp import ZetsuService
 
@@ -109,6 +112,24 @@ def test_neutral_and_zetsu_verifier_adapters_are_identical(tmp_path: Path) -> No
             ZetsuAgentCoordinator._verify_argv(tmp_path, invalid)
         assert type(neutral.value) is type(adapter.value)
         assert str(neutral.value) == str(adapter.value)
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (("pytest", "tests/test_value.py", "-q"), True),
+        (("pytest", "--collect-only"), False),
+        (("ruff", "check", "src"), True),
+        (("ruff", "check", "--show-files", "src"), False),
+        (("mypy", "src/research_workspace"), True),
+        (("mypy", "--help"), False),
+        (("mypy", "--install-types", "src/research_workspace"), False),
+    ],
+)
+def test_final_verifier_qualification_requires_a_real_read_only_check(
+    argv: tuple[str, ...], expected: bool
+) -> None:
+    assert verification_qualifies_for_promotion(argv) is expected
 
 
 def test_core_contains_no_private_zetsu_verifier_dependency() -> None:

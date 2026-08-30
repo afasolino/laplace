@@ -3,7 +3,7 @@ name: migration-tests
 on:
   pull_request:
   push:
-    branches: [main, "feature/release-candidate-review-v8"]
+    branches: [main, "feature/**", "review/**"]
 
 permissions:
   contents: read

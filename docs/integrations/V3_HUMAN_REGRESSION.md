@@ -1,6 +1,6 @@
 # Laplace v3 human regression
 
-Run from `/home/giando/work/laplace-v2` on `feature/laplace-v3`. Keep `/home/giando/work/laplace` untouched.
+Run from an isolated development worktree on the branch under review. Keep the production checkout untouched.
 
 ## 0. Deterministic gate
 

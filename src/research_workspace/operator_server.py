@@ -16,12 +16,9 @@ from .artifact_registry import ArtifactRegistry
 from .auth_registry import AuthRegistryError, RegisteredUserRegistry
 from .auth_sessions import AuthAuditLog, RegisteredEmailAuth, SessionStore
 from .conversations import ConversationStore
-from .operator_api import (
-    AuthCredential,
-    OperatorApiSettings,
-    OperatorAuth,
-    create_operator_app,
-)
+from .operator.auth import AuthCredential, OperatorAuth
+from .operator_api import create_operator_app
+from .operator.settings import OperatorApiSettings
 from .agent_sandbox import AgentSandboxManager
 from .operator_service import OperatorService
 from .repository_authorization import RepositoryAuthorizationStore
@@ -96,6 +93,9 @@ def _selected_lane_policy(repository_root: Path, *, codev_enabled: bool = True) 
         economy_capacity=int(raw["economy_capacity"]),
         codev_enabled=codev_enabled,
     )
+
+
+selected_lane_policy = _selected_lane_policy
 
 
 def load_or_create_tokens(

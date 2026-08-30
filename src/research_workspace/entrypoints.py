@@ -2,24 +2,12 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Sequence
 
 
 def laplace_main(argv: Sequence[str] | None = None) -> int:
     """Report package identity without importing optional runtime dependencies."""
 
-    arguments = list(sys.argv[1:] if argv is None else argv)
-    if arguments == ["--version"]:
-        from .versioning import version_line
+    from .cli_registry import dispatch
 
-        print(version_line(Path.cwd()))
-        return 0
-    if arguments and arguments[0] == "zetsu":
-        from .zetsu_cli import main as zetsu_main
-
-        return zetsu_main(arguments[1:])
-    from .laplace_cli import main
-
-    return main(arguments)
+    return dispatch(argv)

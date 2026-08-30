@@ -4,26 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import hmac
 import ipaddress
 import json
 import logging
 import os
 import re
-import secrets
 import sqlite3
-import subprocess
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 from typing import AsyncIterator, Literal, Mapping, TypeAlias
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.datastructures import UploadFile
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.cors import CORSMiddleware
@@ -48,6 +44,52 @@ from .operator_service import (
     OperatorServiceError,
     RunExecutor,
 )
+from .operator.auth import AuthCredential, AuthPrincipal, OperatorAuth  # noqa: F401
+from .operator.agent_requests import (  # noqa: F401
+    AgentAsyncRunRequest,
+    AgentRunRequest,
+    AgentTaskComplexityRequest,
+)
+from .operator.request_models import (  # noqa: F401
+    ActivationRequest,
+    AgentSessionRequest,
+    ApprovalDecisionRequest,
+    ApprovalRequest,
+    CapabilitySetRequest,
+    ClientHeartbeatRequest,
+    ClientOperationRequest,
+    ClientPairRequest,
+    ClientResultRequest,
+    ConversationCreateRequest,
+    ConversationUpdateRequest,
+    CorpusCreateRequest,
+    CorpusSearchRequest,
+    CorpusUpdateRequest,
+    IndexUploadRequest,
+    LoginRequest,
+    ModelServerActionRequest,
+    PasswordChangeRequest,
+    RepositoryGrantRequest,
+    RepositoryRegistrationRequest,
+    ResearchCreateRequest,
+    RunPrepareRequest,
+    ServingProfileActionRequest,
+    StartRunRequest,
+    TierChatMessage,
+    TierChatRequest,
+    TierUserRequest,
+    UploadCreateRequest,
+    WorktreeDiscardRequest,
+    WorktreeExportRequest,
+)
+from .operator.settings import OperatorApiSettings
+from .operator.responses import agent_result_content, public_agent_result
+from .operator.research_payloads import research_summaries, sanitize_research_payload
+from .operator.artifacts import safe_artifact_path
+from .operator.auth_routes import register_auth_routes
+from .operator.client_routes import register_client_routes
+from .operator.run_routes import register_run_routes
+from .operator.static_routes import register_static_routes
 from .laplace_core import LaplaceCore
 from .memory import MemoryService, SQLiteMemoryBackend
 from .personal_corpus import (
@@ -59,7 +101,6 @@ from .request_state import RequestStateError, RequestStateStore
 from .rules import RuleService, SQLiteRuleBackend
 from .trajectory import TrajectoryService
 from .agent_sandbox import AgentSandboxError, AgentSessionBinding, AgentToolPolicy
-from .research_models import ResearchJobRequest
 from .research_admission import ResearchAdmissionError, ResearchAdmissionStore
 from .research_plane import DeepResearchService, ResearchPlaneError
 from .research_web_adapters import supported_web_adapter_names
@@ -83,143 +124,6 @@ JsonObject: TypeAlias = dict[str, object]
 LOGGER = logging.getLogger("laplace.operator")
 
 
-class RunPrepareRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    configuration: dict[str, object]
-    run_id: str | None = Field(default=None, max_length=160)
-
-
-class ApprovalRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    action: str = Field(min_length=1, max_length=80)
-    entity_id: str = Field(min_length=1, max_length=320)
-    payload: dict[str, object] = Field(default_factory=dict)
-
-
-class ApprovalDecisionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    approve: bool
-
-
-class StartRunRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    approval_id: str | None = Field(default=None, max_length=160)
-
-
-class ModelServerActionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    action: str
-    approval_id: str | None = Field(default=None, max_length=160)
-
-
-class ResearchCreateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    job: ResearchJobRequest
-    research_job_id: str | None = Field(default=None, max_length=160)
-    domain: str = Field(default="general", min_length=1, max_length=80)
-
-
-class TierChatMessage(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    role: str
-    content: str = Field(min_length=1, max_length=100_000)
-
-
-class TierChatRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    lane: Literal["quality", "standard", "economy"]
-    domain: str = Field(default="general", min_length=1, max_length=80)
-    session_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-    conversation_id: str | None = Field(default=None, pattern=r"^conv-[a-f0-9]{32}$")
-    messages: list[TierChatMessage] = Field(min_length=1, max_length=200)
-    request_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{7,159}$")
-    retrieval_selection: Literal["none", "personal", "shared", "both", "selected_personal"] = "none"
-    personal_corpus_id: str | None = Field(default=None, pattern=r"^pc_[a-f0-9]{32}$")
-
-
-class LoginRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    email: str = Field(min_length=3, max_length=320)
-    password: str = Field(min_length=1, max_length=1_024)
-
-
-class ActivationRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    email: str = Field(min_length=3, max_length=320)
-    activation_code: str = Field(min_length=1, max_length=1_024)
-    new_password: str = Field(min_length=12, max_length=1_024)
-
-
-class PasswordChangeRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    current_password: str = Field(min_length=1, max_length=1_024)
-    new_password: str = Field(min_length=12, max_length=1_024)
-
-
-class ConversationCreateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    title: str = Field(default="New conversation", max_length=160)
-
-
-class ConversationUpdateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    title: str | None = Field(default=None, max_length=160)
-    archived: bool | None = None
-    draft: str | None = Field(default=None, max_length=100_000)
-
-
-class AgentSessionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    repo_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-    session_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-    allowed_tools: list[str] = Field(
-        default_factory=lambda: ["read_file", "apply_patch", "run_tests"],
-        min_length=1,
-        max_length=20,
-    )
-    max_commands: int = Field(default=100, ge=1, le=1_000)
-    max_wall_seconds: int = Field(default=1_800, ge=1, le=14_400)
-    task_title: str = Field(default="New Agent task", min_length=1, max_length=200)
-    idempotency_key: str | None = Field(
-        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,159}$"
-    )
-
-
-class AgentRunRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    lane: Literal["quality", "standard", "economy"]
-    instruction: str = Field(min_length=1, max_length=100_000)
-    domain: str = Field(min_length=1, max_length=80)
-    retrieval_selection: Literal["none", "personal", "shared", "both", "selected_personal"] = "none"
-    personal_corpus_id: str | None = Field(default=None, pattern=r"^pc_[a-f0-9]{32}$")
-    max_steps: int = Field(default=12, ge=1, le=32)
-    max_chars: int = Field(default=8_000, ge=512, le=24_000)
-    verification_argv: list[str] | None = Field(default=None, min_length=1, max_length=64)
-    allow_mutation: bool = False
-    wait_timeout_seconds: int = Field(default=1_800, ge=1, le=3_600)
-
-
-class AgentAsyncRunRequest(AgentRunRequest):
-    """Idempotent durable-turn submission for clients that cannot hold a long POST."""
-
-    turn_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{7,159}$")
-
-
 def _agent_async_request_sha256(body: AgentAsyncRunRequest) -> str:
     """Bind one durable turn ID to the exact normalized API request."""
 
@@ -234,6 +138,9 @@ def _agent_async_request_sha256(body: AgentAsyncRunRequest) -> str:
         "verification_argv": body.verification_argv,
         "allow_mutation": body.allow_mutation,
         "wait_timeout_seconds": body.wait_timeout_seconds,
+        "manager_complexity": (
+            body.manager_complexity.model_dump() if body.manager_complexity is not None else None
+        ),
     }
     encoded = json.dumps(
         payload,
@@ -242,330 +149,6 @@ def _agent_async_request_sha256(body: AgentAsyncRunRequest) -> str:
         ensure_ascii=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
-
-
-class TierUserRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    user_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-    tier: Literal["basic", "plus", "operator"]
-    enabled: bool = True
-
-
-class CapabilitySetRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    capabilities: list[
-        Literal[
-            "chat",
-            "agent",
-            "research",
-            "operator",
-            "admin",
-            "personal_corpus",
-            "shared_corpus_ingest",
-            "repository_admin",
-            "model_admin",
-        ]
-    ] = Field(max_length=9)
-    enabled: bool | None = None
-
-
-class CorpusCreateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    name: str = Field(min_length=1, max_length=160)
-
-
-class CorpusUpdateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    name: str | None = Field(default=None, min_length=1, max_length=160)
-    archived: bool | None = None
-
-
-class UploadCreateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    corpus_id: str = Field(pattern=r"^pc_[a-f0-9]{32}$")
-    idempotency_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,159}$")
-
-
-class IndexUploadRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    idempotency_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,159}$")
-
-
-class CorpusSearchRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    query: str = Field(min_length=1, max_length=4_000)
-    corpus_id: str | None = Field(default=None, pattern=r"^pc_[a-f0-9]{32}$")
-    limit: int = Field(default=8, ge=1, le=50)
-
-
-class WorktreeDiscardRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    confirmation: str = Field(min_length=9, max_length=180)
-
-
-class WorktreeExportRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    promotion: bool = False
-
-
-class RepositoryRegistrationRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    repo_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-    canonical_root: str = Field(min_length=1, max_length=4_096)
-
-
-class RepositoryGrantRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    user_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-    repo_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-    base_revision: str = Field(default="HEAD", min_length=1, max_length=200)
-
-
-class ServingProfileActionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    action: Literal["start", "stop"]
-    profile_id: str | None = Field(default=None, pattern=r"^P[0-9]+(?:_[a-z0-9_]+)?$")
-
-
-class ClientPairRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    name: str = Field(min_length=1, max_length=160)
-    capabilities: dict[str, object]
-    device_id: str | None = Field(default=None, pattern=r"^dev_[a-f0-9]{32}$")
-
-
-class ClientHeartbeatRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    capabilities: dict[str, object]
-
-
-class ClientOperationRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    workspace_id: str = Field(pattern=r"^ws-[a-f0-9]{24}$")
-    action: Literal["list", "read", "search", "write", "git", "run"]
-    arguments: dict[str, object] = Field(default_factory=dict)
-
-
-class ClientResultRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    result: dict[str, object]
-    failed: bool = False
-
-
-@dataclass(frozen=True)
-class AuthCredential:
-    role: str
-    user_id: str
-    capability_tier: CapabilityTier
-
-
-@dataclass(frozen=True)
-class AuthPrincipal:
-    role: str
-    user_id: str
-    capability_tier: CapabilityTier
-    credential_sha256: str
-    email: str | None = None
-    display_name: str | None = None
-    default_lane: str = "standard"
-    auth_method: Literal["bearer", "session"] = "bearer"
-    session_identifier: str | None = None
-
-
-class OperatorAuth:
-    """Bearer-role mapping with in-memory, credential-bound CSRF nonces."""
-
-    def __init__(self, token_roles: Mapping[str, str | AuthCredential]) -> None:
-        allowed = {"read", "operate", "approve", "admin"}
-        credentials: dict[str, AuthCredential] = {}
-        for token, value in token_roles.items():
-            binding = (
-                AuthCredential(
-                    role=value,
-                    user_id=f"operator-{value}",
-                    capability_tier=CapabilityTier.OPERATOR,
-                )
-                if isinstance(value, str)
-                else value
-            )
-            if binding.role not in allowed:
-                raise ValueError("invalid Operator Plane role")
-            credentials[token] = binding
-        if any(binding.role not in allowed for binding in credentials.values()):
-            raise ValueError("invalid Operator Plane role")
-        if any(len(token) < 24 for token in token_roles):
-            raise ValueError("Operator Plane tokens must contain at least 24 characters")
-        self._credentials = {
-            hashlib.sha256(token.encode("utf-8")).hexdigest(): binding
-            for token, binding in credentials.items()
-        }
-        self._csrf: dict[str, str] = {}
-
-    def authenticate(self, authorization: str | None) -> AuthPrincipal:
-        if authorization is None or not authorization.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="authentication_required")
-        token = authorization.removeprefix("Bearer ")
-        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        matched_digest: str | None = None
-        binding: AuthCredential | None = None
-        for expected, expected_binding in self._credentials.items():
-            if hmac.compare_digest(digest, expected):
-                matched_digest = expected
-                binding = expected_binding
-        if matched_digest is None or binding is None:
-            raise HTTPException(status_code=401, detail="authentication_failed")
-        return AuthPrincipal(
-            role=binding.role,
-            user_id=binding.user_id,
-            capability_tier=binding.capability_tier,
-            credential_sha256=matched_digest,
-        )
-
-    def issue_csrf(self, principal: AuthPrincipal) -> str:
-        nonce = secrets.token_urlsafe(32)
-        self._csrf[principal.credential_sha256] = nonce
-        return nonce
-
-    def validate_csrf(self, principal: AuthPrincipal, supplied: str | None) -> None:
-        expected = self._csrf.get(principal.credential_sha256)
-        if expected is None or supplied is None or not hmac.compare_digest(expected, supplied):
-            raise HTTPException(status_code=403, detail="csrf_validation_failed")
-
-
-@dataclass(frozen=True)
-class OperatorApiSettings:
-    bind_host: str = "127.0.0.1"
-    port: int = 8765
-    deployment_mode: Literal["local", "ssh-tunnel", "reverse-proxy"] = "local"
-    allowed_origins: tuple[str, ...] = (
-        "http://127.0.0.1:8765",
-        "http://localhost:8765",
-    )
-    allowed_hosts: tuple[str, ...] = ("127.0.0.1", "localhost")
-    trusted_proxies: tuple[str, ...] = ("127.0.0.1", "::1")
-    external_url: str | None = None
-    allow_insecure_lan_http: bool = False
-    bearer_api_enabled: bool = False
-    pwa_enabled: bool = True
-    fixture_mode: bool = False
-    codev_enabled: bool = True
-    maximum_request_bytes: int = 70_000_000
-
-    def __post_init__(self) -> None:
-        if not 1 <= self.port <= 65_535:
-            raise ValueError("invalid Operator Plane port")
-        if not self.allowed_origins:
-            raise ValueError("at least one allowed origin is required")
-        if any(
-            not origin.startswith(("http://", "https://")) or "*" in origin
-            for origin in self.allowed_origins
-        ):
-            raise ValueError("Operator Plane origins must be explicit HTTP origins")
-        if not self.allowed_hosts or any("*" in host or "/" in host for host in self.allowed_hosts):
-            raise ValueError("Operator Plane hosts must be explicit")
-        loopback = self.bind_host in {"127.0.0.1", "localhost", "::1"}
-        if not loopback and not self.allow_insecure_lan_http:
-            raise ValueError("non-loopback direct binding requires --allow-insecure-lan-http")
-        if self.deployment_mode in {"local", "ssh-tunnel", "reverse-proxy"} and not loopback:
-            if not self.allow_insecure_lan_http:
-                raise ValueError("production and tunnel modes require loopback binding")
-        if self.deployment_mode == "reverse-proxy":
-            if self.external_url is None:
-                raise ValueError("reverse-proxy mode requires an external URL")
-            external = urlsplit(self.external_url)
-            if external.scheme != "https" or not external.hostname:
-                raise ValueError("reverse-proxy external URL must use HTTPS")
-            if self.external_url.rstrip("/") not in {
-                origin.rstrip("/") for origin in self.allowed_origins
-            }:
-                raise ValueError("external URL must be an explicit allowed origin")
-        if self.maximum_request_bytes < 1_024:
-            raise ValueError("maximum request body is too small")
-
-    @property
-    def secure_cookie(self) -> bool:
-        return self.deployment_mode == "reverse-proxy"
-
-    @property
-    def development_http(self) -> bool:
-        return self.deployment_mode in {"local", "ssh-tunnel"} and self.bind_host in {
-            "127.0.0.1",
-            "localhost",
-            "::1",
-        }
-
-
-def _is_within(path: Path, root: Path) -> bool:
-    return path == root or root in path.parents
-
-
-def _agent_result_content(result: Mapping[str, object]) -> str:
-    content = result.get("content")
-    if isinstance(content, str) and content.strip():
-        return content[:128_000]
-    summary = result.get("summary")
-    if isinstance(summary, str) and summary.strip():
-        return summary[:128_000]
-    result_id = result.get("result_id")
-    return f"Agent turn completed. Result reference: {result_id or 'unavailable'}"
-
-
-def _public_agent_result(result: Mapping[str, object]) -> JsonObject:
-    """Expose bounded evidence references without server-local artifact paths."""
-
-    public = {
-        key: result.get(key)
-        for key in (
-            "status",
-            "session_id",
-            "repo_id",
-            "model_id",
-            "effective_lane",
-            "content",
-            "changed_paths",
-            "verification",
-            "validation_history",
-            "unresolved_failures",
-            "evidence_refs",
-            "promotion",
-            "truncated",
-            "max_chars",
-            "elapsed_seconds",
-            "telemetry",
-            "result_id",
-            "result_artifacts",
-            "delivery_status",
-            "worktree_release",
-            "retrieval",
-            "agent_conversation_message_id",
-            "agent_conversation_persistence",
-        )
-        if key in result
-    }
-    handoff = result.get("handoff")
-    if isinstance(handoff, Mapping):
-        public["handoff"] = {
-            key: handoff.get(key)
-            for key in ("patch_chars", "patch_sha256", "patch_inline", "patch")
-            if key in handoff
-        }
-    return public
 
 
 def create_operator_app(
@@ -1164,42 +747,7 @@ def create_operator_app(
             "deployment_mode": settings.deployment_mode,
         }
 
-    @app.get("/", response_class=HTMLResponse)
-    async def index() -> HTMLResponse:
-        return HTMLResponse((web_root / "index.html").read_text(encoding="utf-8"))
-
-    @app.get("/assets/{asset_name}")
-    async def asset(asset_name: str) -> Response:
-        allowed = {
-            "app.css": "text/css",
-            "app.js": "text/javascript",
-            "favicon.svg": "image/svg+xml",
-        }
-        if asset_name not in allowed:
-            raise HTTPException(status_code=404)
-        return Response(
-            (web_root / asset_name).read_bytes(),
-            media_type=allowed[asset_name],
-        )
-
-    @app.get("/manifest.webmanifest")
-    async def manifest() -> Response:
-        if not settings.pwa_enabled:
-            raise HTTPException(status_code=404)
-        return Response(
-            (web_root / "manifest.webmanifest").read_bytes(),
-            media_type="application/manifest+json",
-        )
-
-    @app.get("/sw.js")
-    async def service_worker() -> Response:
-        if not settings.pwa_enabled:
-            raise HTTPException(status_code=404)
-        return Response(
-            (web_root / "sw.js").read_bytes(),
-            media_type="text/javascript",
-            headers={"Service-Worker-Allowed": "/"},
-        )
+    register_static_routes(app, web_root=web_root, pwa_enabled=settings.pwa_enabled)
 
     @app.get("/api/v1/health")
     async def health() -> dict[str, object]:
@@ -1425,251 +973,22 @@ def create_operator_app(
             headers={"MCP-Protocol-Version": (mcp_protocol_version or "2025-11-25")},
         )
 
-    @app.post("/api/v1/client/devices/pair")
-    async def pair_client_device(
-        body: ClientPairRequest,
-        authenticated: AuthPrincipal = Depends(client_mutation_principal),
-    ) -> JsonObject:
-        return client_devices.pair(
-            authenticated.user_id,
-            name=body.name,
-            capabilities=body.capabilities,
-            device_id=body.device_id,
-        )
+    register_client_routes(
+        app,
+        client_devices=client_devices,
+        agent_principal=agent_principal,
+        client_mutation_principal=client_mutation_principal,
+    )
 
-    @app.get("/api/v1/client/devices")
-    async def list_client_devices(
-        authenticated: AuthPrincipal = Depends(agent_principal),
-    ) -> JsonObject:
-        return {"devices": client_devices.list_devices(authenticated.user_id)}
-
-    @app.delete("/api/v1/client/devices/{device_id}")
-    async def revoke_client_device(
-        device_id: str,
-        authenticated: AuthPrincipal = Depends(client_mutation_principal),
-    ) -> JsonObject:
-        return client_devices.revoke(authenticated.user_id, device_id)
-
-    @app.post("/api/v1/client/devices/{device_id}/heartbeat")
-    async def client_heartbeat(
-        device_id: str,
-        body: ClientHeartbeatRequest,
-        authenticated: AuthPrincipal = Depends(client_mutation_principal),
-    ) -> JsonObject:
-        return client_devices.heartbeat(
-            authenticated.user_id,
-            device_id,
-            body.capabilities,
-        )
-
-    @app.post("/api/v1/client/devices/{device_id}/operations")
-    async def create_client_operation(
-        device_id: str,
-        body: ClientOperationRequest,
-        authenticated: AuthPrincipal = Depends(client_mutation_principal),
-    ) -> JsonObject:
-        return client_devices.enqueue(
-            authenticated.user_id,
-            device_id,
-            workspace_id=body.workspace_id,
-            action=body.action,
-            arguments=body.arguments,
-        )
-
-    @app.get("/api/v1/client/devices/{device_id}/operations/next")
-    async def next_client_operation(
-        device_id: str,
-        authenticated: AuthPrincipal = Depends(agent_principal),
-    ) -> JsonObject:
-        operation = client_devices.claim(authenticated.user_id, device_id)
-        return {"operation": operation}
-
-    @app.post("/api/v1/client/devices/{device_id}/operations/{operation_id}/result")
-    async def complete_client_operation(
-        device_id: str,
-        operation_id: str,
-        body: ClientResultRequest,
-        authenticated: AuthPrincipal = Depends(client_mutation_principal),
-    ) -> JsonObject:
-        return client_devices.complete(
-            authenticated.user_id,
-            device_id,
-            operation_id,
-            result=body.result,
-            failed=body.failed,
-        )
-
-    @app.get("/api/v1/client/operations/{operation_id}")
-    async def get_client_operation(
-        operation_id: str,
-        authenticated: AuthPrincipal = Depends(agent_principal),
-    ) -> JsonObject:
-        return client_devices.get_operation(authenticated.user_id, operation_id)
-
-    @app.post("/api/v1/client/operations/{operation_id}/cancel")
-    async def cancel_client_operation(
-        operation_id: str,
-        authenticated: AuthPrincipal = Depends(client_mutation_principal),
-    ) -> JsonObject:
-        return client_devices.cancel(authenticated.user_id, operation_id)
-
-    @app.post("/api/v1/auth/login")
-    async def login(body: LoginRequest, request: Request, response: Response) -> JsonObject:
-        _origin_allowed(request)
-        if registered_auth is None:
-            raise HTTPException(status_code=503, detail="registered_email_auth_unavailable")
-        started = time.monotonic()
-        try:
-            session_value = registered_auth.login(
-                body.email,
-                body.password,
-                client_ip=str(getattr(request.state, "client_ip", "unknown")),
-                trace_id=str(request.state.trace_id),
-            )
-        except AuthSessionError as exc:
-            headers = (
-                {"Retry-After": str(max(1, int(exc.retry_after_seconds)))}
-                if exc.retry_after_seconds is not None
-                else None
-            )
-            raise HTTPException(
-                status_code=429 if exc.category == "authentication_rate_limited" else 401,
-                detail="authentication_failed",
-                headers=headers,
-            ) from exc
-        if time.monotonic() - started > 15:
-            registered_auth.sessions.revoke(session_value.identifier)
-            raise HTTPException(status_code=408, detail="authentication_timeout")
-        _set_session_cookie(response, session_value.identifier)
-        return _session_response(session_value)
-
-    @app.post("/api/v1/auth/activate")
-    async def activate(
-        body: ActivationRequest,
-        request: Request,
-        response: Response,
-    ) -> JsonObject:
-        _origin_allowed(request)
-        if registered_auth is None:
-            raise HTTPException(status_code=503, detail="registered_email_auth_unavailable")
-        try:
-            session_value = registered_auth.activate(
-                body.email,
-                body.activation_code,
-                body.new_password,
-                client_ip=str(getattr(request.state, "client_ip", "unknown")),
-                trace_id=str(request.state.trace_id),
-            )
-        except (AuthSessionError, AuthRegistryError) as exc:
-            raise HTTPException(status_code=401, detail="authentication_failed") from exc
-        _set_session_cookie(response, session_value.identifier)
-        return _session_response(session_value)
-
-    @app.get("/api/v1/auth/session")
-    async def browser_session(
-        request: Request,
-    ) -> JsonObject:
-        if registered_auth is None:
-            raise HTTPException(status_code=503, detail="registered_email_auth_unavailable")
-        identifier = request.cookies.get("laplace_session")
-        if identifier is None:
-            return {
-                "status": "SIGNED_OUT",
-                "development_http": settings.development_http,
-                "deployment_mode": settings.deployment_mode,
-            }
-        try:
-            record = registered_auth.sessions.resolve(
-                identifier,
-                registered_auth.registry,
-            )
-            csrf = registered_auth.sessions.rotate_csrf(identifier)
-            user = registered_auth.registry.require_user(record.user_id)
-        except (AuthSessionError, AuthRegistryError) as exc:
-            raise HTTPException(status_code=401, detail="authentication_required") from exc
-        return {
-            "status": "AUTHENTICATED",
-            "account": user.public(),
-            "role": user.role,
-            "capability_tier": user.capability_tier.value,
-            "default_lane": user.default_lane,
-            "csrf_token": csrf,
-            "development_http": settings.development_http,
-            "deployment_mode": settings.deployment_mode,
-        }
-
-    @app.post("/api/v1/auth/logout")
-    async def logout(
-        response: Response,
-        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
-    ) -> JsonObject:
-        if authenticated.auth_method == "session" and registered_auth is not None:
-            if authenticated.session_identifier is not None:
-                registered_auth.sessions.revoke(authenticated.session_identifier)
-            registered_auth.audit.append(
-                "LOGOUT",
-                outcome="SUCCESS",
-                user_id=authenticated.user_id,
-            )
-        response.delete_cookie(
-            "laplace_session",
-            path="/",
-            secure=settings.secure_cookie,
-            httponly=True,
-            samesite="strict",
-        )
-        return {"status": "SIGNED_OUT"}
-
-    @app.post("/api/v1/auth/logout-all")
-    async def logout_all(
-        response: Response,
-        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
-    ) -> JsonObject:
-        if registered_auth is None:
-            raise HTTPException(status_code=503, detail="registered_email_auth_unavailable")
-        count = registered_auth.sessions.revoke_user(authenticated.user_id)
-        registered_auth.audit.append(
-            "LOGOUT_ALL",
-            outcome="SUCCESS",
-            user_id=authenticated.user_id,
-        )
-        response.delete_cookie(
-            "laplace_session",
-            path="/",
-            secure=settings.secure_cookie,
-            httponly=True,
-            samesite="strict",
-        )
-        return {"status": "SESSIONS_REVOKED", "count": count}
-
-    @app.post("/api/v1/auth/change-password")
-    async def change_password(
-        body: PasswordChangeRequest,
-        response: Response,
-        request: Request,
-        authenticated: AuthPrincipal = Depends(tier_mutation_principal),
-    ) -> JsonObject:
-        if (
-            registered_auth is None
-            or authenticated.auth_method != "session"
-            or authenticated.session_identifier is None
-        ):
-            raise HTTPException(status_code=401, detail="browser_session_required")
-        record = registered_auth.sessions.resolve(
-            authenticated.session_identifier,
-            registered_auth.registry,
-        )
-        try:
-            session_value = registered_auth.change_password(
-                record,
-                body.current_password,
-                body.new_password,
-                trace_id=str(request.state.trace_id),
-            )
-        except (AuthSessionError, AuthRegistryError) as exc:
-            raise HTTPException(status_code=401, detail="authentication_failed") from exc
-        _set_session_cookie(response, session_value.identifier)
-        return _session_response(session_value)
+    register_auth_routes(
+        app,
+        settings=settings,
+        registered_auth=registered_auth,
+        tier_mutation_principal=tier_mutation_principal,
+        origin_allowed=_origin_allowed,
+        set_session_cookie=_set_session_cookie,
+        session_response=_session_response,
+    )
 
     @app.post("/api/v1/session")
     async def session(
@@ -1732,7 +1051,7 @@ def create_operator_app(
             **summary,
             "model_servers": model_status,
             "research_jobs": (
-                _research_summaries(research.layout.research_jobs) if research is not None else []
+                research_summaries(research.layout.research_jobs) if research is not None else []
             ),
             "warnings": (
                 ["Insecure non-loopback HTTP override is active"]
@@ -1771,87 +1090,16 @@ def create_operator_app(
             }
         return result
 
-    @app.post("/api/v1/runs")
-    async def prepare_run(
-        body: RunPrepareRequest,
-        authenticated: AuthPrincipal = Depends(mutation_principal),
-    ) -> dict[str, object]:
-        return operator.prepare_run(
-            body.configuration,
-            actor_role=authenticated.role,
-            run_id=body.run_id,
-        )
-
-    @app.get("/api/v1/runs/{run_id}")
-    async def get_run(
-        run_id: str,
-        authenticated: AuthPrincipal = Depends(operator_principal),
-    ) -> dict[str, object]:
-        return operator.get_run(run_id, actor_role=authenticated.role)
-
-    @app.post("/api/v1/runs/{run_id}/start")
-    async def start_run(
-        run_id: str,
-        body: StartRunRequest,
-        authenticated: AuthPrincipal = Depends(mutation_principal),
-    ) -> dict[str, object]:
-        return operator.start_run(
-            run_id,
-            approval_id=body.approval_id,
-            actor_role=authenticated.role,
-            executor=run_executor,
-        )
-
-    @app.post("/api/v1/approvals")
-    async def request_approval(
-        body: ApprovalRequest,
-        authenticated: AuthPrincipal = Depends(mutation_principal),
-    ) -> dict[str, object]:
-        return operator.request_approval(
-            body.action,
-            body.entity_id,
-            body.payload,
-            actor_role=authenticated.role,
-        )
-
-    @app.get("/api/v1/approvals")
-    async def list_approvals(
-        authenticated: AuthPrincipal = Depends(operator_principal),
-        state: str | None = Query(default=None),
-    ) -> dict[str, object]:
-        return {
-            "status": "OK",
-            "approvals": operator.approvals(actor_role=authenticated.role, state=state),
-        }
-
-    @app.post("/api/v1/approvals/{approval_id}/decision")
-    async def decide_approval(
-        approval_id: str,
-        body: ApprovalDecisionRequest,
-        authenticated: AuthPrincipal = Depends(mutation_principal),
-    ) -> dict[str, object]:
-        return operator.decide_approval(
-            approval_id,
-            approve=body.approve,
-            actor_role=authenticated.role,
-        )
-
-    @app.post("/api/v1/model-servers/action")
-    async def model_server_action(
-        body: ModelServerActionRequest,
-        authenticated: AuthPrincipal = Depends(model_admin_mutation_principal),
-    ) -> dict[str, object]:
-        return operator.model_server_action(
-            body.action,
-            approval_id=body.approval_id,
-            actor_role=authenticated.role,
-        )
-
-    @app.get("/api/v1/model-servers/status")
-    async def model_server_status(
-        authenticated: AuthPrincipal = Depends(model_admin_principal),
-    ) -> dict[str, object]:
-        return sanitized_model_status(authenticated.role)
+    register_run_routes(
+        app,
+        operator=operator,
+        run_executor=run_executor,
+        operator_principal=operator_principal,
+        mutation_principal=mutation_principal,
+        model_admin_principal=model_admin_principal,
+        model_admin_mutation_principal=model_admin_mutation_principal,
+        sanitized_model_status=sanitized_model_status,
+    )
 
     @app.post("/api/v1/research/jobs")
     async def create_research(
@@ -1945,7 +1193,7 @@ def create_operator_app(
         result = research.get(job_id).model_dump(mode="json")
         if admission is not None:
             result["admission"] = admission
-        sanitized = _sanitize_research_payload(result)
+        sanitized = sanitize_research_payload(result)
         if not isinstance(sanitized, dict):
             raise HTTPException(status_code=500, detail="research_record_invalid")
         return sanitized
@@ -1965,12 +1213,12 @@ def create_operator_app(
             raise HTTPException(status_code=409, detail="research_job_not_complete")
         return {
             "status": "OK",
-            "job": _sanitize_research_payload(job.model_dump(mode="json")),
+            "job": sanitize_research_payload(job.model_dump(mode="json")),
             "report_markdown": (root / "report.md").read_text(encoding="utf-8"),
-            "evidence_ledger": _sanitize_research_payload(
+            "evidence_ledger": sanitize_research_payload(
                 json.loads((root / "evidence_ledger.json").read_text(encoding="utf-8"))
             ),
-            "claim_source_graph": _sanitize_research_payload(
+            "claim_source_graph": sanitize_research_payload(
                 json.loads((root / "claim_source_graph.json").read_text(encoding="utf-8"))
             ),
         }
@@ -2062,9 +1310,10 @@ def create_operator_app(
         path: str,
         authenticated: AuthPrincipal = Depends(operator_principal),
     ) -> dict[str, object]:
-        artifact = _safe_artifact_path(
+        artifact = safe_artifact_path(
             path,
-            operator,
+            state_root=operator.state_root,
+            repository_root=operator.repository_root,
             allow_sensitive=authenticated.role == "admin",
         )
         data = artifact.read_bytes()
@@ -2085,9 +1334,10 @@ def create_operator_app(
         path: str,
         authenticated: AuthPrincipal = Depends(operator_principal),
     ) -> FileResponse:
-        artifact = _safe_artifact_path(
+        artifact = safe_artifact_path(
             path,
-            operator,
+            state_root=operator.state_root,
+            repository_root=operator.repository_root,
             allow_sensitive=authenticated.role == "admin",
         )
         return FileResponse(
@@ -3164,6 +2414,11 @@ def create_operator_app(
                 allow_mutation=body.allow_mutation,
                 wait_timeout_seconds=body.wait_timeout_seconds,
                 task_label=derive_task_label(body.instruction),
+                task_complexity=(
+                    body.manager_complexity.as_task_complexity()
+                    if body.manager_complexity is not None
+                    else None
+                ),
             )
         else:
             result = await run_in_threadpool(
@@ -3179,6 +2434,11 @@ def create_operator_app(
                 allow_mutation=body.allow_mutation,
                 wait_timeout_seconds=body.wait_timeout_seconds,
                 task_label=derive_task_label(body.instruction),
+                task_complexity=(
+                    body.manager_complexity.as_task_complexity()
+                    if body.manager_complexity is not None
+                    else None
+                ),
             )
         result["retrieval"] = retrieval
         return result
@@ -3209,7 +2469,7 @@ def create_operator_app(
                     authenticated.user_id,
                     session_id,
                     role="assistant",
-                    content=_agent_result_content(result),
+                    content=agent_result_content(result),
                     metadata=metadata,
                 )
                 result["agent_conversation_message_id"] = message["message_id"]
@@ -3219,7 +2479,7 @@ def create_operator_app(
                     extra={"session_id": session_id},
                 )
                 result["agent_conversation_persistence"] = "FAILED_AFTER_DURABLE_RESULT"
-        return _public_agent_result(result)
+        return public_agent_result(result)
 
     @app.post("/api/v1/agent/sessions/{session_id}/run")
     @app.post("/api/v1/agent/sessions/{session_id}/messages")
@@ -4070,110 +3330,3 @@ def create_operator_app(
         }
 
     return app
-
-
-def _research_summaries(root: Path) -> list[dict[str, object]]:
-    summaries: list[dict[str, object]] = []
-    if not root.is_dir():
-        return summaries
-    for path in sorted(root.glob("*/job.json"), reverse=True)[:20]:
-        try:
-            value: object = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(value, dict):
-            summaries.append(
-                {
-                    key: value.get(key)
-                    for key in (
-                        "research_job_id",
-                        "question",
-                        "research_mode",
-                        "status",
-                        "current_stage",
-                        "created_at",
-                    )
-                }
-            )
-    return summaries
-
-
-def _sanitize_research_payload(value: object) -> object:
-    """Remove server paths from research records while preserving cited evidence."""
-
-    if isinstance(value, list):
-        return [_sanitize_research_payload(item) for item in value]
-    if not isinstance(value, dict):
-        return value
-    sanitized: dict[str, object] = {}
-    for raw_key, item in value.items():
-        key = str(raw_key)
-        if key in {"local_snapshot_path", "report_path", "evidence_ledger_path"}:
-            continue
-        if key == "canonical_url" and isinstance(item, str) and item.startswith("file:"):
-            sanitized[key] = "local-document://authorized-source"
-            continue
-        sanitized[key] = _sanitize_research_payload(item)
-    return sanitized
-
-
-def _git_revision(repository_root: Path) -> str:
-    """Return a sanitized immutable revision without surfacing Git stderr."""
-
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(repository_root.resolve()), "rev-parse", "--verify", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return "unavailable"
-    revision = completed.stdout.strip().lower()
-    if len(revision) == 40 and all(character in "0123456789abcdef" for character in revision):
-        return revision
-    return "unavailable"
-
-
-def _safe_artifact_path(
-    relative_path: str,
-    operator: OperatorService,
-    *,
-    allow_sensitive: bool,
-) -> Path:
-    if "\x00" in relative_path or Path(relative_path).is_absolute():
-        raise HTTPException(status_code=400, detail="invalid_artifact_path")
-    if relative_path.startswith("outputs/"):
-        candidate = (operator.repository_root / relative_path).resolve()
-    else:
-        candidate = (operator.state_root / relative_path).resolve()
-    roots = (
-        operator.state_root.resolve(),
-        (operator.repository_root / "outputs").resolve(),
-    )
-    if not any(_is_within(candidate, root) for root in roots) or not candidate.is_file():
-        raise HTTPException(status_code=404, detail="artifact_not_found")
-    lowered = {part.lower() for part in candidate.parts}
-    forbidden = {"held_out", "held-out", "secrets", "credentials", "prompts"}
-    if not allow_sensitive and lowered.intersection(forbidden):
-        raise HTTPException(status_code=403, detail="artifact_access_forbidden")
-    allowed_suffixes = {
-        ".json",
-        ".jsonl",
-        ".md",
-        ".html",
-        ".txt",
-        ".log",
-        ".sv",
-        ".v",
-        ".zip",
-        ".gz",
-        ".tar",
-        ".bib",
-    }
-    if candidate.suffix.lower() not in allowed_suffixes:
-        raise HTTPException(status_code=403, detail="artifact_type_forbidden")
-    if candidate.stat().st_size > 256_000_000:
-        raise HTTPException(status_code=413, detail="artifact_too_large")
-    return candidate

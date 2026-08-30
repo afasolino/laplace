@@ -4,7 +4,8 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import asdict, dataclass
+import time
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Final
 
@@ -27,6 +28,7 @@ class TaskOutcomeEvidence:
     project_id: str
     outcome: str
     roles: tuple[str, ...] = ()
+    model_ids: tuple[str, ...] = ()
     runtime_profiles: tuple[str, ...] = ()
     manager_decision: str = "unknown"
     specialist_decision: str = "unknown"
@@ -38,6 +40,7 @@ class TaskOutcomeEvidence:
     reported_input_tokens: int | None = None
     reported_output_tokens: int | None = None
     wall_time_ms: int | None = None
+    publication_sequence: int = 0
     schema_version: int = _SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -52,14 +55,29 @@ class TaskOutcomeEvidence:
             raise ValueError("task_evidence_schema_unsupported")
         if not isinstance(self.outcome, str) or not self.outcome or len(self.outcome) > _MAX_TEXT:
             raise ValueError("outcome_invalid")
-        for sequence in (self.roles, self.runtime_profiles, self.failure_classes, self.context_refs):
+        for sequence in (
+            self.roles,
+            self.model_ids,
+            self.runtime_profiles,
+            self.failure_classes,
+            self.context_refs,
+        ):
             if not isinstance(sequence, tuple) or len(sequence) > _MAX_LIST_ITEMS:
                 raise ValueError("evidence_list_invalid")
         if len(self.failure_classes) > _MAX_FAILURES:
             raise ValueError("too_many_failure_classes")
-        for seq in (self.roles, self.runtime_profiles, self.failure_classes, self.context_refs):
+        for seq in (
+            self.roles,
+            self.model_ids,
+            self.runtime_profiles,
+            self.failure_classes,
+            self.context_refs,
+        ):
             if any(not isinstance(value, str) or not value or len(value) > _MAX_TEXT for value in seq):
                 raise ValueError("evidence_text_invalid")
+        for decision in (self.manager_decision, self.specialist_decision):
+            if not isinstance(decision, str) or not decision or len(decision) > _MAX_TEXT:
+                raise ValueError("evidence_decision_invalid")
         if self.verifier_digest and (
             not isinstance(self.verifier_digest, str) or len(self.verifier_digest) > 128
         ):
@@ -75,6 +93,12 @@ class TaskOutcomeEvidence:
                 isinstance(count, bool) or not isinstance(count, int) or count < 0
             ):
                 raise ValueError("evidence_count_negative")
+        if (
+            isinstance(self.publication_sequence, bool)
+            or not isinstance(self.publication_sequence, int)
+            or self.publication_sequence < 0
+        ):
+            raise ValueError("publication_sequence_invalid")
 
 
 class TaskEvidenceStore:
@@ -88,29 +112,65 @@ class TaskEvidenceStore:
         directory = self.root / evidence.owner_id / evidence.project_id
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{evidence.task_id}.json"
-        if path.exists():
-            raise FileExistsError("task_evidence_already_exists")
-        payload = json.dumps(
-            asdict(evidence), sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-        if len(payload) > _MAX_RECORD_BYTES:
-            raise ValueError("task_evidence_record_too_large")
-        temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        lock = self._acquire_publication_lock(directory)
         try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            # Hard-linking the fully written temporary file gives an atomic
-            # no-overwrite publication on filesystems that support links.
-            # A concurrent writer therefore cannot replace an immutable record.
-            os.link(temp, path)
-            temp.unlink()
-        except BaseException:
-            temp.unlink(missing_ok=True)
-            raise
+            if path.exists():
+                raise FileExistsError("task_evidence_already_exists")
+            published = replace(
+                evidence,
+                publication_sequence=self._next_publication_sequence(directory),
+            )
+            payload = json.dumps(
+                asdict(published), sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+            if len(payload) > _MAX_RECORD_BYTES:
+                raise ValueError("task_evidence_record_too_large")
+            temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                # Hard-linking the fully written temporary file gives an atomic
+                # no-overwrite publication on filesystems that support links.
+                # A concurrent writer therefore cannot replace an immutable record.
+                os.link(temp, path)
+                temp.unlink()
+            except BaseException:
+                temp.unlink(missing_ok=True)
+                raise
+        finally:
+            lock.unlink(missing_ok=True)
         return path
+
+    @staticmethod
+    def _acquire_publication_lock(directory: Path) -> Path:
+        lock = directory / ".publication.lock"
+        for _ in range(100):
+            try:
+                descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                time.sleep(0.01)
+                continue
+            os.close(descriptor)
+            return lock
+        raise TaskEvidenceError("task_evidence_publication_busy")
+
+    def _next_publication_sequence(self, directory: Path) -> int:
+        sequences = []
+        for path in directory.glob("*.json"):
+            if not path.is_file():
+                continue
+            evidence = self.load(
+                owner_id=directory.parent.name,
+                project_id=directory.name,
+                task_id=path.stem,
+            )
+            if evidence.publication_sequence < 1:
+                raise TaskEvidenceError("task_evidence_legacy_chronology_unknown")
+            sequences.append(evidence.publication_sequence)
+        return max(sequences, default=0) + 1
 
     def load(self, *, owner_id: str, project_id: str, task_id: str) -> TaskOutcomeEvidence:
         for identifier in (owner_id, project_id, task_id):
@@ -126,8 +186,8 @@ class TaskEvidenceStore:
             raw = dict(raw_value)
             if raw.get("schema_version") != _SCHEMA_VERSION:
                 raise TaskEvidenceError("task_evidence_schema_unsupported")
-            for key in ("roles", "runtime_profiles", "failure_classes", "context_refs"):
-                sequence = raw.get(key, ())
+            for key in ("roles", "model_ids", "runtime_profiles", "failure_classes", "context_refs"):
+                sequence = raw.get(key, [])
                 if not isinstance(sequence, list):
                     raise TaskEvidenceError("task_evidence_corrupt")
                 raw[key] = tuple(sequence)
@@ -151,13 +211,16 @@ class TaskEvidenceStore:
             raise ValueError("evidence_scope_invalid")
         directory = self.root / owner_id / project_id
         try:
-            task_ids = sorted(path.stem for path in directory.glob("*.json") if path.is_file())[-limit:]
+            records = [
+                self.load(owner_id=owner_id, project_id=project_id, task_id=path.stem)
+                for path in directory.glob("*.json")
+                if path.is_file()
+            ]
         except OSError as exc:
             raise TaskEvidenceError("task_evidence_corrupt") from exc
-        return tuple(
-            self.load(owner_id=owner_id, project_id=project_id, task_id=task_id)
-            for task_id in task_ids
-        )
+        if any(record.publication_sequence < 1 for record in records):
+            raise TaskEvidenceError("task_evidence_legacy_chronology_unknown")
+        return tuple(sorted(records, key=lambda record: record.publication_sequence)[-limit:])
 
 
 def recent_evidence_for_policy(

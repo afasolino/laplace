@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import cast
 from urllib.parse import urlsplit
 
-from .engineering import EngineeringError, JsonObject, _write_json_atomic
+from .engineering import EngineeringError, JsonObject, write_json_atomic
 from .model_routing import load_dual_model_configuration
 
 
@@ -720,7 +720,7 @@ def write_artifact_manifest(experiment_root: Path, artifact_id: str) -> Path:
     ]
     if not files:
         raise EngineeringError("Cannot manifest an empty model artifact")
-    _write_json_atomic(
+    write_json_atomic(
         manifest,
         {
             "schema_version": 1,

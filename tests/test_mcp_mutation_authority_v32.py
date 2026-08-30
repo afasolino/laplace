@@ -1,9 +1,7 @@
 from pathlib import Path
 from typing import cast
 
-import pytest
-
-from research_workspace.zetsu_mcp import ZetsuError, ZetsuService, tool_definitions
+from research_workspace.zetsu_mcp import ZetsuService, tool_definitions
 from research_workspace.laplace_core import LaplaceCore
 
 
@@ -48,11 +46,11 @@ def test_agent_task_defaults_read_only() -> None:
     assert agent.calls[-1]["allow_mutation"] is False
 
 
-def test_agent_task_write_requires_verifier() -> None:
+def test_agent_task_write_without_verifier_is_an_unverified_candidate() -> None:
     agent = Agent()
-    with pytest.raises(ZetsuError, match="agent_mutation_requires_verifier"):
-        service(agent).call(
-            "user-a", "agent_task",
-            {"repo_id": "repo", "instruction": "edit", "allow_mutation": True},
-        )
-    assert not agent.calls
+    service(agent).call(
+        "user-a", "agent_task",
+        {"repo_id": "repo", "instruction": "edit", "allow_mutation": True},
+    )
+    assert agent.calls[-1]["allow_mutation"] is True
+    assert agent.calls[-1]["verification_argv"] is None
