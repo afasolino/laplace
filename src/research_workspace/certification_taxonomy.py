@@ -58,6 +58,7 @@ tests/test_personal_corpus_v6.py tests/test_production_model_selection.py tests/
 tests/test_providers_v7.py tests/test_quality_targeted.py tests/test_qwen38_certification.py
 tests/test_qwen38_deployment_templates.py tests/test_qwen38_prequantized_metadata.py
 tests/test_qwen38_prequantized_policy.py tests/test_qwen38_profiles.py tests/test_qwen38_quantization.py
+tests/test_qwen38_mtp_benchmark.py
 tests/test_release_certification_v7.py tests/test_release_v7.py tests/test_reliability_v7.py
 tests/test_repository_context_g4.py tests/test_repository_lifecycle_fix.py tests/test_reproducibility.py
 tests/test_research_plane.py tests/test_research_web_adapters.py tests/test_rtl_worker_correction_evidence.py

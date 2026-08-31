@@ -11,6 +11,7 @@ from typing import Literal, Mapping, Sequence, TypeAlias
 from urllib.parse import urlsplit
 
 JsonObject: TypeAlias = dict[str, object]
+KVCacheDType: TypeAlias = Literal["auto", "fp8", "fp8_per_token_head"]
 
 
 class ServingProfileError(RuntimeError):
@@ -58,7 +59,7 @@ class ServingProfile:
     max_model_len: int
     max_num_seqs: int
     max_num_batched_tokens: int
-    kv_cache_dtype: Literal["auto", "fp8"]
+    kv_cache_dtype: KVCacheDType
     kv_cache_memory_bytes: int | None
     enable_prefix_caching: bool
     prefix_hash_algorithm: Literal["sha256", "sha256_cbor_64bit"]
@@ -95,6 +96,8 @@ class ServingProfile:
             raise ValueError("max_num_batched_tokens is too small")
         if not 0 < self.gpu_memory_utilization < 1:
             raise ValueError("gpu_memory_utilization must be between zero and one")
+        if self.kv_cache_memory_bytes is not None and self.kv_cache_memory_bytes <= 0:
+            raise ValueError("kv_cache_memory_bytes must be positive")
         if self.cpu_offload_gb < 0 or self.kv_offloading_size is not None and self.kv_offloading_size <= 0:
             raise ValueError("offload sizes must be positive")
         if self.cpu_offload_params and self.cpu_offload_gb <= 0:

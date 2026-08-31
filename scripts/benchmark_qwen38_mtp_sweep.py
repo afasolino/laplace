@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 import hashlib
 import json
 import math
@@ -38,6 +40,8 @@ VLLM = ROOT / ".venv-vllm-cu129/bin/vllm"
 FFMPEG = ROOT / ".runtime/ffmpeg7/lib"
 BASE_PROFILE = ROOT / "configs/serving_profile_candidates/P7_qwen38_w4a16_mtp.json"
 DEFAULT_KS = tuple(range(3, 11))
+KV_CACHE_DTYPES = ("auto", "fp8", "fp8_per_token_head")
+MAMBA_CACHE_DTYPES = ("auto", "bfloat16", "float16", "float32")
 WORKLOAD = (
     "This is frozen local context for a deterministic speculative-decoding throughput "
     "measurement. Preserve the context but do not summarize it. "
@@ -57,6 +61,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--timed-runs", type=int, default=3)
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--gpu-memory-utilization", type=float, default=None)
+    parser.add_argument("--kv-cache-dtype", choices=KV_CACHE_DTYPES, default=None)
+    parser.add_argument("--kv-cache-memory-bytes", type=int, default=None)
+    parser.add_argument("--mamba-cache-dtype", choices=MAMBA_CACHE_DTYPES, default=None)
+    parser.add_argument("--mamba-ssm-cache-dtype", choices=MAMBA_CACHE_DTYPES, default=None)
+    parser.add_argument(
+        "--calculate-kv-scales",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    parser.add_argument("--concurrency", type=int, default=1)
+    parser.add_argument("--max-num-seqs", type=int, default=None)
+    parser.add_argument("--max-num-batched-tokens", type=int, default=None)
     return parser
 
 
@@ -73,6 +89,74 @@ def _profile(path: Path) -> ServingProfile:
     if not isinstance(raw, dict):
         raise RuntimeError("candidate_profile_malformed")
     return ServingProfile.from_mapping(raw)
+
+
+def _strip_extra_options(
+    extra_args: tuple[str, ...],
+    flags: tuple[str, ...],
+) -> tuple[str, ...]:
+    return tuple(
+        argument
+        for argument in extra_args
+        if not any(argument == flag or argument.startswith(flag + "=") for flag in flags)
+    )
+
+
+def _apply_profile_overrides(
+    base: ServingProfile,
+    *,
+    gpu_memory_utilization: float | None,
+    kv_cache_dtype: str | None,
+    kv_cache_memory_bytes: int | None,
+    mamba_cache_dtype: str | None,
+    mamba_ssm_cache_dtype: str | None,
+    calculate_kv_scales: bool | None,
+    max_num_seqs: int | None,
+    max_num_batched_tokens: int | None,
+) -> ServingProfile:
+    profile = base
+    if gpu_memory_utilization is not None:
+        profile = replace(profile, gpu_memory_utilization=gpu_memory_utilization)
+    if kv_cache_dtype is not None:
+        if kv_cache_dtype not in KV_CACHE_DTYPES:
+            raise RuntimeError("unsupported_step_b_kv_cache_dtype")
+        profile = replace(profile, kv_cache_dtype=kv_cache_dtype)
+    if kv_cache_memory_bytes is not None:
+        profile = replace(profile, kv_cache_memory_bytes=kv_cache_memory_bytes)
+    if max_num_seqs is not None:
+        profile = replace(profile, max_num_seqs=max_num_seqs)
+    if max_num_batched_tokens is not None:
+        profile = replace(profile, max_num_batched_tokens=max_num_batched_tokens)
+
+    extra = profile.extra_args
+    if mamba_cache_dtype is not None:
+        if mamba_cache_dtype not in MAMBA_CACHE_DTYPES:
+            raise RuntimeError("unsupported_mamba_cache_dtype")
+        extra = _strip_extra_options(extra, ("--mamba-cache-dtype",))
+        extra += (f"--mamba-cache-dtype={mamba_cache_dtype}",)
+    if mamba_ssm_cache_dtype is not None:
+        if mamba_ssm_cache_dtype not in MAMBA_CACHE_DTYPES:
+            raise RuntimeError("unsupported_mamba_ssm_cache_dtype")
+        extra = _strip_extra_options(extra, ("--mamba-ssm-cache-dtype",))
+        extra += (f"--mamba-ssm-cache-dtype={mamba_ssm_cache_dtype}",)
+    if calculate_kv_scales is not None:
+        if profile.kv_cache_dtype != "fp8":
+            raise RuntimeError("calculate_kv_scales_requires_fp8")
+        extra = _strip_extra_options(
+            extra,
+            ("--calculate-kv-scales", "--no-calculate-kv-scales"),
+        )
+        extra += (
+            "--calculate-kv-scales"
+            if calculate_kv_scales
+            else "--no-calculate-kv-scales",
+        )
+
+    return replace(profile, extra_args=extra)
+
+
+def _status_return_code(status: str) -> int:
+    return 0 if status == "PASS" else 2
 
 
 def _capabilities(vllm: Path, ffmpeg: Path) -> InstalledServingCapabilities:
@@ -194,6 +278,65 @@ def _request(
     }
 
 
+def _concurrent_round(
+    clients: Sequence[httpx.Client],
+    endpoint: str,
+    model: str,
+    *,
+    max_tokens: int,
+) -> dict[str, object]:
+    if not clients:
+        raise RuntimeError("concurrent_round_requires_client")
+    started = time.monotonic()
+    if len(clients) == 1:
+        requests = [
+            _request(
+                clients[0],
+                endpoint,
+                model,
+                max_tokens=max_tokens,
+            )
+        ]
+    else:
+        with ThreadPoolExecutor(max_workers=len(clients)) as executor:
+            futures = [
+                executor.submit(
+                    _request,
+                    client,
+                    endpoint,
+                    model,
+                    max_tokens=max_tokens,
+                )
+                for client in clients
+            ]
+            requests = [future.result() for future in futures]
+    elapsed = time.monotonic() - started
+    completion_tokens = [
+        item["completion_tokens"]
+        for item in requests
+        if isinstance(item.get("completion_tokens"), int)
+    ]
+    total_completion_tokens = sum(completion_tokens)
+    status = (
+        "PASS"
+        if len(completion_tokens) == len(clients)
+        and all(item.get("status") == "PASS" for item in requests)
+        else "FAIL"
+    )
+    return {
+        "status": status,
+        "concurrency": len(clients),
+        "elapsed_seconds": elapsed,
+        "aggregate_completion_tokens": total_completion_tokens,
+        "aggregate_completion_tok_s": (
+            total_completion_tokens / elapsed
+            if status == "PASS" and elapsed > 0
+            else None
+        ),
+        "requests": requests,
+    }
+
+
 def _kv_cache_gib(log: str) -> float | None:
     matches = re.findall(r"Available KV cache memory:\s*([0-9.]+)\s*GiB", log)
     return float(matches[-1]) if matches else None
@@ -209,6 +352,7 @@ def _workpoint(
     ffmpeg: Path,
     timed_runs: int,
     max_tokens: int,
+    concurrency: int,
 ) -> dict[str, object]:
     base_extra = tuple(
         arg for arg in base.extra_args if not arg.startswith("--speculative-config=")
@@ -245,8 +389,15 @@ def _workpoint(
         owned = runtime.start(resolved)
         readiness = runtime.wait_ready(resolved)
         endpoint = endpoint_for(profile)
-        with httpx.Client(timeout=httpx.Timeout(profile.request_timeout)) as client:
-            tokenized = client.post(
+        with ExitStack() as stack:
+            clients = [
+                stack.enter_context(
+                    httpx.Client(timeout=httpx.Timeout(profile.request_timeout))
+                )
+                for _ in range(concurrency)
+            ]
+            control = clients[0]
+            tokenized = control.post(
                 endpoint + "/tokenize",
                 json={
                     "model": profile.served_model_name,
@@ -257,43 +408,63 @@ def _workpoint(
             tokenized.raise_for_status()
             token_value: object = tokenized.json()
             prompt_tokens = token_value.get("count") if isinstance(token_value, dict) else None
-            metrics_before = _mtp_counters(client.get(endpoint + "/metrics").text)
-            warmup = _request(
-                client,
+            metrics_before = _mtp_counters(control.get(endpoint + "/metrics").text)
+            warmup = _concurrent_round(
+                clients,
                 endpoint,
                 profile.served_model_name,
                 max_tokens=max_tokens,
             )
-            runs = [
-                _request(
-                    client,
+            rounds = [
+                _concurrent_round(
+                    clients,
                     endpoint,
                     profile.served_model_name,
                     max_tokens=max_tokens,
                 )
                 for _ in range(timed_runs)
             ]
-            metrics_after = _mtp_counters(client.get(endpoint + "/metrics").text)
+            metrics_after = _mtp_counters(control.get(endpoint + "/metrics").text)
         counters = _counter_delta(metrics_after, metrics_before)
+        runs = [
+            request
+            for round_result in rounds
+            for request in round_result["requests"]
+            if isinstance(request, dict)
+        ]
         rates = [item["output_tok_s"] for item in runs]
         ttfts = [item["ttft_seconds"] for item in runs]
+        aggregate_rates = [item["aggregate_completion_tok_s"] for item in rounds]
         valid_rates = [value for value in rates if isinstance(value, float)]
         valid_ttfts = [value for value in ttfts if isinstance(value, float)]
+        valid_aggregate_rates = [
+            value for value in aggregate_rates if isinstance(value, float)
+        ]
+        expected_requests = timed_runs * concurrency
         result.update(
             {
                 "status": (
                     "PASS"
                     if warmup["status"] == "PASS"
-                    and len(valid_rates) == timed_runs
+                    and len(valid_rates) == expected_requests
+                    and len(valid_aggregate_rates) == timed_runs
+                    and all(item["status"] == "PASS" for item in rounds)
                     and (k == 0 or counters["draft_tokens"] > 0 and counters["drafts"] > 0)
                     else "FAILED"
                 ),
                 "owned_pid": owned.pid,
                 "readiness": readiness,
                 "prompt_tokens": prompt_tokens,
+                "concurrency": concurrency,
                 "warmup": warmup,
+                "rounds": rounds,
                 "runs": runs,
                 "median_output_tok_s": statistics.median(valid_rates) if valid_rates else None,
+                "median_aggregate_completion_tok_s": (
+                    statistics.median(valid_aggregate_rates)
+                    if valid_aggregate_rates
+                    else None
+                ),
                 "median_ttft_seconds": statistics.median(valid_ttfts) if valid_ttfts else None,
                 "mtp": {
                     **counters,
@@ -365,8 +536,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     output = arguments.output_root.resolve()
     output.mkdir(parents=True, exist_ok=False)
     base = _profile(arguments.profile.resolve(strict=True))
-    if arguments.gpu_memory_utilization is not None:
-        base = replace(base, gpu_memory_utilization=arguments.gpu_memory_utilization)
+    base = _apply_profile_overrides(
+        base,
+        gpu_memory_utilization=arguments.gpu_memory_utilization,
+        kv_cache_dtype=arguments.kv_cache_dtype,
+        kv_cache_memory_bytes=arguments.kv_cache_memory_bytes,
+        mamba_cache_dtype=arguments.mamba_cache_dtype,
+        mamba_ssm_cache_dtype=arguments.mamba_ssm_cache_dtype,
+        calculate_kv_scales=arguments.calculate_kv_scales,
+        max_num_seqs=arguments.max_num_seqs,
+        max_num_batched_tokens=arguments.max_num_batched_tokens,
+    )
+    if arguments.concurrency < 1:
+        raise RuntimeError("concurrency_must_be_positive")
+    if arguments.concurrency > base.max_num_seqs:
+        raise RuntimeError("concurrency_exceeds_profile_max_num_seqs")
     capabilities = _capabilities(
         arguments.vllm.resolve(strict=True), arguments.ffmpeg_lib.resolve(strict=True)
     )
@@ -380,6 +564,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ffmpeg=arguments.ffmpeg_lib.resolve(),
             timed_runs=arguments.timed_runs,
             max_tokens=arguments.max_tokens,
+            concurrency=arguments.concurrency,
         )
         for k in ks
     ]
@@ -389,7 +574,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "captured_at_utc": datetime.now(UTC).isoformat(),
         "ks": list(ks),
         "timed_runs_per_workpoint": arguments.timed_runs,
-        "sampling": {"temperature": 0, "concurrency": 1, "max_tokens": arguments.max_tokens},
+        "sampling": {
+            "temperature": 0,
+            "concurrency": arguments.concurrency,
+            "max_tokens": arguments.max_tokens,
+        },
         "workload_sha256": _sha256_text(WORKLOAD),
         "workload_utf8_bytes": len(WORKLOAD.encode("utf-8")),
         "base_profile_path": str(arguments.profile.resolve()),
@@ -398,7 +587,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     _write_json(output / "sweep.json", report)
     print(json.dumps(report, indent=2, sort_keys=True))
-    return 0
+    return _status_return_code(str(report["status"]))
 
 
 if __name__ == "__main__":

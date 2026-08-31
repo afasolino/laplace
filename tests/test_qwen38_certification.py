@@ -41,8 +41,16 @@ def test_mtp_sweep_committed_tokens_are_target_plus_accepted_drafts() -> None:
 
 def test_mtp_certification_reads_the_selected_workpoint_from_profile() -> None:
     script = _script()
-    profile = script._profile(ROOT / "configs/serving_profile_candidates/P7_qwen38_w4a16_mtp.json")
-    assert script._mtp_tokens(profile) == 3
+
+    p7 = script._profile(
+        ROOT / "configs/serving_profile_candidates/P7_qwen38_w4a16_mtp.json"
+    )
+    p8 = script._profile(
+        ROOT / "configs/serving_profile_candidates/P8_qwen38_w4a16_mtp.json"
+    )
+
+    assert script._mtp_tokens(p7) == 3
+    assert script._mtp_tokens(p8) == 8
 
 
 def test_production_gate_preserves_structured_admission_failure() -> None:

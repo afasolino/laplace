@@ -54,7 +54,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "profile_id",
-        choices=("P6_qwen38_w4a16", "P7_qwen38_w4a16_mtp"),
+        choices=(
+            "P6_qwen38_w4a16",
+            "P7_qwen38_w4a16_mtp",
+            "P8_qwen38_w4a16_mtp",
+        ),
     )
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--repository-root", type=Path, default=ROOT)
@@ -743,7 +747,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "quantized_kernel",
                 lambda: _quantized_kernel(Path(profile.model_path), Path(owned.log_path)),
             )
-            if arguments.profile_id == "P7_qwen38_w4a16_mtp":
+            if arguments.profile_id in {"P7_qwen38_w4a16_mtp", "P8_qwen38_w4a16_mtp"}:
                 expected_mtp_tokens = _mtp_tokens(profile)
                 _run_gate(
                     gates,
@@ -782,7 +786,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "sampling_interval_seconds": 0.25,
     }
     required = [*MANDATORY_GATES]
-    if arguments.profile_id == "P7_qwen38_w4a16_mtp":
+    if arguments.profile_id in {"P7_qwen38_w4a16_mtp", "P8_qwen38_w4a16_mtp"}:
         required.append("mtp")
     endpoint_released = _endpoint_down(endpoint_for(profile))
     try:
