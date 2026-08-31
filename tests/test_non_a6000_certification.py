@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -138,3 +139,79 @@ def test_dirty_provenance_binds_exact_content_not_only_status(tmp_path: Path) ->
     fourth = module._provenance(repository)
     assert third["status_sha256"] == fourth["status_sha256"]
     assert third["diff_sha256"] != fourth["diff_sha256"]
+
+def test_mypy_certification_is_incremental_cache_independent() -> None:
+    module = _module()
+    mypy = next(
+        item for item in module.DETERMINISTIC_CHECKS if item.check_id == "mypy"
+    )
+
+    assert "--no-incremental" in mypy.command
+
+
+def test_check_environment_does_not_inherit_foreign_tmpdir(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _module()
+
+    root = tmp_path / "repo"
+    output = tmp_path / "output"
+    root.mkdir()
+    output.mkdir()
+
+    certified_bin = (
+        root
+        / ".runtime"
+        / "toolchains"
+        / "verilator-5.032"
+        / "share"
+        / "verilator"
+        / "bin"
+    )
+    certified_bin.mkdir(parents=True)
+
+    monkeypatch.setenv("TMPDIR", "/foreign/checkout/tmp")
+    monkeypatch.setenv("TMP", "/foreign/checkout/tmp")
+    monkeypatch.setenv("TEMP", "/foreign/checkout/tmp")
+
+    captured: dict[str, object] = {}
+
+    def fake_run(*args, **kwargs):
+        captured["env"] = kwargs["env"]
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    spec = module.CheckSpec(
+        "probe",
+        "cross_platform_deterministic",
+        ("python", "-c", "pass"),
+        "probe",
+        True,
+    )
+
+    result = module._run_check(root, output, spec, "python")
+    assert result["status"] == "PASS"
+
+    env = captured["env"]
+    assert isinstance(env, dict)
+
+    expected_tmp = str(
+        root.parent
+        / f".{root.name}-certification-tmp"
+        / output.name
+        / "probe"
+    )
+    assert env["TMPDIR"] == expected_tmp
+    assert env["TMP"] == expected_tmp
+    assert env["TEMP"] == expected_tmp
+    assert root not in Path(expected_tmp).parents
+
+    assert str(env["PATH"]).split(os.pathsep)[0] == str(certified_bin)

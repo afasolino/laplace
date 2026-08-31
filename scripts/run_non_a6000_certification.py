@@ -104,7 +104,16 @@ DETERMINISTIC_CHECKS = (
     CheckSpec(
         "mypy",
         "cross_platform_deterministic",
-        ("{python}", "-m", "mypy", "--strict", "--platform", "linux", "src/research_workspace"),
+        (
+            "{python}",
+            "-m",
+            "mypy",
+            "--no-incremental",
+            "--strict",
+            "--platform",
+            "linux",
+            "src/research_workspace",
+        ),
         "Strict type gate using the authoritative Linux target platform.",
         True,
     ),
@@ -308,6 +317,31 @@ def _run_check(root: Path, output: Path, spec: CheckSpec, python: str) -> dict[s
     started = datetime.now(UTC).isoformat()
     log_path = output / f"{spec.check_id}.log"
     environment = dict(os.environ)
+
+    # Certification must not inherit temporary-state roots from another checkout.
+    # Pytest scratch must also remain outside the application repository because
+    # repository-boundary tests deliberately reject user projects created below it.
+    scratch_root = root.parent / f".{root.name}-certification-tmp"
+    temporary_root = scratch_root / output.name / spec.check_id
+    temporary_root.mkdir(parents=True, exist_ok=True)
+    for name in ("TMPDIR", "TMP", "TEMP"):
+        environment[name] = str(temporary_root)
+
+    # Prefer the repository-local certified RTL toolchain when it is available.
+    verilator_bin = (
+        root
+        / ".runtime"
+        / "toolchains"
+        / "verilator-5.032"
+        / "share"
+        / "verilator"
+        / "bin"
+    )
+    if verilator_bin.is_dir():
+        environment["PATH"] = (
+            f"{verilator_bin}{os.pathsep}{environment.get('PATH', '')}"
+        )
+
     environment["PYTHONPATH"] = str(root / "src")
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     if spec.check_id == "pytest_collection" or spec.check_id.endswith("_pytest"):
