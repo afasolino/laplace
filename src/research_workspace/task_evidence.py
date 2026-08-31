@@ -167,9 +167,8 @@ class TaskEvidenceStore:
                 project_id=directory.name,
                 task_id=path.stem,
             )
-            if evidence.publication_sequence < 1:
-                raise TaskEvidenceError("task_evidence_legacy_chronology_unknown")
-            sequences.append(evidence.publication_sequence)
+            if evidence.publication_sequence >= 1:
+                sequences.append(evidence.publication_sequence)
         return max(sequences, default=0) + 1
 
     def load(self, *, owner_id: str, project_id: str, task_id: str) -> TaskOutcomeEvidence:
@@ -218,9 +217,10 @@ class TaskEvidenceStore:
             ]
         except OSError as exc:
             raise TaskEvidenceError("task_evidence_corrupt") from exc
-        if any(record.publication_sequence < 1 for record in records):
-            raise TaskEvidenceError("task_evidence_legacy_chronology_unknown")
-        return tuple(sorted(records, key=lambda record: record.publication_sequence)[-limit:])
+        sequenced = [record for record in records if record.publication_sequence >= 1]
+        return tuple(
+            sorted(sequenced, key=lambda record: record.publication_sequence)[-limit:]
+        )
 
 
 def recent_evidence_for_policy(

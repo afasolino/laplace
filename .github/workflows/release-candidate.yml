@@ -26,5 +26,6 @@ jobs:
         with:
           name: non-a6000-certification
           path: .runtime/v3-non-a6000/remote-ci
+          include-hidden-files: true
           retention-days: 7
           if-no-files-found: error

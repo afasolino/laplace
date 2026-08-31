@@ -56,6 +56,7 @@ markers = [
 line-length = 100
 target-version = "py311"
 extend-exclude = ["benchmarks/a6000_agent_team/paired_public"]
+lint.ignore = ["EXE001"] # Repository scripts are deliberately invoked through Python, not as executables.
 
 [tool.mypy]
 python_version = "3.11"

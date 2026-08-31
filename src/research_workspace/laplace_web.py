@@ -15,7 +15,7 @@ import sys
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 from .chat_capability_views import corpus_overview, runtime_metrics_view
 from .chat_operator_client import OperatorClient, OperatorClientError, extract_display_text
@@ -269,9 +269,9 @@ class WebController:
         return current, session.session_id, "", status
 
 
-def build_app(controller: WebController):  # type: ignore[no-untyped-def]
+def build_app(controller: WebController) -> Any:
     try:
-        import gradio as gr  # type: ignore[import-not-found]
+        import gradio as gr
     except ImportError as exc:  # pragma: no cover
         raise LaplaceWebError("gradio_dependency_missing:install_pip_editable_with_v3_extra") from exc
 

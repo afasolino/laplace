@@ -106,7 +106,7 @@ def test_recent_uses_immutable_publication_sequence_not_task_id_order(tmp_path: 
     assert [record.publication_sequence for record in recent] == [1, 2]
 
 
-def test_recent_fails_closed_for_legacy_records_without_chronology(tmp_path: Path) -> None:
+def _write_legacy_evidence(tmp_path: Path) -> Path:
     path = tmp_path / "owner-1" / "project-1" / "task-1.json"
     path.parent.mkdir(parents=True)
     path.write_text(
@@ -116,6 +116,25 @@ def test_recent_fails_closed_for_legacy_records_without_chronology(tmp_path: Pat
         '"verifier_digest":""}',
         encoding="utf-8",
     )
+    return path
 
-    with pytest.raises(TaskEvidenceError, match="task_evidence_legacy_chronology_unknown"):
-        TaskEvidenceStore(tmp_path).recent(owner_id="owner-1", project_id="project-1")
+
+def test_recent_excludes_legacy_records_without_guessing_chronology(tmp_path: Path) -> None:
+    _write_legacy_evidence(tmp_path)
+
+    assert TaskEvidenceStore(tmp_path).recent(
+        owner_id="owner-1", project_id="project-1"
+    ) == ()
+
+
+def test_legacy_evidence_does_not_block_future_publication(tmp_path: Path) -> None:
+    _write_legacy_evidence(tmp_path)
+    store = TaskEvidenceStore(tmp_path)
+    current = replace(_item(), task_id="task-2", outcome="verified_success")
+
+    store.append(current)
+
+    loaded = store.load(owner_id="owner-1", project_id="project-1", task_id="task-2")
+    assert loaded.publication_sequence == 1
+    recent = store.recent(owner_id="owner-1", project_id="project-1")
+    assert [item.task_id for item in recent] == ["task-2"]

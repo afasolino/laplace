@@ -29,6 +29,12 @@ jobs:
           PYTHONPATH: src
           LAPLACE_FIXTURE_ONLY: "1"
           NO_PROXY: "*"
+      - if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.12'
+        run: python -m pytest -q --strict-markers -m linux_posix_required -p no:cacheprovider
+        env:
+          PYTHONPATH: src
+          LAPLACE_FIXTURE_ONLY: "1"
+          NO_PROXY: "*"
       - if: matrix.os == 'windows-2025' && matrix.python == '3.12'
         run: >-
           python -m pytest -q --strict-markers -m cross_platform_deterministic

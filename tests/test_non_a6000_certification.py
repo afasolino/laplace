@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -78,6 +78,63 @@ def test_routine_ci_uses_taxonomy_and_measured_coverage_threshold() -> None:
     workflow = (ROOT / ".github/workflows/unit-and-integration-tests.yml").read_text(
         encoding="utf-8"
     )
+    integration = (ROOT / ".github/workflows/lint-and-types.yml").read_text(
+        encoding="utf-8"
+    )
+    release = (ROOT / ".github/workflows/release-candidate.yml").read_text(
+        encoding="utf-8"
+    )
 
     assert "-m cross_platform_deterministic" in workflow
+    assert "-m linux_posix_required" in workflow
     assert "--cov-fail-under=63.6" in workflow
+    assert "-m optional_dependency" in integration
+    assert "include-hidden-files: true" in release
+
+
+def test_non_a6000_report_cannot_be_misread_as_final_v3_certification() -> None:
+    script = (ROOT / "scripts/run_non_a6000_certification.py").read_text(encoding="utf-8")
+    assert '"certification_scope": "non_a6000_phase_only"' in script
+    assert '"final_v3_certification": False' in script
+
+
+def test_dirty_provenance_binds_exact_content_not_only_status(tmp_path: Path) -> None:
+    module = _module()
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def git(*args: str) -> str:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return completed.stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.name", "Fixture")
+    git("config", "user.email", "fixture@example.test")
+    tracked = repository / "tracked.txt"
+    tracked.write_text("base\n", encoding="utf-8")
+    git("add", "tracked.txt")
+    git("commit", "-qm", "base")
+
+    assert module._provenance(repository)["diff_sha256"] is None
+
+    tracked.write_text("first\n", encoding="utf-8")
+    first = module._provenance(repository)
+    tracked.write_text("second\n", encoding="utf-8")
+    second = module._provenance(repository)
+    assert first["status_sha256"] == second["status_sha256"]
+    assert first["diff_sha256"] != second["diff_sha256"]
+
+    tracked.write_text("base\n", encoding="utf-8")
+    untracked = repository / "untracked.txt"
+    untracked.write_text("alpha\n", encoding="utf-8")
+    third = module._provenance(repository)
+    untracked.write_text("beta\n", encoding="utf-8")
+    fourth = module._provenance(repository)
+    assert third["status_sha256"] == fourth["status_sha256"]
+    assert third["diff_sha256"] != fourth["diff_sha256"]

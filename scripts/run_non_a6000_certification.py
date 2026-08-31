@@ -15,10 +15,10 @@ import os
 import platform
 import subprocess  # nosec B404 - fixed argv, shell=False
 import sys
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Sequence
 
 from research_workspace.certification_taxonomy import (
     A6000_REQUIRED,
@@ -30,7 +30,6 @@ from research_workspace.certification_taxonomy import (
     NODEID_CATEGORIES,
     OPTIONAL_DEPENDENCY,
 )
-
 
 _TIMEOUT_SECONDS = 7_200
 
@@ -211,18 +210,69 @@ def _git_optional(root: Path, *argv: str) -> str | None:
     return completed.stdout.strip() if completed.returncode == 0 else None
 
 
+def _git_bytes(root: Path, *argv: str) -> bytes:
+    completed = subprocess.run(
+        ["git", *argv], cwd=root, capture_output=True, check=False, timeout=60
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"git_{argv[0]}_failed")
+    return completed.stdout
+
+
+def _worktree_delta_sha256(root: Path) -> str:
+    # Bind dirty provenance to exact tracked/staged and untracked contents.
+    digest = hashlib.sha256()
+    digest.update(b"laplace-worktree-delta-v1\0")
+    digest.update(
+        _git_bytes(
+            root,
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            "--no-textconv",
+            "HEAD",
+            "--",
+        )
+    )
+    raw_untracked = _git_bytes(
+        root, "ls-files", "--others", "--exclude-standard", "-z"
+    )
+    for raw_name in sorted(item for item in raw_untracked.split(b"\0") if item):
+        relative = Path(raw_name.decode("utf-8", errors="surrogateescape"))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError("untracked_path_invalid")
+        target = root / relative
+        digest.update(b"\0untracked\0")
+        digest.update(raw_name)
+        if target.is_symlink():
+            digest.update(b"\0symlink\0")
+            digest.update(
+                target.readlink().as_posix().encode("utf-8", errors="surrogateescape")
+            )
+        elif target.is_file():
+            digest.update(b"\0file\0")
+            with target.open("rb") as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(block)
+        else:
+            raise RuntimeError("untracked_entry_invalid")
+    return digest.hexdigest()
+
+
 def _provenance(root: Path) -> dict[str, object]:
     branch = _git_optional(root, "branch", "--show-current")
     upstream = _git_optional(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
     status = _git_value(root, "status", "--porcelain=v1")
+    dirty = bool(status)
     return {
         "head_sha": _git_value(root, "rev-parse", "HEAD"),
         "branch": branch or None,
         "detached": branch is None,
         "upstream": upstream,
         "upstream_sha": _git_optional(root, "rev-parse", upstream) if upstream else None,
-        "clean": not bool(status),
-        "diff_sha256": hashlib.sha256(status.encode("utf-8")).hexdigest() if status else None,
+        "clean": not dirty,
+        "status_sha256": hashlib.sha256(status.encode("utf-8")).hexdigest() if dirty else None,
+        "diff_sha256": _worktree_delta_sha256(root) if dirty else None,
     }
 
 
@@ -326,6 +376,9 @@ def run_certification(output_root: Path, *, root: Path | None = None) -> dict[st
     }
     result = {
         "schema_version": 2,
+        "certification_scope": "non_a6000_phase_only",
+        "final_v3_certification": False,
+        "remaining_mandatory_categories": sorted(DEFERRED_CATEGORIES),
         "status": "PASS" if all(item["status"] == "PASS" for item in checks) else "FAIL",
         "created_at_utc": datetime.now(UTC).isoformat(),
         "environment": environment,

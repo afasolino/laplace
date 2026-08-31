@@ -385,11 +385,11 @@ def test_mcp_research_uses_configured_shared_reference_root(
     assert library_record["snapshot_hash"] == library.snapshot_hash()
 
 
-def test_eda_flow_runs_lint_self_checking_simulation_and_synthesis() -> None:
+def test_eda_flow_runs_lint_self_checking_simulation_and_synthesis(tmp_path: Path) -> None:
     required = ("verilator", "iverilog", "vvp", "yosys")
     if any(shutil.which(tool) is None for tool in required):
         pytest.skip("local EDA integration requires verilator, iverilog, vvp, and yosys")
-    result = LocalToolRunner(REPOSITORY_ROOT).run_eda_flow(
+    result = LocalToolRunner(REPOSITORY_ROOT, log_root=tmp_path / "tool_logs").run_eda_flow(
         ["benchmarks/a6000_agent_team/rtl/rv_skid_buffer.sv"],
         top_module="rv_skid_buffer",
         testbench="benchmarks/a6000_agent_team/rtl/tb_rv_skid_buffer.sv",
