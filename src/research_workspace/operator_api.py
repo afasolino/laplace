@@ -79,8 +79,6 @@ from .operator.request_models import (  # noqa: F401
     TierChatRequest,
     TierUserRequest,
     UploadCreateRequest,
-    WorktreeDiscardRequest,
-    WorktreeExportRequest,
 )
 from .operator.settings import OperatorApiSettings
 from .operator.responses import agent_result_content, public_agent_result
@@ -88,8 +86,10 @@ from .operator.research_payloads import research_summaries, sanitize_research_pa
 from .operator.artifacts import safe_artifact_path
 from .operator.auth_routes import register_auth_routes
 from .operator.client_routes import register_client_routes
+from .operator.json_utils import canonical_json_bytes, sorted_json_text
 from .operator.run_routes import register_run_routes
 from .operator.static_routes import register_static_routes
+from .operator.worktree_routes import register_worktree_routes
 from .laplace_core import LaplaceCore
 from .memory import MemoryService, SQLiteMemoryBackend
 from .personal_corpus import (
@@ -142,13 +142,7 @@ def _agent_async_request_sha256(body: AgentAsyncRunRequest) -> str:
             body.manager_complexity.model_dump() if body.manager_complexity is not None else None
         ),
     }
-    encoded = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
 
 def create_operator_app(
@@ -1292,7 +1286,7 @@ def create_operator_app(
                         yield (
                             "event: operator_event\n"
                             f"id: {cursor}\n"
-                            f"data: {json.dumps(record, sort_keys=True)}\n\n"
+                            f"data: {sorted_json_text(record)}\n\n"
                         )
                 elif once:
                     yield "event: heartbeat\ndata: {}\n\n"
@@ -2766,7 +2760,7 @@ def create_operator_app(
                         yield (
                             "event: agent_event\n"
                             f"id: {cursor}\n"
-                            f"data: {json.dumps(record, sort_keys=True)}\n\n"
+                            f"data: {sorted_json_text(record)}\n\n"
                         )
                 elif once:
                     yield "event: heartbeat\ndata: {}\n\n"
@@ -2853,156 +2847,16 @@ def create_operator_app(
         result.pop("worktree_root", None)
         return result
 
-    @app.get("/api/v1/worktrees")
-    async def list_worktrees(
-        authenticated: AuthPrincipal = Depends(agent_principal),
-    ) -> JsonObject:
-        return {
-            "status": "OK",
-            "worktrees": require_tiered().sandboxes.list_mine(authenticated.user_id),
-        }
-
-    @app.get("/api/v1/worktrees/{session_id}")
-    async def inspect_worktree(
-        session_id: str,
-        authenticated: AuthPrincipal = Depends(agent_principal),
-    ) -> JsonObject:
-        return {
-            "status": "OK",
-            "worktree": require_tiered().sandboxes.inspect(
-                session_id, user_id=authenticated.user_id
-            ),
-        }
-
-    @app.get("/api/v1/worktrees/{session_id}/history")
-    async def worktree_history(
-        session_id: str,
-        authenticated: AuthPrincipal = Depends(agent_principal),
-    ) -> JsonObject:
-        return {
-            "status": "OK",
-            "events": require_tiered().sandboxes.history(session_id, user_id=authenticated.user_id),
-        }
-
-    @app.post("/api/v1/worktrees/{session_id}/resume")
-    async def resume_worktree(
-        session_id: str,
-        authenticated: AuthPrincipal = Depends(agent_mutation_principal),
-    ) -> JsonObject:
-        return {
-            "status": "RESUMED",
-            "worktree": require_tiered().sandboxes.resume(
-                session_id, user_id=authenticated.user_id
-            ),
-        }
-
-    @app.post("/api/v1/worktrees/{session_id}/close")
-    async def close_worktree(
-        session_id: str,
-        authenticated: AuthPrincipal = Depends(agent_mutation_principal),
-    ) -> JsonObject:
-        return require_tiered().sandboxes.close_if_clean(session_id, user_id=authenticated.user_id)
-
-    @app.post("/api/v1/worktrees/{session_id}/discard")
-    async def discard_worktree(
-        session_id: str,
-        body: WorktreeDiscardRequest,
-        authenticated: AuthPrincipal = Depends(agent_mutation_principal),
-    ) -> JsonObject:
-        return require_tiered().sandboxes.discard(
-            session_id,
-            user_id=authenticated.user_id,
-            confirmation=body.confirmation,
-        )
-
-    @app.post("/api/v1/worktrees/{session_id}/export")
-    async def request_worktree_export(
-        session_id: str,
-        body: WorktreeExportRequest,
-        authenticated: AuthPrincipal = Depends(agent_mutation_principal),
-    ) -> JsonObject:
-        return require_tiered().sandboxes.request_export(
-            session_id,
-            user_id=authenticated.user_id,
-            promotion=body.promotion,
-        )
-
-    @app.get("/api/v1/worktrees/{session_id}/patch")
-    async def download_worktree_patch(
-        session_id: str,
-        authenticated: AuthPrincipal = Depends(agent_principal),
-    ) -> Response:
-        content = require_tiered().sandboxes.patch(session_id, user_id=authenticated.user_id)
-        return Response(
-            content,
-            media_type="text/x-diff",
-            headers={
-                "Content-Disposition": (f'attachment; filename="{session_id}.patch"'),
-                "X-Content-SHA256": hashlib.sha256(content).hexdigest(),
-            },
-        )
-
-    @app.get("/api/v1/admin/worktrees")
-    async def operator_worktree_inventory(
-        _authenticated: AuthPrincipal = Depends(operator_principal),
-    ) -> JsonObject:
-        return {
-            "status": "OK",
-            "worktrees": require_tiered().sandboxes.operator_inventory(),
-        }
-
-    @app.get("/api/v1/admin/personal-corpora")
-    async def operator_personal_corpus_inventory(
-        authenticated: AuthPrincipal = Depends(operator_principal),
-    ) -> JsonObject:
-        inventory = corpus_store.sanitized_inventory()
-        operator.record_action(
-            actor_role=authenticated.role,
-            action="PERSONAL_CORPUS_SANITIZED_INVENTORY_VIEWED",
-            entity_type="personal_corpus_inventory",
-            entity_id="all",
-            payload={"corpus_count": len(inventory), "content_access": False},
-        )
-        return {
-            "status": "OK",
-            "content_access": "DISABLED_BY_POLICY",
-            "corpora": inventory,
-        }
-
-    @app.get("/api/v1/admin/worktrees/{session_id}")
-    async def operator_inspect_worktree(
-        session_id: str,
-        authenticated: AuthPrincipal = Depends(operator_principal),
-    ) -> JsonObject:
-        return {
-            "status": "OK",
-            "worktree": require_tiered().sandboxes.inspect(
-                session_id,
-                user_id=authenticated.user_id,
-                operator=True,
-            ),
-        }
-
-    @app.post("/api/v1/admin/worktrees/{session_id}/discard")
-    async def operator_discard_worktree(
-        session_id: str,
-        body: WorktreeDiscardRequest,
-        authenticated: AuthPrincipal = Depends(mutation_principal),
-    ) -> JsonObject:
-        result = require_tiered().sandboxes.discard(
-            session_id,
-            user_id=authenticated.user_id,
-            confirmation=body.confirmation,
-            operator=True,
-        )
-        operator.record_action(
-            actor_role=authenticated.role,
-            action="WORKTREE_FORCE_DISCARD",
-            entity_type="worktree",
-            entity_id=session_id,
-            payload={"status": result["status"]},
-        )
-        return result
+    register_worktree_routes(
+        app,
+        operator=operator,
+        corpus_store=corpus_store,
+        require_tiered=require_tiered,
+        agent_principal=agent_principal,
+        agent_mutation_principal=agent_mutation_principal,
+        operator_principal=operator_principal,
+        mutation_principal=mutation_principal,
+    )
 
     @app.post("/api/v1/admin/tier/users")
     async def set_tier_user(

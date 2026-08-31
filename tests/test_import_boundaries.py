@@ -64,6 +64,7 @@ def test_operator_transport_helpers_remain_leaf_modules() -> None:
     assert _imports(ROOT / "operator" / "responses.py") == {
         "__future__", "collections.abc"
     }
+    assert _imports(ROOT / "operator" / "json_utils.py") == {"__future__", "json"}
     assert _imports(ROOT / "operator" / "research_payloads.py") == {
         "__future__", "json", "pathlib"
     }
@@ -101,6 +102,23 @@ def test_operator_transport_helpers_remain_leaf_modules() -> None:
         "operator_service",
         "request_models",
     }
+
+
+def test_operator_worktree_routes_are_a_separate_transport_boundary() -> None:
+    assert _imports(ROOT / "operator" / "worktree_routes.py") == {
+        "__future__",
+        "auth",
+        "collections.abc",
+        "fastapi",
+        "hashlib",
+        "operator_service",
+        "personal_corpus",
+        "request_models",
+        "service_tiers",
+    }
+    facade = ROOT / "operator_api.py"
+    assert "operator.worktree_routes" in _imports(facade)
+    assert "register_worktree_routes(" in facade.read_text(encoding="utf-8")
 
 
 def test_shared_agent_git_primitive_has_no_policy_dependencies() -> None:
