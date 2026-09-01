@@ -1532,8 +1532,10 @@ def qualify_candidate(
         and residual is not None
         and not residual.compute_pids
     )
+    worker_calls = metrics.get("worker_call_count")
     smoke_evidence_complete = (
-        metrics["worker_call_count"] > 0
+        isinstance(worker_calls, int)
+        and worker_calls > 0
         and any(item.get("lane_status") == "COMPLETE" for item in tasks)
     )
     success_status = "QUALIFICATION_COMPLETE" if is_full_qualification else "SMOKE_COMPLETE"
