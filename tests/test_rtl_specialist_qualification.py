@@ -73,7 +73,7 @@ def test_step_c2_configuration_preserves_c1_and_p8() -> None:
         "v_ready_valid_buffer",
         "sv_ready_valid_buffer",
     )
-    assert configuration.max_model_len == 16384
+    assert configuration.max_model_len == 8192
     assert configuration.max_output_tokens == 8192
     assert configuration.gpu_memory_utilization == 0.18
     assert configuration.minimum_free_headroom_mib == 2048
@@ -100,10 +100,10 @@ def test_specialist_profile_is_bounded_and_native_reasoning_candidate(tmp_path: 
     profile = build_specialist_profile(configuration, spec, model_path)
     candidate = build_specialist_candidate(configuration, spec, profile, "a" * 40)
     dual = build_direct_configuration(candidate)
-    assert profile.kv_cache_memory_bytes == 1073741824
+    assert profile.kv_cache_memory_bytes == 1342177280
     assert profile.gpu_memory_utilization == 0.18
     assert profile.extra_args == ("--dtype=bfloat16",)
-    assert candidate.context_tokens == 16384
+    assert candidate.context_tokens == 8192
     assert candidate.max_output_tokens == 8192
     assert candidate.temperature == 1.0
     assert dual.main == candidate
