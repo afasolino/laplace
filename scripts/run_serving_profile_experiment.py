@@ -50,12 +50,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--vllm",
         type=Path,
-        default=Path("/home/giando/work/laplace/.venv-vllm-cu129/bin/vllm"),
+        default=root / ".venv-vllm-cu129/bin/vllm",
     )
     parser.add_argument(
         "--ffmpeg-lib",
         type=Path,
-        default=Path("/home/giando/work/laplace/.runtime/ffmpeg7/lib"),
+        default=root / ".runtime/ffmpeg7/lib",
     )
     parser.add_argument("--smoke-only", action="store_true")
     return parser

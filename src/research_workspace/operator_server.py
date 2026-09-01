@@ -342,8 +342,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     profile_operator = ServingProfileOperator(
         arguments.repository_root,
         state_root / "tiered_serving/profile_runtime",
-        Path("/home/giando/work/laplace/.venv-vllm-cu129/bin/vllm"),
-        Path("/home/giando/work/laplace/.runtime/ffmpeg7/lib"),
+        arguments.repository_root / ".venv-vllm-cu129/bin/vllm",
+        arguments.repository_root / ".runtime/ffmpeg7/lib",
     )
     sessions = SessionStore(
         session_path,
