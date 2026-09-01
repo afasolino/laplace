@@ -881,12 +881,19 @@ def rtl_worker_prompt(
 
 
 def parse_codev_rtl_answer(model_text: str, *, contract: RtlWorkerContract) -> str:
-    """Extract one complete RTL module from bare, tagged, or Qwen-native worker output."""
+    """Extract one complete RTL module from bare, tagged, or SiliconMind output.
+
+    SiliconMind's upstream runtime consumes raw vLLM completion text.  Its Qwen
+    chat template can supply the opening ``<think>`` token, so generated text
+    may begin with reasoning and only contain the closing ``</think>`` token.
+    Keep the accepted exception confined to a leading reasoning segment; all
+    answer framing and module/replacement checks below remain strict.
+    """
     if not isinstance(model_text, str) or not model_text.strip():
         raise StructuredOutputError("RTL worker response is empty")
     text = model_text.strip()
     reasoning_match = re.match(
-        r"<think>.*?</think>\s*", text, flags=re.DOTALL | re.IGNORECASE
+        r"(?:<think>)?.*?</think>\s*", text, flags=re.DOTALL | re.IGNORECASE
     )
     if reasoning_match:
         text = text[reasoning_match.end() :].strip()

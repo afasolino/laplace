@@ -39,11 +39,19 @@
     "ffmpeg_library_path": ".runtime/ffmpeg7/lib",
     "held_out_environment_variable": "LAPLACE_ABLATION_HELD_OUT_ROOT"
   },
+  "quantized_model": {
+    "source_revision": "32385e1ab491436c255dfeb65a8dbe8d2346fc6d",
+    "directory": ".runtime/v3-a6000-completion/step-c2/quantized-models/siliconmind-qwen3-4b-t-2507-36k-32385e1-autoround-w4a16-g128-sym/32385e1ab491436c255dfeb65a8dbe8d2346fc6d-w4g128",
+    "artifact_sha256": "011be8f1c0ce681e9a26e3afb325e44da7f587915eef4b844bd0900439720032",
+    "method": "AutoRound 0.9.2 via llmcompressor 0.9.0.1",
+    "recipe": "W4A16 symmetric INT4 g128; BF16 tuning; AutoRound default 200 iters; NeelNanda/pile-10k@127bfedcd5047750df5ccf3a12979a47bfa0bafa; 128 samples; seqlen 2048; batch 8; seed 42",
+    "execution_backend": "vLLM 0.25.0 INC AutoGPTQ Marlin + TRITON_ATTN + int8_per_token_head KV"
+  },
   "specialist_serving": {
     "port": 8211,
-    "max_model_len": 8192,
+    "max_model_len": 12288,
     "max_num_seqs": 1,
-    "max_num_batched_tokens": 8192,
+    "max_num_batched_tokens": 12288,
     "kv_cache_memory_bytes": 1073741824,
     "gpu_memory_utilization": 0.18,
     "startup_timeout": 1200,
@@ -53,11 +61,11 @@
     "dtype": "bfloat16",
     "prefix_caching": true,
     "chunked_prefill": true,
-    "reasoning_parser": "qwen3",
-    "kv_cache_dtype": "fp8",
-    "calculate_kv_scales": true,
-    "thinking_token_budget": 3072,
-    "use_v2_model_runner": false
+    "reasoning_parser": null,
+    "kv_cache_dtype": "int8_per_token_head",
+    "calculate_kv_scales": false,
+    "thinking_token_budget": null,
+    "use_v2_model_runner": true
   },
   "candidates": [
     {

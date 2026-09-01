@@ -11,7 +11,13 @@ from typing import Literal, Mapping, Sequence, TypeAlias
 from urllib.parse import urlsplit
 
 JsonObject: TypeAlias = dict[str, object]
-KVCacheDType: TypeAlias = Literal["auto", "fp8", "fp8_per_token_head"]
+KVCacheDType: TypeAlias = Literal[
+    "auto",
+    "bfloat16",
+    "fp8",
+    "fp8_per_token_head",
+    "int8_per_token_head",
+]
 
 
 class ServingProfileError(RuntimeError):

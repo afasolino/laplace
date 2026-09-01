@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -39,7 +38,7 @@ def _report(
         ),
     }[candidate_id]
     revision = {
-        "siliconmind_qwen3_4b_t_2507_36k": "1" * 40,
+        "siliconmind_qwen3_4b_t_2507_36k": "32385e1ab491436c255dfeb65a8dbe8d2346fc6d",
         "siliconmind_qwen3_4b_t_2507_76k": "2" * 40,
         "siliconmind_v12_qwen3_4b_t_2507": "4" * 40,
     }[candidate_id]
@@ -49,7 +48,9 @@ def _report(
         "repository": repository,
         "revision": revision,
         "model_path": str(
-            candidate_model_path(
+            configuration.quantized_model_path
+            if candidate_id == configuration.preselected_candidate
+            else candidate_model_path(
                 configuration,
                 candidate_id,
                 revision,
@@ -76,7 +77,7 @@ def test_step_c2_configuration_preserves_c1_and_p8() -> None:
         "v_ready_valid_buffer",
         "sv_ready_valid_buffer",
     )
-    assert configuration.max_model_len == 8192
+    assert configuration.max_model_len == 12288
     assert configuration.max_output_tokens == 8192
     assert configuration.gpu_memory_utilization == 0.18
     assert configuration.minimum_free_headroom_mib == 2048
@@ -96,31 +97,7 @@ def test_huggingface_head_resolution_requires_one_exact_commit() -> None:
         parse_ls_remote_head(f"{'a' * 40}\tHEAD\n{'b' * 40}\tHEAD\n")
 
 
-def test_installed_vllm_accepts_native_thinking_token_budget() -> None:
-    configuration = load_step_c2_configuration(ROOT, DEFAULT_CONFIG)
-    completed = subprocess.run(
-        [
-            str(configuration.vllm_python),
-            "-c",
-            (
-                "from vllm.entrypoints.openai.chat_completion.protocol "
-                "import ChatCompletionRequest; "
-                "request = ChatCompletionRequest(messages=[{'role': 'user', 'content': 'RTL'}], "
-                "thinking_token_budget=3072); "
-                "assert request.to_sampling_params(8192, {}).thinking_token_budget == 3072; "
-                "print('native-thinking-budget-ok')"
-            ),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=120,
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert completed.stdout.strip().endswith("native-thinking-budget-ok")
-
-
-def test_specialist_profile_is_bounded_and_native_reasoning_candidate(tmp_path: Path) -> None:
+def test_specialist_profile_preserves_raw_siliconmind_output(tmp_path: Path) -> None:
     configuration = load_step_c2_configuration(ROOT, DEFAULT_CONFIG)
     spec = configuration.candidates[0]
     model_path = tmp_path / "model"
@@ -128,18 +105,19 @@ def test_specialist_profile_is_bounded_and_native_reasoning_candidate(tmp_path: 
     profile = build_specialist_profile(configuration, spec, model_path)
     candidate = build_specialist_candidate(configuration, spec, profile, "a" * 40)
     dual = build_direct_configuration(candidate)
-    assert profile.kv_cache_dtype == "fp8"
+    assert profile.kv_cache_dtype == "int8_per_token_head"
     assert profile.kv_cache_memory_bytes == 1073741824
     assert profile.gpu_memory_utilization == 0.18
     assert profile.extra_args == (
         "--dtype=bfloat16",
-        "--reasoning-parser=qwen3",
-        "--calculate-kv-scales",
+        "--attention-backend=TRITON_ATTN",
     )
-    assert candidate.context_tokens == 8192
+    assert configuration.reasoning_parser is None
+    assert configuration.use_v2_model_runner is True
+    assert candidate.context_tokens == 12288
     assert candidate.max_output_tokens == 8192
     assert candidate.temperature == 1.0
-    assert candidate.thinking_token_budget == 3072
+    assert candidate.thinking_token_budget is None
     assert dual.main == candidate
     assert dual.rtl_worker == candidate
     assert dual.fallback_to_main is False

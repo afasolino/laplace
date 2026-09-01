@@ -15,7 +15,7 @@ from research_workspace.model_routing import (
     load_dual_model_configuration,
     supports_qwen3_structured_serialization,
 )
-from research_workspace.repair_protocol import file_sha256
+from research_workspace.repair_protocol import StructuredOutputError, file_sha256
 from research_workspace.rtl_contract import (
     RtlWorkerContract,
     build_rtl_worker_contract,
@@ -159,6 +159,26 @@ def test_worker_prompt_and_parser_accept_model_native_reasoning(tmp_path: Path) 
         f"<think>check behavior</think><answer>```systemverilog\n{source}\n```</answer>",
         contract=contract,
     ).startswith("module elastic")
+    assert parse_codev_rtl_answer(
+        f"check behavior</think><answer>```verilog\n{source}\n```</answer>",
+        contract=contract,
+    ).startswith("module elastic")
+
+
+def test_parser_rejects_unclosed_or_non_leading_siliconmind_tags(tmp_path: Path) -> None:
+    contract = _contract(tmp_path, ["hold output while stalled"])
+    source = "module elastic(input logic clk); endmodule"
+
+    with pytest.raises(StructuredOutputError, match="malformed reasoning/answer tags"):
+        parse_codev_rtl_answer(
+            f"reasoning <think>without close<answer>```verilog\n{source}\n```</answer>",
+            contract=contract,
+        )
+    with pytest.raises(StructuredOutputError, match="contains no source"):
+        parse_codev_rtl_answer(
+            f"```verilog\n{source}\n``` trailing prose</think>",
+            contract=contract,
+        )
 
 
 def test_qwen38_p8_name_is_eligible_for_qwen3_structured_serialization() -> None:

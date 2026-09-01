@@ -102,6 +102,12 @@ class StepC2Configuration:
     vllm_python: Path
     ffmpeg_library_path: Path
     held_out_environment_variable: str
+    source_revision: str
+    quantized_model_path: Path
+    quantized_artifact_sha256: str
+    quantization_method: str
+    quantization_recipe: str
+    weight_execution_backend: str
     specialist_port: int
     max_model_len: int
     max_num_seqs: int
@@ -114,8 +120,8 @@ class StepC2Configuration:
     request_timeout: int
     max_output_tokens: int
     temperature: float
-    reasoning_parser: str
-    thinking_token_budget: int
+    reasoning_parser: str | None
+    thinking_token_budget: int | None
     use_v2_model_runner: bool
     worker_task_ids: tuple[str, ...]
     coexistence_task_ids: tuple[str, ...]
@@ -227,6 +233,7 @@ def load_step_c2_configuration(
             "candidate_scope_extension",
             "benchmark_manifest",
             "runtime",
+            "quantized_model",
             "specialist_serving",
             "candidates",
             "qualification",
@@ -253,6 +260,7 @@ def load_step_c2_configuration(
     benchmark_raw = value.get("benchmark_manifest")
     runtime_raw = value.get("runtime")
     serving_raw = value.get("specialist_serving")
+    quantized_raw = value.get("quantized_model")
     qualification_raw = value.get("qualification")
     coexistence_raw = value.get("coexistence")
     promotion_raw = value.get("promotion_gate")
@@ -264,6 +272,7 @@ def load_step_c2_configuration(
             extension_raw,
             benchmark_raw,
             runtime_raw,
+            quantized_raw,
             serving_raw,
             qualification_raw,
             coexistence_raw,
@@ -277,6 +286,7 @@ def load_step_c2_configuration(
     benchmark = cast(dict[str, object], benchmark_raw)
     runtime = cast(dict[str, object], runtime_raw)
     serving = cast(dict[str, object], serving_raw)
+    quantized = cast(dict[str, object], quantized_raw)
     qualification = cast(dict[str, object], qualification_raw)
     coexistence = cast(dict[str, object], coexistence_raw)
     promotion = cast(dict[str, object], promotion_raw)
@@ -339,6 +349,18 @@ def load_step_c2_configuration(
             "use_v2_model_runner",
         },
         label="specialist_serving",
+    )
+    _exact_keys(
+        quantized,
+        {
+            "source_revision",
+            "directory",
+            "artifact_sha256",
+            "method",
+            "recipe",
+            "execution_backend",
+        },
+        label="quantized_model",
     )
     _exact_keys(
         qualification,
@@ -413,23 +435,36 @@ def load_step_c2_configuration(
         raise SpecialistQualificationError("C2 qualification policy drifted from C1")
     if (
         serving.get("dtype") != "bfloat16"
-        or serving.get("kv_cache_dtype") != "fp8"
-        or serving.get("calculate_kv_scales") is not True
+        or serving.get("kv_cache_dtype") != "int8_per_token_head"
+        or serving.get("calculate_kv_scales") is not False
         or serving.get("prefix_caching") is not True
         or serving.get("chunked_prefill") is not True
-        or serving.get("reasoning_parser") != "qwen3"
-        or serving.get("use_v2_model_runner") is not False
+        or serving.get("reasoning_parser") is not None
+        or serving.get("use_v2_model_runner") is not True
     ):
         raise SpecialistQualificationError("C2 specialist serving policy is invalid")
+    source_revision = _non_empty_string(
+        quantized.get("source_revision"), label="quantized source_revision"
+    )
+    if source_revision != "32385e1ab491436c255dfeb65a8dbe8d2346fc6d":
+        raise SpecialistQualificationError("C2 must use the immutable SiliconMind 36k source")
+    quantized_artifact_sha256 = _non_empty_string(
+        quantized.get("artifact_sha256"), label="quantized artifact_sha256"
+    )
+    if not re.fullmatch(r"[0-9a-f]{64}", quantized_artifact_sha256):
+        raise SpecialistQualificationError("quantized artifact digest is invalid")
     max_output_tokens = _integer(
         serving.get("max_output_tokens"), label="max_output_tokens"
     )
     if max_output_tokens > 8192:
         raise SpecialistQualificationError("C2 may not widen Laplace max_output_tokens")
-    thinking_token_budget = _integer(
-        serving.get("thinking_token_budget"), label="thinking_token_budget"
+    raw_thinking_token_budget = serving.get("thinking_token_budget")
+    thinking_token_budget = (
+        None
+        if raw_thinking_token_budget is None
+        else _integer(raw_thinking_token_budget, label="thinking_token_budget")
     )
-    if thinking_token_budget >= max_output_tokens:
+    if thinking_token_budget is not None and thinking_token_budget >= max_output_tokens:
         raise SpecialistQualificationError(
             "C2 thinking budget must leave capacity for final RTL source"
         )
@@ -569,6 +604,15 @@ def load_step_c2_configuration(
         )
 
     output_root = _repository_path(root, runtime.get("output_root"), label="runtime.output_root")
+    quantized_model_path = _repository_path(
+        root, quantized.get("directory"), label="quantized_model.directory"
+    )
+    try:
+        quantized_model_path.relative_to(output_root)
+    except ValueError as exc:
+        raise SpecialistQualificationError(
+            "quantized model must remain under Step-C runtime storage"
+        ) from exc
     vllm_executable = _repository_path(
         root,
         runtime.get("vllm_executable"),
@@ -606,6 +650,18 @@ def load_step_c2_configuration(
         vllm_python=vllm_python,
         ffmpeg_library_path=ffmpeg_library_path,
         held_out_environment_variable=held_env,
+        source_revision=source_revision,
+        quantized_model_path=quantized_model_path,
+        quantized_artifact_sha256=quantized_artifact_sha256,
+        quantization_method=_non_empty_string(
+            quantized.get("method"), label="quantization method"
+        ),
+        quantization_recipe=_non_empty_string(
+            quantized.get("recipe"), label="quantization recipe"
+        ),
+        weight_execution_backend=_non_empty_string(
+            quantized.get("execution_backend"), label="weight execution backend"
+        ),
         specialist_port=_integer(serving.get("port"), label="specialist port"),
         max_model_len=_integer(serving.get("max_model_len"), label="max_model_len"),
         max_num_seqs=_integer(serving.get("max_num_seqs"), label="max_num_seqs"),
@@ -624,12 +680,8 @@ def load_step_c2_configuration(
         request_timeout=_integer(serving.get("request_timeout"), label="request_timeout"),
         max_output_tokens=_integer(serving.get("max_output_tokens"), label="max_output_tokens"),
         temperature=_number(serving.get("temperature"), label="temperature"),
-        reasoning_parser=_non_empty_string(
-            serving.get("reasoning_parser"), label="reasoning_parser"
-        ),
-        thinking_token_budget=_integer(
-            serving.get("thinking_token_budget"), label="thinking_token_budget"
-        ),
+        reasoning_parser=None,
+        thinking_token_budget=thinking_token_budget,
         use_v2_model_runner=serving.get("use_v2_model_runner") is True,
         worker_task_ids=worker_ids,
         coexistence_task_ids=integration_ids,
@@ -869,6 +921,77 @@ def candidate_model_path(
     return target
 
 
+def _sha256_stream(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def candidate_runtime_model_path(
+    configuration: StepC2Configuration,
+    candidate_id: str,
+    revision: str,
+) -> Path:
+    candidate = configuration.candidate(candidate_id)
+    source_path = candidate_model_path(configuration, candidate_id, revision)
+    if candidate_id != configuration.preselected_candidate:
+        return source_path
+    if candidate_id != "siliconmind_qwen3_4b_t_2507_36k":
+        raise SpecialistQualificationError(
+            "Step C preselection may only bind the evidence-selected SiliconMind 36k candidate"
+        )
+    if revision != configuration.source_revision:
+        raise SpecialistQualificationError(
+            "Quantized derivative revision disagrees with its immutable SiliconMind source"
+        )
+    if not (source_path / "config.json").is_file():
+        raise SpecialistQualificationError(
+            f"Immutable SiliconMind source snapshot is unavailable: {source_path}"
+        )
+    marker_path = source_path / ".laplace-step-c2-snapshot.json"
+    if marker_path.is_file():
+        marker = _read_json(marker_path)
+        if (
+            marker.get("candidate_id") != candidate_id
+            or marker.get("repository") != candidate.repository
+            or marker.get("revision") != revision
+        ):
+            raise SpecialistQualificationError(
+                "Immutable source marker disagrees with derivative lineage"
+            )
+    target = configuration.quantized_model_path.resolve()
+    try:
+        target.relative_to(configuration.output_root.resolve())
+    except ValueError as exc:
+        raise SpecialistQualificationError(
+            "Quantized derivative escapes Step-C runtime storage"
+        ) from exc
+    weights = target / "model.safetensors"
+    config_path = target / "config.json"
+    quant_path = target / "quantization_config.json"
+    if not (target.is_dir() and weights.is_file() and config_path.is_file() and quant_path.is_file()):
+        raise SpecialistQualificationError(f"Governed W4A16 derivative is incomplete: {target}")
+    if _sha256_stream(weights) != configuration.quantized_artifact_sha256:
+        raise SpecialistQualificationError("Governed W4A16 derivative digest mismatch")
+    model_config = _read_json(config_path)
+    q = model_config.get("quantization_config")
+    if not isinstance(q, dict):
+        raise SpecialistQualificationError("Governed W4A16 derivative has no quantization metadata")
+    if (
+        q.get("bits") != 4
+        or q.get("group_size") != 128
+        or q.get("sym") is not True
+        or q.get("quant_method") != "auto-round"
+        or q.get("packing_format") != "auto_round:auto_gptq"
+    ):
+        raise SpecialistQualificationError(
+            "Derivative is not the certified AutoRound W4A16 g128 symmetric artifact"
+        )
+    return target
+
+
 def _snapshot_summary(target: Path) -> JsonObject:
     files = [path for path in target.rglob("*") if path.is_file()]
     total = sum(path.stat().st_size for path in files)
@@ -1036,8 +1159,7 @@ def build_specialist_profile(
         request_timeout=configuration.request_timeout,
         extra_args=(
             "--dtype=bfloat16",
-            f"--reasoning-parser={configuration.reasoning_parser}",
-            "--calculate-kv-scales",
+            "--attention-backend=TRITON_ATTN",
         ),
     )
 
@@ -1053,8 +1175,8 @@ def build_specialist_candidate(
         endpoint=endpoint_for(profile),
         model=profile.served_model_name,
         revision=revision,
-        quantization="none_bfloat16",
-        kernel="vllm_native",
+        quantization="w4a16_autoround",
+        kernel="marlin_autogptq",
         prefix_caching=profile.enable_prefix_caching,
         chunked_prefill=profile.enable_chunked_prefill,
         cuda_graph_mode="vllm_default",
@@ -1118,21 +1240,16 @@ def _installed_capabilities(
 def _specialist_runtime(
     state_root: Path, configuration: StepC2Configuration
 ) -> ServingProfileRuntime:
-    """Use vLLM's native V1 thinking-budget implementation for Step C.
-
-    vLLM 0.25.0 rejects ``thinking_token_budget`` on its V2 model runner.  The
-    runtime setting is recorded in owned-process evidence and is not a Laplace
-    token-forcing mechanism.
-    """
-    if configuration.use_v2_model_runner:
+    """Use the installed vLLM default runner while preserving raw SiliconMind text."""
+    if not configuration.use_v2_model_runner:
         raise SpecialistQualificationError(
-            "Step C native thinking budget requires the installed vLLM V1 model runner"
+            "Step C raw SiliconMind output requires the installed default model runner"
         )
     return ServingProfileRuntime(
         state_root,
         residual_free_mib=configuration.minimum_free_headroom_mib,
         ffmpeg_library_path=configuration.ffmpeg_library_path,
-        launch_environment={"VLLM_USE_V2_MODEL_RUNNER": "0"},
+        launch_environment={"VLLM_USE_FLASHINFER_SAMPLER": "0"},
     )
 
 
@@ -1412,21 +1529,7 @@ def qualify_candidate(
     lock = load_revision_lock(configuration, lock_path, base_revision=base_revision)
     candidate_spec = configuration.candidate(candidate_id)
     revision = locked_revision(lock, candidate_id)
-    model_path = candidate_model_path(configuration, candidate_id, revision)
-    marker = model_path / ".laplace-step-c2-snapshot.json"
-    if not marker.is_file() or not (model_path / "config.json").is_file():
-        raise SpecialistQualificationError(
-            f"Candidate snapshot is not acquired and owned by C2: {model_path}"
-        )
-    marker_value = _read_json(marker)
-    if (
-        marker_value.get("revision") != revision
-        or marker_value.get("repository") != candidate_spec.repository
-        or marker_value.get("candidate_id") != candidate_id
-        or marker_value.get("base_revision") != base_revision
-        or marker_value.get("configuration_sha256") != configuration.config_sha256
-    ):
-        raise SpecialistQualificationError("Candidate snapshot marker disagrees with revision lock")
+    model_path = candidate_runtime_model_path(configuration, candidate_id, revision)
     output = _runtime_output_path(
         configuration, output_root, label="qualification output root"
     )
@@ -1610,7 +1713,7 @@ def _validated_candidate_reports(
             report.get("repository") != candidate.repository
             or not isinstance(revision, str)
             or not _COMMIT.fullmatch(revision)
-            or model_path != str(candidate_model_path(configuration, candidate_id, revision))
+            or model_path != str(candidate_runtime_model_path(configuration, candidate_id, revision))
         ):
             raise SpecialistQualificationError(
                 f"Candidate report identity is invalid: {candidate_id}"
@@ -1863,7 +1966,7 @@ def _selection_value(
     candidate_id = _non_empty_string(
         selected.get("candidate_id"), label="selected candidate"
     )
-    expected_path = candidate_model_path(configuration, candidate_id, revision)
+    expected_path = candidate_runtime_model_path(configuration, candidate_id, revision)
     if (
         not isinstance(model_path, str)
         or Path(model_path).resolve() != expected_path
@@ -1888,16 +1991,13 @@ def certify_coexistence(
     revision = _non_empty_string(selected.get("revision"), label="selected revision")
     model_path = Path(_non_empty_string(selected.get("model_path"), label="selected model path"))
     candidate_spec = configuration.candidate(candidate_id)
-    marker = model_path / ".laplace-step-c2-snapshot.json"
-    marker_value = _read_json(marker) if marker.is_file() else {}
-    if (
-        marker_value.get("revision") != revision
-        or marker_value.get("candidate_id") != candidate_id
-        or marker_value.get("repository") != candidate_spec.repository
-        or marker_value.get("base_revision") != base_revision
-        or marker_value.get("configuration_sha256") != configuration.config_sha256
-    ):
-        raise SpecialistQualificationError("Selected specialist snapshot is not owned/immutable")
+    expected_model_path = candidate_runtime_model_path(
+        configuration, candidate_id, revision
+    )
+    if model_path.resolve() != expected_model_path:
+        raise SpecialistQualificationError(
+            "Selected specialist runtime derivative is unavailable or has drifted"
+        )
     output = _runtime_output_path(
         configuration, output_root, label="coexistence output root"
     )
@@ -1944,6 +2044,7 @@ def certify_coexistence(
         output / "p8_server",
         residual_free_mib=configuration.minimum_free_headroom_mib,
         ffmpeg_library_path=configuration.ffmpeg_library_path,
+        launch_environment={"VLLM_USE_FLASHINFER_SAMPLER": "0"},
     )
     specialist_runtime = _specialist_runtime(output / "specialist_server", configuration)
     sampler = _GpuSampler()
