@@ -2226,15 +2226,45 @@ def retrieve_engineering_evidence(
     }
 
 
-def collect_cuda_evidence(runner: LocalToolRunner) -> JsonObject:
-    """Probe CUDA without claiming that a CPU path is an inference result."""
+def collect_cuda_evidence(
+    runner: LocalToolRunner,
+    *,
+    python_executable: Path | None = None,
+) -> JsonObject:
+    """Probe CUDA with the interpreter that owns the inference runtime."""
+    requested_python = (
+        Path(sys.executable)
+        if python_executable is None
+        else python_executable.expanduser()
+    )
+    # Keep the venv-facing symlink path. Resolving it can bypass pyvenv.cfg
+    # and accidentally probe the underlying base interpreter instead.
+    probe_python = Path(os.path.abspath(requested_python))
+
+    if not probe_python.is_file() or not os.access(probe_python, os.X_OK):
+        return {
+            "status": "BLOCKED_GPU",
+            "cuda": {},
+            "probe_python": str(probe_python),
+            "probe_log": None,
+            "probe_returncode": 127,
+            "reason": (
+                "Configured CUDA probe Python is missing or not executable: "
+                f"{probe_python}"
+            ),
+        }
+
     probe = (
         "import json; import torch; "
         "value={'torch_version':torch.__version__,'cuda_runtime':torch.version.cuda,"
         "'available':torch.cuda.is_available(),'device_count':torch.cuda.device_count()}; "
         "value.update({'device':torch.cuda.get_device_name(0),'vram_gib':torch.cuda.get_device_properties(0).total_memory/1024**3} if value['available'] else {}); print(json.dumps(value))"
     )
-    result = runner.run("cuda_probe", [sys.executable, "-c", probe], timeout_seconds=30)
+    result = runner.run(
+        "cuda_probe",
+        [str(probe_python), "-c", probe],
+        timeout_seconds=30,
+    )
     try:
         payload: object = json.loads(result.stdout)
     except json.JSONDecodeError:
@@ -2253,6 +2283,7 @@ def collect_cuda_evidence(runner: LocalToolRunner) -> JsonObject:
     return {
         "status": "CUDA_A6000_VERIFIED" if a6000 else "BLOCKED_GPU",
         "cuda": details,
+        "probe_python": str(probe_python),
         "probe_log": result.log_path,
         "probe_returncode": result.returncode,
         "reason": None

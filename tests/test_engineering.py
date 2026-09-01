@@ -16,6 +16,7 @@ from research_workspace.engineering import (
     ReferenceEvidenceError,
     ReferenceLibrary,
     SchemaValidationError,
+    collect_cuda_evidence,
     normalize_task_spec,
     retrieve_engineering_evidence,
     validate_task_spec,
@@ -575,3 +576,53 @@ def test_local_team_records_gpu_block_without_cpu_substitution(
     )
     assert result["status"] == "BLOCKED_GPU"
     assert result["task"]["state"] == "blocked"
+
+def test_cuda_probe_uses_explicit_runtime_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probe_python = tmp_path / "cuda-runtime-python"
+    probe_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    probe_python.chmod(0o755)
+
+    runner = LocalToolRunner(tmp_path)
+    captured: dict[str, object] = {}
+
+    class ProbeResult:
+        stdout = json.dumps(
+            {
+                "torch_version": "fixture",
+                "cuda_runtime": "12.9",
+                "available": True,
+                "device_count": 1,
+                "device": "NVIDIA RTX A6000",
+                "vram_gib": 48.0,
+            }
+        )
+        log_path = "fixture-cuda-probe.json"
+        returncode = 0
+
+    def fake_run(
+        tool: str,
+        command: list[str],
+        *,
+        timeout_seconds: int = 300,
+    ) -> ProbeResult:
+        captured["tool"] = tool
+        captured["command"] = command
+        captured["timeout_seconds"] = timeout_seconds
+        return ProbeResult()
+
+    monkeypatch.setattr(runner, "run", fake_run)
+
+    evidence = collect_cuda_evidence(
+        runner,
+        python_executable=probe_python,
+    )
+
+    assert captured["tool"] == "cuda_probe"
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[0] == str(probe_python)
+    assert evidence["status"] == "CUDA_A6000_VERIFIED"
+    assert evidence["probe_python"] == str(probe_python)
+

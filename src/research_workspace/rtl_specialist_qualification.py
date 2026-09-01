@@ -1149,6 +1149,7 @@ def _run_task(
             adversarial_verification=True,
             reviewer_invariants=role_mode == "five_role",
             required_tools=task.required_tools,
+            cuda_probe_python=configuration.vllm_python,
         ),
         shared_reference_root=None,
     )

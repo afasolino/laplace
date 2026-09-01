@@ -92,6 +92,7 @@ class TeamWorkflowOptions:
     adversarial_verification: bool = True
     reviewer_invariants: bool = True
     required_tools: tuple[str, ...] = ()
+    cuda_probe_python: Path | None = None
 
 
 def _run_git(
@@ -1650,7 +1651,10 @@ end endmodule
 
     def run(self, task_id: str, *, query: str) -> JsonObject:
         task = self.store.load(task_id)
-        cuda = collect_cuda_evidence(LocalToolRunner(self.repository_root, self.log_root))
+        cuda = collect_cuda_evidence(
+            LocalToolRunner(self.repository_root, self.log_root),
+            python_executable=self.options.cuda_probe_python,
+        )
         if cuda["status"] != "CUDA_A6000_VERIFIED":
             task = self._transition(
                 task, "blocked", "BLOCKED_GPU: local A6000 CUDA inference is unavailable"
