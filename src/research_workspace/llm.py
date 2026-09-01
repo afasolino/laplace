@@ -272,8 +272,8 @@ class OpenAICompatibleProvider(Provider):
             "::1",
         }:
             raise ModelRequired("OpenAI-compatible endpoints must be loopback-only")
-        if max_tokens < 1 or max_tokens > 8192:
-            raise ModelRequired("OpenAI-compatible max_tokens must be between 1 and 8192")
+        if max_tokens < 1 or max_tokens > 16384:
+            raise ModelRequired("OpenAI-compatible max_tokens must be between 1 and 16384")
         if temperature < 0.0 or temperature > 2.0:
             raise ModelRequired("OpenAI-compatible temperature must be between 0 and 2")
         if top_p <= 0.0 or top_p > 1.0:

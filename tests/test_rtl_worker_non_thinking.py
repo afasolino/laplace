@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from research_workspace.inference import ServingCandidate
-from research_workspace.llm import GenerationResult, ModelRequired
+from research_workspace.llm import GenerationResult, ModelRequired, OpenAICompatibleProvider
 from research_workspace.model_routing import (
     AuditedModelCaller,
     DualModelConfiguration,
@@ -348,3 +348,19 @@ def test_routed_call_exposes_truncation_and_disables_thinking(tmp_path: Path) ->
     assert call.validation_error is not None
     assert "finish_reason='length'" in call.validation_error
     assert backend.calls[0]["enable_thinking"] is False
+
+
+def test_openai_compatible_provider_accepts_16k_output_cap() -> None:
+    provider = OpenAICompatibleProvider(
+        "http://127.0.0.1:9999",
+        "test",
+        max_tokens=16384,
+    )
+    assert provider.max_tokens == 16384
+
+    with pytest.raises(ModelRequired, match="between 1 and 16384"):
+        OpenAICompatibleProvider(
+            "http://127.0.0.1:9999",
+            "test",
+            max_tokens=16385,
+        )
