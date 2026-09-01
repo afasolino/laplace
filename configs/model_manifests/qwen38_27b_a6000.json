@@ -2,7 +2,7 @@
   "schema_version": 3,
   "requested_base_model": "Qwen/Qwen3.8-27B",
   "base_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
-  "artifact_path": "/home/giando/work/laplace/.models/Qwen3.8-27B-AWQ-4bit-e6b4b8b025f8",
+  "artifact_path": "/home/giando/work/laplace-v3-refactor/.models/Qwen3.8-27B-AWQ-4bit-e6b4b8b025f8",
   "artifact_revision": "hf:barrydeen/Qwen3.8-27B-AWQ-4bit@e6b4b8b025f85b3e18f13281db576e0b7d5fe314",
   "artifact_sha256": "4d72d8123b8b292edd5de9c1a3cbb7cd351eca7eb14fdf0aa996d9fcab340bb2",
   "artifact_size_bytes": 27764623261,

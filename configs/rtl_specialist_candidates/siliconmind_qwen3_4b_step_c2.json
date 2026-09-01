@@ -87,7 +87,7 @@
   "coexistence": {
     "p8_profile": {
       "path": "configs/serving_profile_candidates/P8_qwen38_w4a16_mtp.json",
-      "git_blob_sha": "cffae38fab1196d339fe9a7dd23a04616219e6d2"
+      "git_blob_sha": "e979a8b8c89b29f11d8c36b04296b85ac8da9313"
     },
     "start_order": [
       "p8",

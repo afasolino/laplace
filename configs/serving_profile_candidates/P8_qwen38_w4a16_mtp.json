@@ -1,7 +1,7 @@
 {
   "profile_id": "P8_qwen38_w4a16_mtp",
   "model_route": "quality",
-  "model_path": "/home/giando/work/laplace/.models/Qwen3.8-27B-AWQ-4bit-e6b4b8b025f8",
+  "model_path": "/home/giando/work/laplace-v3-refactor/.models/Qwen3.8-27B-AWQ-4bit-e6b4b8b025f8",
   "served_model_name": "laplace-quality-qwen38-mtp8",
   "port": 8207,
   "max_model_len": 131072,
