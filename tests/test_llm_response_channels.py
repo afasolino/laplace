@@ -84,6 +84,29 @@ def test_streaming_null_content_preserves_separate_reasoning(
     assert result.finish_reason == "length"
 
 
+def test_vllm_request_serializes_native_thinking_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def open_request(request: urllib.request.Request, **_: object) -> _StreamingResponse:
+        captured.update(json.loads(request.data or b"{}"))
+        return _StreamingResponse(
+            [
+                {"choices": [{"delta": {"content": "module x; endmodule"}, "finish_reason": "stop"}]}
+            ]
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", open_request)
+    result = VllmProvider(
+        "http://127.0.0.1:8102", "qwen3", thinking_token_budget=3072
+    ).generate("return RTL")
+
+    assert captured["thinking_token_budget"] == 3072
+    assert result.text == "module x; endmodule"
+    assert result.reasoning_text == ""
+
+
 def test_streaming_reasoning_then_valid_final_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

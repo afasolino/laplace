@@ -263,6 +263,7 @@ class OpenAICompatibleProvider(Provider):
         top_p: float = 1.0,
         seed: int | None = None,
         timeout_seconds: int = 120,
+        thinking_token_budget: int | None = None,
     ):
         parsed = urlparse(endpoint)
         if parsed.scheme not in {"http", "https"} or parsed.hostname not in {
@@ -279,6 +280,10 @@ class OpenAICompatibleProvider(Provider):
             raise ModelRequired("OpenAI-compatible top_p must be greater than 0 and at most 1")
         if timeout_seconds < 1 or timeout_seconds > 1800:
             raise ModelRequired("OpenAI-compatible timeout must be between 1 and 1800 seconds")
+        if thinking_token_budget is not None and (
+            isinstance(thinking_token_budget, bool) or thinking_token_budget < 0
+        ):
+            raise ModelRequired("thinking_token_budget must be a non-negative integer or null")
         self.endpoint = endpoint.rstrip("/")
         self.model = model
         self.max_tokens = max_tokens
@@ -286,6 +291,7 @@ class OpenAICompatibleProvider(Provider):
         self.top_p = top_p
         self.seed = seed
         self.timeout_seconds = timeout_seconds
+        self.thinking_token_budget = thinking_token_budget
 
     def _request_payload(
         self,
@@ -330,6 +336,8 @@ class OpenAICompatibleProvider(Provider):
             payload["top_k"] = top_k
         if presence_penalty is not None:
             payload["presence_penalty"] = presence_penalty
+        if self.thinking_token_budget is not None:
+            payload["thinking_token_budget"] = self.thinking_token_budget
         return payload
 
     @staticmethod

@@ -10,7 +10,7 @@ import subprocess  # nosec B404
 import time
 import urllib.error
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, TextIO, TypeAlias
@@ -58,6 +58,7 @@ class OwnedProfileProcess:
     resolution_sha256: str
     log_path: str
     started_at_utc: str
+    launch_environment: dict[str, str] = field(default_factory=dict)
 
 
 def _integer(value: str) -> int:
@@ -157,12 +158,19 @@ class ServingProfileRuntime:
         *,
         residual_free_mib: int = 2_048,
         ffmpeg_library_path: Path | None = None,
+        launch_environment: dict[str, str] | None = None,
     ) -> None:
         self.state_root = state_root.resolve()
         self.state_root.mkdir(parents=True, exist_ok=True)
         self.ownership_path = self.state_root / "owned_profile_process.json"
         self.residual_free_mib = residual_free_mib
         self.ffmpeg_library_path = ffmpeg_library_path
+        self.launch_environment = dict(launch_environment or {})
+        if any(
+            not key or not value or "=" in key or "\n" in key or "\n" in value
+            for key, value in self.launch_environment.items()
+        ):
+            raise ValueError("launch_environment must contain non-empty environment pairs")
         self._process: subprocess.Popen[str] | None = None
         self._log_handle: TextIO | None = None
 
@@ -214,6 +222,7 @@ class ServingProfileRuntime:
         }
         if self.ffmpeg_library_path is not None:
             environment["LD_LIBRARY_PATH"] = str(self.ffmpeg_library_path)
+        environment.update(self.launch_environment)
         executable_directory = str(Path(resolved.command[0]).parent)
         environment["PATH"] = (
             executable_directory
@@ -240,6 +249,7 @@ class ServingProfileRuntime:
             command_sha256=_command_sha256(resolved.command),
             resolution_sha256=resolved.resolution_sha256,
             log_path=str(log_path),
+            launch_environment=self.launch_environment,
             started_at_utc=datetime.now(UTC).isoformat(),
         )
         self.ownership_path.write_text(

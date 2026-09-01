@@ -44,7 +44,7 @@
     "max_model_len": 8192,
     "max_num_seqs": 1,
     "max_num_batched_tokens": 8192,
-    "kv_cache_memory_bytes": 1342177280,
+    "kv_cache_memory_bytes": 1073741824,
     "gpu_memory_utilization": 0.18,
     "startup_timeout": 1200,
     "request_timeout": 300,
@@ -53,7 +53,11 @@
     "dtype": "bfloat16",
     "prefix_caching": true,
     "chunked_prefill": true,
-    "reasoning_parser": null
+    "reasoning_parser": "qwen3",
+    "kv_cache_dtype": "fp8",
+    "calculate_kv_scales": true,
+    "thinking_token_budget": 3072,
+    "use_v2_model_runner": false
   },
   "candidates": [
     {
@@ -102,7 +106,7 @@
     "require_held_out": true
   },
   "promotion_gate": {
-    "preselected_candidate": null,
+    "preselected_candidate": "siliconmind_qwen3_4b_t_2507_36k",
     "primary_metric": "deterministic_task_pass_count",
     "secondary_metric": "held_out_task_pass_count",
     "tie_breakers": [

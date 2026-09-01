@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -77,6 +78,7 @@ def test_step_c2_configuration_preserves_c1_and_p8() -> None:
     assert configuration.max_output_tokens == 8192
     assert configuration.gpu_memory_utilization == 0.18
     assert configuration.minimum_free_headroom_mib == 2048
+    assert configuration.preselected_candidate == "siliconmind_qwen3_4b_t_2507_36k"
     assert [item.candidate_id for item in configuration.candidates] == [
         "siliconmind_qwen3_4b_t_2507_36k",
         "siliconmind_qwen3_4b_t_2507_76k",
@@ -92,6 +94,30 @@ def test_huggingface_head_resolution_requires_one_exact_commit() -> None:
         parse_ls_remote_head(f"{'a' * 40}\tHEAD\n{'b' * 40}\tHEAD\n")
 
 
+def test_installed_vllm_accepts_native_thinking_token_budget() -> None:
+    configuration = load_step_c2_configuration(ROOT, DEFAULT_CONFIG)
+    completed = subprocess.run(
+        [
+            str(configuration.vllm_python),
+            "-c",
+            (
+                "from vllm.entrypoints.openai.chat_completion.protocol "
+                "import ChatCompletionRequest; "
+                "request = ChatCompletionRequest(messages=[{'role': 'user', 'content': 'RTL'}], "
+                "thinking_token_budget=3072); "
+                "assert request.to_sampling_params(8192, {}).thinking_token_budget == 3072; "
+                "print('native-thinking-budget-ok')"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip().endswith("native-thinking-budget-ok")
+
+
 def test_specialist_profile_is_bounded_and_native_reasoning_candidate(tmp_path: Path) -> None:
     configuration = load_step_c2_configuration(ROOT, DEFAULT_CONFIG)
     spec = configuration.candidates[0]
@@ -100,12 +126,18 @@ def test_specialist_profile_is_bounded_and_native_reasoning_candidate(tmp_path: 
     profile = build_specialist_profile(configuration, spec, model_path)
     candidate = build_specialist_candidate(configuration, spec, profile, "a" * 40)
     dual = build_direct_configuration(candidate)
-    assert profile.kv_cache_memory_bytes == 1342177280
+    assert profile.kv_cache_dtype == "fp8"
+    assert profile.kv_cache_memory_bytes == 1073741824
     assert profile.gpu_memory_utilization == 0.18
-    assert profile.extra_args == ("--dtype=bfloat16",)
+    assert profile.extra_args == (
+        "--dtype=bfloat16",
+        "--reasoning-parser=qwen3",
+        "--calculate-kv-scales",
+    )
     assert candidate.context_tokens == 8192
     assert candidate.max_output_tokens == 8192
     assert candidate.temperature == 1.0
+    assert candidate.thinking_token_budget == 3072
     assert dual.main == candidate
     assert dual.rtl_worker == candidate
     assert dual.fallback_to_main is False
@@ -123,7 +155,7 @@ def test_candidate_model_path_is_repo_local_runtime_storage() -> None:
     assert ".runtime/v3-a6000-completion/step-c2/models" in target.as_posix()
 
 
-def test_selection_is_correctness_first_then_memory_then_throughput() -> None:
+def test_selection_uses_only_the_published_36k_checkpoint() -> None:
     configuration = load_step_c2_configuration(ROOT, DEFAULT_CONFIG)
     reports = [
         _report(
@@ -133,92 +165,15 @@ def test_selection_is_correctness_first_then_memory_then_throughput() -> None:
             held_out=10,
             peak=9000,
             rate=50.0,
-        ),
-        _report(
-            configuration,
-            "siliconmind_qwen3_4b_t_2507_76k",
-            deterministic=10,
-            held_out=9,
-            peak=10000,
-            rate=40.0,
-        ),
-        _report(
-            configuration,
-            "siliconmind_v12_qwen3_4b_t_2507",
-            deterministic=11,
-            held_out=9,
-            peak=10500,
-            rate=35.0,
-        ),
-    ]
-    selection = select_candidate_reports(configuration, "3" * 40, reports)
-    selected = selection["selected_candidate"]
-    assert isinstance(selected, dict)
-    assert selected["candidate_id"] == "siliconmind_v12_qwen3_4b_t_2507"
-
-    reports = [
-        _report(
-            configuration,
-            "siliconmind_qwen3_4b_t_2507_36k",
-            deterministic=11,
-            held_out=10,
-            peak=9000,
-            rate=30.0,
-        ),
-        _report(
-            configuration,
-            "siliconmind_qwen3_4b_t_2507_76k",
-            deterministic=11,
-            held_out=10,
-            peak=9500,
-            rate=80.0,
-        ),
-        _report(
-            configuration,
-            "siliconmind_v12_qwen3_4b_t_2507",
-            deterministic=10,
-            held_out=10,
-            peak=8500,
-            rate=90.0,
-        ),
+        )
     ]
     selection = select_candidate_reports(configuration, "3" * 40, reports)
     selected = selection["selected_candidate"]
     assert isinstance(selected, dict)
     assert selected["candidate_id"] == "siliconmind_qwen3_4b_t_2507_36k"
-
-
-def test_exact_tie_fails_closed_without_promotion() -> None:
-    configuration = load_step_c2_configuration(ROOT, DEFAULT_CONFIG)
-    reports = [
-        _report(
-            configuration,
-            "siliconmind_qwen3_4b_t_2507_36k",
-            deterministic=11,
-            held_out=11,
-            peak=9000,
-            rate=50.0,
-        ),
-        _report(
-            configuration,
-            "siliconmind_qwen3_4b_t_2507_76k",
-            deterministic=11,
-            held_out=11,
-            peak=9000,
-            rate=50.0,
-        ),
-        _report(
-            configuration,
-            "siliconmind_v12_qwen3_4b_t_2507",
-            deterministic=11,
-            held_out=11,
-            peak=9000,
-            rate=50.0,
-        ),
-    ]
-    selection = select_candidate_reports(configuration, "3" * 40, reports)
-    assert selection["status"] == "NO_PROMOTION_TIE"
-    assert selection["selected_candidate"] is None
+    trace = selection["selection_trace"]
+    assert isinstance(trace, list)
+    assert trace[0]["metric"] == "official_upstream_evidence_preselection"
 
 
 def test_selection_rejects_infrastructure_failure_evidence() -> None:
@@ -231,25 +186,9 @@ def test_selection_rejects_infrastructure_failure_evidence() -> None:
             held_out=11,
             peak=9000,
             rate=50.0,
-        ),
-        _report(
-            configuration,
-            "siliconmind_qwen3_4b_t_2507_76k",
-            deterministic=11,
-            held_out=11,
-            peak=9000,
-            rate=50.0,
-        ),
-        _report(
-            configuration,
-            "siliconmind_v12_qwen3_4b_t_2507",
-            deterministic=11,
-            held_out=11,
-            peak=9000,
-            rate=50.0,
-        ),
+        )
     ]
-    metrics = reports[1]["metrics"]
+    metrics = reports[0]["metrics"]
     assert isinstance(metrics, dict)
     metrics["infrastructure_failure_count"] = 1
     with pytest.raises(SpecialistQualificationError):

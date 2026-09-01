@@ -46,6 +46,7 @@ class ServingCandidate:
     structured_serialization_top_p: float | None = None
     structured_serialization_top_k: int | None = None
     structured_serialization_presence_penalty: float = 0.0
+    thinking_token_budget: int | None = None
 
     def __post_init__(self) -> None:
         parsed = urlparse(self.endpoint)
@@ -103,6 +104,13 @@ class ServingCandidate:
             raise ValueError("Serving minimum completion cannot exceed max_output_tokens")
         if self.reviewer_max_output_tokens < 64 or self.reviewer_max_output_tokens > 2048:
             raise ValueError("Reviewer max output must be between 64 and 2048 tokens")
+        if self.thinking_token_budget is not None and (
+            isinstance(self.thinking_token_budget, bool)
+            or not 0 <= self.thinking_token_budget < self.max_output_tokens
+        ):
+            raise ValueError(
+                "thinking_token_budget must be non-negative and leave final output capacity"
+            )
 
     def to_json(self) -> JsonObject:
         return {
@@ -137,6 +145,7 @@ class ServingCandidate:
             "structured_serialization_presence_penalty": (
                 self.structured_serialization_presence_penalty
             ),
+            "thinking_token_budget": self.thinking_token_budget,
         }
 
 
@@ -150,6 +159,7 @@ def backend_for(candidate: ServingCandidate) -> LocalGenerationBackend:
             top_p=candidate.top_p,
             seed=candidate.seed,
             timeout_seconds=candidate.request_timeout_seconds,
+            thinking_token_budget=candidate.thinking_token_budget,
         )
     return SglangProvider(
         candidate.endpoint,

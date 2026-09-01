@@ -50,6 +50,7 @@ from .serving_profile_runtime import (
 )
 from .serving_profiles import (
     InstalledServingCapabilities,
+    KVCacheDType,
     ServingProfile,
     endpoint_for,
     resolve_profile,
@@ -105,16 +106,22 @@ class StepC2Configuration:
     max_model_len: int
     max_num_seqs: int
     max_num_batched_tokens: int
+    kv_cache_dtype: KVCacheDType
     kv_cache_memory_bytes: int
+    calculate_kv_scales: bool
     gpu_memory_utilization: float
     startup_timeout: int
     request_timeout: int
     max_output_tokens: int
     temperature: float
+    reasoning_parser: str
+    thinking_token_budget: int
+    use_v2_model_runner: bool
     worker_task_ids: tuple[str, ...]
     coexistence_task_ids: tuple[str, ...]
     minimum_free_headroom_mib: int
     candidates: tuple[CandidateSpec, ...]
+    preselected_candidate: CandidateId | None
 
     @property
     def config_sha256(self) -> str:
@@ -316,7 +323,9 @@ def load_step_c2_configuration(
             "max_model_len",
             "max_num_seqs",
             "max_num_batched_tokens",
+            "kv_cache_dtype",
             "kv_cache_memory_bytes",
+            "calculate_kv_scales",
             "gpu_memory_utilization",
             "startup_timeout",
             "request_timeout",
@@ -326,6 +335,8 @@ def load_step_c2_configuration(
             "prefix_caching",
             "chunked_prefill",
             "reasoning_parser",
+            "thinking_token_budget",
+            "use_v2_model_runner",
         },
         label="specialist_serving",
     )
@@ -402,13 +413,26 @@ def load_step_c2_configuration(
         raise SpecialistQualificationError("C2 qualification policy drifted from C1")
     if (
         serving.get("dtype") != "bfloat16"
+        or serving.get("kv_cache_dtype") != "fp8"
+        or serving.get("calculate_kv_scales") is not True
         or serving.get("prefix_caching") is not True
         or serving.get("chunked_prefill") is not True
-        or serving.get("reasoning_parser") is not None
+        or serving.get("reasoning_parser") != "qwen3"
+        or serving.get("use_v2_model_runner") is not False
     ):
         raise SpecialistQualificationError("C2 specialist serving policy is invalid")
-    if _integer(serving.get("max_output_tokens"), label="max_output_tokens") > 8192:
+    max_output_tokens = _integer(
+        serving.get("max_output_tokens"), label="max_output_tokens"
+    )
+    if max_output_tokens > 8192:
         raise SpecialistQualificationError("C2 may not widen Laplace max_output_tokens")
+    thinking_token_budget = _integer(
+        serving.get("thinking_token_budget"), label="thinking_token_budget"
+    )
+    if thinking_token_budget >= max_output_tokens:
+        raise SpecialistQualificationError(
+            "C2 thinking budget must leave capacity for final RTL source"
+        )
 
     p8_raw = coexistence.get("p8_profile")
     if not isinstance(p8_raw, dict):
@@ -435,7 +459,8 @@ def load_step_c2_configuration(
         raise SpecialistQualificationError("Coexistence must retain held-out evaluation")
 
     if (
-        promotion.get("preselected_candidate") is not None
+        promotion.get("preselected_candidate")
+        != "siliconmind_qwen3_4b_t_2507_36k"
         or promotion.get("primary_metric") != "deterministic_task_pass_count"
         or promotion.get("secondary_metric") != "held_out_task_pass_count"
         or promotion.get("tie_breakers")
@@ -587,9 +612,11 @@ def load_step_c2_configuration(
         max_num_batched_tokens=_integer(
             serving.get("max_num_batched_tokens"), label="max_num_batched_tokens"
         ),
+        kv_cache_dtype=cast(KVCacheDType, serving.get("kv_cache_dtype")),
         kv_cache_memory_bytes=_integer(
             serving.get("kv_cache_memory_bytes"), label="kv_cache_memory_bytes"
         ),
+        calculate_kv_scales=serving.get("calculate_kv_scales") is True,
         gpu_memory_utilization=_number(
             serving.get("gpu_memory_utilization"), label="gpu_memory_utilization"
         ),
@@ -597,12 +624,22 @@ def load_step_c2_configuration(
         request_timeout=_integer(serving.get("request_timeout"), label="request_timeout"),
         max_output_tokens=_integer(serving.get("max_output_tokens"), label="max_output_tokens"),
         temperature=_number(serving.get("temperature"), label="temperature"),
+        reasoning_parser=_non_empty_string(
+            serving.get("reasoning_parser"), label="reasoning_parser"
+        ),
+        thinking_token_budget=_integer(
+            serving.get("thinking_token_budget"), label="thinking_token_budget"
+        ),
+        use_v2_model_runner=serving.get("use_v2_model_runner") is True,
         worker_task_ids=worker_ids,
         coexistence_task_ids=integration_ids,
         minimum_free_headroom_mib=_integer(
             coexistence.get("minimum_free_headroom_mib"), label="minimum_free_headroom_mib"
         ),
         candidates=tuple(candidates),
+        preselected_candidate=cast(
+            CandidateId, promotion.get("preselected_candidate")
+        ),
     )
 
 
@@ -719,7 +756,7 @@ def write_revision_lock(
             "ref": "HEAD",
             "revision": resolve_candidate_revision(candidate),
         }
-        for candidate in configuration.candidates
+        for candidate in _active_candidates(configuration)
     ]
     payload: JsonObject = {
         "schema_version": 1,
@@ -768,9 +805,10 @@ def load_revision_lock(
     ):
         raise SpecialistQualificationError("Revision lock is incompatible with this C2 execution")
     raw_candidates = value.get("candidates")
-    if not isinstance(raw_candidates, list) or len(raw_candidates) != len(configuration.candidates):
+    active_candidates = _active_candidates(configuration)
+    if not isinstance(raw_candidates, list) or len(raw_candidates) != len(active_candidates):
         raise SpecialistQualificationError("Revision lock candidate set is malformed")
-    expected = [(item.candidate_id, item.repository) for item in configuration.candidates]
+    expected = [(item.candidate_id, item.repository) for item in active_candidates]
     actual: list[tuple[object, object]] = []
     for item in raw_candidates:
         if not isinstance(item, dict) or item.get("ref") != "HEAD":
@@ -782,6 +820,13 @@ def load_revision_lock(
     if actual != expected:
         raise SpecialistQualificationError("Revision lock candidate identities drifted")
     return value
+
+
+def _active_candidates(configuration: StepC2Configuration) -> tuple[CandidateSpec, ...]:
+    """Return the published Step-C candidate without rewriting C1 provenance."""
+    if configuration.preselected_candidate is None:
+        return configuration.candidates
+    return (configuration.candidate(configuration.preselected_candidate),)
 
 
 def locked_revision(lock: JsonObject, candidate_id: str) -> str:
@@ -927,7 +972,7 @@ def build_specialist_profile(
         max_model_len=configuration.max_model_len,
         max_num_seqs=configuration.max_num_seqs,
         max_num_batched_tokens=configuration.max_num_batched_tokens,
-        kv_cache_dtype="auto",
+        kv_cache_dtype=configuration.kv_cache_dtype,
         kv_cache_memory_bytes=configuration.kv_cache_memory_bytes,
         enable_prefix_caching=True,
         prefix_hash_algorithm="sha256",
@@ -944,7 +989,11 @@ def build_specialist_profile(
         gpu_memory_utilization=configuration.gpu_memory_utilization,
         startup_timeout=configuration.startup_timeout,
         request_timeout=configuration.request_timeout,
-        extra_args=("--dtype=bfloat16",),
+        extra_args=(
+            "--dtype=bfloat16",
+            f"--reasoning-parser={configuration.reasoning_parser}",
+            "--calculate-kv-scales",
+        ),
     )
 
 
@@ -975,6 +1024,7 @@ def build_specialist_candidate(
         context_safety_margin_tokens=512,
         minimum_completion_tokens=256,
         reviewer_max_output_tokens=768,
+        thinking_token_budget=configuration.thinking_token_budget,
     )
 
 
@@ -1018,6 +1068,27 @@ def _installed_capabilities(
         env=environment,
     ).stdout
     return InstalledServingCapabilities.from_help(version=version, help_text=help_text)
+
+
+def _specialist_runtime(
+    state_root: Path, configuration: StepC2Configuration
+) -> ServingProfileRuntime:
+    """Use vLLM's native V1 thinking-budget implementation for Step C.
+
+    vLLM 0.25.0 rejects ``thinking_token_budget`` on its V2 model runner.  The
+    runtime setting is recorded in owned-process evidence and is not a Laplace
+    token-forcing mechanism.
+    """
+    if configuration.use_v2_model_runner:
+        raise SpecialistQualificationError(
+            "Step C native thinking budget requires the installed vLLM V1 model runner"
+        )
+    return ServingProfileRuntime(
+        state_root,
+        residual_free_mib=configuration.minimum_free_headroom_mib,
+        ffmpeg_library_path=configuration.ffmpeg_library_path,
+        launch_environment={"VLLM_USE_V2_MODEL_RUNNER": "0"},
+    )
 
 
 class _GpuSampler:
@@ -1289,6 +1360,8 @@ def qualify_candidate(
     candidate_id: str,
     held_out_root: Path,
     output_root: Path,
+    *,
+    task_ids: tuple[str, ...] | None = None,
 ) -> JsonObject:
     require_clean_execution_base(repository_root, configuration, base_revision)
     lock = load_revision_lock(configuration, lock_path, base_revision=base_revision)
@@ -1339,11 +1412,7 @@ def qualify_candidate(
             "Candidate qualification requires a clean GPU; unrelated compute PIDs are present: "
             + ",".join(str(pid) for pid in initial.compute_pids)
         )
-    runtime = ServingProfileRuntime(
-        output / "server",
-        residual_free_mib=configuration.minimum_free_headroom_mib,
-        ffmpeg_library_path=configuration.ffmpeg_library_path,
-    )
+    runtime = _specialist_runtime(output / "server", configuration)
     sampler = _GpuSampler()
     sampler.samples.append(initial)
     sampler.start()
@@ -1352,12 +1421,18 @@ def qualify_candidate(
     release: JsonObject = {"status": "NOT_STARTED"}
     tasks: list[JsonObject] = []
     fatal_error: JsonObject | None = None
+    selected_task_ids = task_ids or configuration.worker_task_ids
+    if not selected_task_ids or not set(selected_task_ids).issubset(
+        configuration.worker_task_ids
+    ):
+        raise SpecialistQualificationError("Qualification task subset is invalid")
+    is_full_qualification = selected_task_ids == configuration.worker_task_ids
     try:
         owned_process = runtime.start(resolved)
         owned = asdict(owned_process)
         readiness = runtime.wait_ready(resolved)
         task_by_id = _task_map(configuration)
-        for task_id in configuration.worker_task_ids:
+        for task_id in selected_task_ids:
             task = task_by_id[task_id]
             project = output / "tasks" / task_id
             try:
@@ -1412,10 +1487,11 @@ def qualify_candidate(
         and residual is not None
         and not residual.compute_pids
     )
+    success_status = "QUALIFICATION_COMPLETE" if is_full_qualification else "SMOKE_COMPLETE"
     status = (
-        "QUALIFICATION_COMPLETE"
+        success_status
         if fatal_error is None
-        and len(tasks) == len(configuration.worker_task_ids)
+        and len(tasks) == len(selected_task_ids)
         and metrics["infrastructure_failure_count"] == 0
         and clean_release
         else "QUALIFICATION_INVALID_INFRASTRUCTURE"
@@ -1432,7 +1508,8 @@ def qualify_candidate(
         "configuration_sha256": configuration.config_sha256,
         "captured_at_utc": datetime.now(UTC).isoformat(),
         "qualification_policy": {
-            "task_ids": list(configuration.worker_task_ids),
+            "task_ids": list(selected_task_ids),
+            "full_qualification": is_full_qualification,
             "role_mode": "direct",
             "retrieval_mode": "none",
             "fallback_to_main": False,
@@ -1441,6 +1518,11 @@ def qualify_candidate(
         },
         "serving_profile": profile.to_json(),
         "resolved_serving_profile": resolved.to_json(),
+        "native_reasoning": {
+            "reasoning_parser": configuration.reasoning_parser,
+            "thinking_token_budget": configuration.thinking_token_budget,
+            "vllm_use_v2_model_runner": configuration.use_v2_model_runner,
+        },
         "held_out_validation": held_out_validation,
         "owned_process": owned,
         "readiness": readiness,
@@ -1522,7 +1604,11 @@ def _validated_candidate_reports(
                 f"Candidate report metrics are malformed: {candidate_id}"
             )
         by_id[candidate_id] = report
-    expected = {item.candidate_id for item in configuration.candidates}
+    expected = (
+        {configuration.preselected_candidate}
+        if configuration.preselected_candidate is not None
+        else {item.candidate_id for item in configuration.candidates}
+    )
     if set(by_id) != expected:
         raise SpecialistQualificationError(
             "Selection requires exactly all configured candidates"
@@ -1538,6 +1624,14 @@ def select_candidate_reports(
     by_id = _validated_candidate_reports(configuration, base_revision, reports)
     pool = list(by_id.values())
     trace: list[JsonObject] = []
+    if configuration.preselected_candidate is not None:
+        trace.append(
+            {
+                "metric": "official_upstream_evidence_preselection",
+                "best": configuration.preselected_candidate,
+                "remaining": [configuration.preselected_candidate],
+            }
+        )
 
     def integer_metric(report: JsonObject, name: str) -> int:
         raw = report.get("metrics")
@@ -1799,11 +1893,7 @@ def certify_coexistence(
         residual_free_mib=configuration.minimum_free_headroom_mib,
         ffmpeg_library_path=configuration.ffmpeg_library_path,
     )
-    specialist_runtime = ServingProfileRuntime(
-        output / "specialist_server",
-        residual_free_mib=configuration.minimum_free_headroom_mib,
-        ffmpeg_library_path=configuration.ffmpeg_library_path,
-    )
+    specialist_runtime = _specialist_runtime(output / "specialist_server", configuration)
     sampler = _GpuSampler()
     sampler.samples.append(initial)
     sampler.start()
@@ -1964,9 +2054,16 @@ def _parser() -> argparse.ArgumentParser:
     qualify.add_argument("--held-out-root", type=Path, required=True)
     qualify.add_argument("--output-root", type=Path, required=True)
 
+    smoke = sub.add_parser("smoke")
+    smoke.add_argument("--base-revision", required=True)
+    smoke.add_argument("--lock", type=Path, required=True)
+    smoke.add_argument("--candidate", required=True)
+    smoke.add_argument("--held-out-root", type=Path, required=True)
+    smoke.add_argument("--output-root", type=Path, required=True)
+
     select = sub.add_parser("select")
     select.add_argument("--base-revision", required=True)
-    select.add_argument("--reports", type=Path, nargs=3, required=True)
+    select.add_argument("--reports", type=Path, nargs="+", required=True)
     select.add_argument("--output", type=Path, required=True)
 
     coexist = sub.add_parser("coexist")
@@ -2029,6 +2126,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         _print(report)
         return 0 if report["status"] == "QUALIFICATION_COMPLETE" else 2
+    if command == "smoke":
+        report = qualify_candidate(
+            ROOT,
+            configuration,
+            arguments.base_revision,
+            arguments.lock,
+            arguments.candidate,
+            arguments.held_out_root,
+            arguments.output_root,
+            task_ids=configuration.coexistence_task_ids,
+        )
+        _print(report)
+        return 0 if report["status"] == "SMOKE_COMPLETE" else 2
     if command == "select":
         reports = [
             _read_json(
