@@ -69,6 +69,7 @@ _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 CandidateId = Literal[
     "siliconmind_qwen3_4b_t_2507_36k",
     "siliconmind_qwen3_4b_t_2507_76k",
+    "siliconmind_v12_qwen3_4b_t_2507",
 ]
 RoleMode = Literal["direct", "five_role"]
 EXPECTED_BRANCH = "work/laplace-v3-refactor-certified-20260831"
@@ -205,6 +206,7 @@ def load_step_c2_configuration(
             "roadmap_step",
             "preparation_base_commit",
             "c1_manifest",
+            "candidate_scope_extension",
             "benchmark_manifest",
             "runtime",
             "specialist_serving",
@@ -229,6 +231,7 @@ def load_step_c2_configuration(
         raise SpecialistQualificationError("preparation_base_commit must be an exact commit")
 
     c1_raw = value.get("c1_manifest")
+    extension_raw = value.get("candidate_scope_extension")
     benchmark_raw = value.get("benchmark_manifest")
     runtime_raw = value.get("runtime")
     serving_raw = value.get("specialist_serving")
@@ -240,6 +243,7 @@ def load_step_c2_configuration(
         isinstance(item, dict)
         for item in (
             c1_raw,
+            extension_raw,
             benchmark_raw,
             runtime_raw,
             serving_raw,
@@ -251,6 +255,7 @@ def load_step_c2_configuration(
     ):
         raise SpecialistQualificationError("Step C2 object sections are malformed")
     c1 = cast(dict[str, object], c1_raw)
+    extension = cast(dict[str, object], extension_raw)
     benchmark = cast(dict[str, object], benchmark_raw)
     runtime = cast(dict[str, object], runtime_raw)
     serving = cast(dict[str, object], serving_raw)
@@ -260,6 +265,23 @@ def load_step_c2_configuration(
     boundaries = cast(dict[str, object], boundaries_raw)
 
     _exact_keys(c1, {"path", "git_blob_sha"}, label="c1_manifest")
+    _exact_keys(
+        extension,
+        {"discovery_date", "reason", "source", "candidate_ids"},
+        label="candidate_scope_extension",
+    )
+    if (
+        extension.get("discovery_date") != "2026-09-01"
+        or extension.get("reason")
+        != "official_upstream_v1_2_discovered_after_c1_freeze"
+        or extension.get("source")
+        != "AS-SiliconMind official Hugging Face collection"
+        or extension.get("candidate_ids")
+        != ["siliconmind_v12_qwen3_4b_t_2507"]
+    ):
+        raise SpecialistQualificationError(
+            "C2 candidate-scope extension is invalid"
+        )
     _exact_keys(
         benchmark,
         {"path", "worker_task_ids", "preserve_task_order"},
@@ -427,12 +449,15 @@ def load_step_c2_configuration(
         raise SpecialistQualificationError("C2 roadmap boundaries are invalid")
 
     candidates_raw = value.get("candidates")
-    if not isinstance(candidates_raw, list) or len(candidates_raw) != 2:
-        raise SpecialistQualificationError("C2 requires exactly two SiliconMind candidates")
+    if not isinstance(candidates_raw, list) or len(candidates_raw) != 3:
+        raise SpecialistQualificationError(
+            "C2 requires exactly three SiliconMind 4B candidates"
+        )
     candidates: list[CandidateSpec] = []
     expected_ids: tuple[CandidateId, ...] = (
         "siliconmind_qwen3_4b_t_2507_36k",
         "siliconmind_qwen3_4b_t_2507_76k",
+        "siliconmind_v12_qwen3_4b_t_2507",
     )
     for index, raw_candidate in enumerate(candidates_raw):
         if not isinstance(raw_candidate, dict):
@@ -445,7 +470,9 @@ def load_step_c2_configuration(
         )
         candidate_id = candidate.get("candidate_id")
         if candidate_id != expected_ids[index]:
-            raise SpecialistQualificationError("Candidate order or identity drifted from C1")
+            raise SpecialistQualificationError(
+                "Candidate order or identity drifted from C2 scope"
+            )
         repository = _non_empty_string(candidate.get("repository"), label="candidate repository")
         if not _REPOSITORY.fullmatch(repository):
             raise SpecialistQualificationError("Candidate repository identifier is unsafe")
@@ -479,8 +506,18 @@ def load_step_c2_configuration(
         for item in c1_candidates
         if isinstance(item, dict)
     ]
-    if c1_pairs != [(item.candidate_id, item.repository) for item in candidates]:
-        raise SpecialistQualificationError("C2 candidate identities disagree with C1")
+    frozen_c1_pairs = [
+        (item.candidate_id, item.repository)
+        for item in candidates[:2]
+    ]
+    if c1_pairs != frozen_c1_pairs:
+        raise SpecialistQualificationError(
+            "C2 does not preserve the frozen C1 candidate prefix"
+        )
+    if extension.get("candidate_ids") != [candidates[2].candidate_id]:
+        raise SpecialistQualificationError(
+            "C2 current-upstream extension disagrees with candidate set"
+        )
     c1_manifest = c1_value.get("qualification_manifest")
     c1_worker_ids = c1_manifest.get("worker_task_ids") if isinstance(c1_manifest, dict) else None
     if c1_worker_ids != list(worker_ids):
@@ -1464,7 +1501,9 @@ def _validated_candidate_reports(
         by_id[candidate_id] = report
     expected = {item.candidate_id for item in configuration.candidates}
     if set(by_id) != expected:
-        raise SpecialistQualificationError("Selection requires exactly both configured candidates")
+        raise SpecialistQualificationError(
+            "Selection requires exactly all configured candidates"
+        )
     return by_id
 
 
@@ -1904,7 +1943,7 @@ def _parser() -> argparse.ArgumentParser:
 
     select = sub.add_parser("select")
     select.add_argument("--base-revision", required=True)
-    select.add_argument("--reports", type=Path, nargs=2, required=True)
+    select.add_argument("--reports", type=Path, nargs=3, required=True)
     select.add_argument("--output", type=Path, required=True)
 
     coexist = sub.add_parser("coexist")

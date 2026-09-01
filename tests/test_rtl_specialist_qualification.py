@@ -31,17 +31,25 @@ def _report(
     repository = {
         "siliconmind_qwen3_4b_t_2507_36k": "AS-SiliconMind/SiliconMind-V1-Qwen3-4B-T-2507",
         "siliconmind_qwen3_4b_t_2507_76k": "AS-SiliconMind/SiliconMind-V1-Qwen3-4B-T-2507-76k",
+        "siliconmind_v12_qwen3_4b_t_2507": (
+            "AS-SiliconMind/SiliconMind-V1.2-Qwen3-4B-T-2507"
+        ),
+    }[candidate_id]
+    revision = {
+        "siliconmind_qwen3_4b_t_2507_36k": "1" * 40,
+        "siliconmind_qwen3_4b_t_2507_76k": "2" * 40,
+        "siliconmind_v12_qwen3_4b_t_2507": "4" * 40,
     }[candidate_id]
     return {
         "status": "QUALIFICATION_COMPLETE",
         "candidate_id": candidate_id,
         "repository": repository,
-        "revision": "1" * 40 if candidate_id.endswith("36k") else "2" * 40,
+        "revision": revision,
         "model_path": str(
             candidate_model_path(
                 configuration,
                 candidate_id,
-                "1" * 40 if candidate_id.endswith("36k") else "2" * 40,
+                revision,
             )
         ),
         "base_revision": "3" * 40,
@@ -72,6 +80,7 @@ def test_step_c2_configuration_preserves_c1_and_p8() -> None:
     assert [item.candidate_id for item in configuration.candidates] == [
         "siliconmind_qwen3_4b_t_2507_36k",
         "siliconmind_qwen3_4b_t_2507_76k",
+        "siliconmind_v12_qwen3_4b_t_2507",
     ]
 
 
@@ -128,16 +137,24 @@ def test_selection_is_correctness_first_then_memory_then_throughput() -> None:
         _report(
             configuration,
             "siliconmind_qwen3_4b_t_2507_76k",
-            deterministic=11,
+            deterministic=10,
             held_out=9,
             peak=10000,
             rate=40.0,
+        ),
+        _report(
+            configuration,
+            "siliconmind_v12_qwen3_4b_t_2507",
+            deterministic=11,
+            held_out=9,
+            peak=10500,
+            rate=35.0,
         ),
     ]
     selection = select_candidate_reports(configuration, "3" * 40, reports)
     selected = selection["selected_candidate"]
     assert isinstance(selected, dict)
-    assert selected["candidate_id"] == "siliconmind_qwen3_4b_t_2507_76k"
+    assert selected["candidate_id"] == "siliconmind_v12_qwen3_4b_t_2507"
 
     reports = [
         _report(
@@ -155,6 +172,14 @@ def test_selection_is_correctness_first_then_memory_then_throughput() -> None:
             held_out=10,
             peak=9500,
             rate=80.0,
+        ),
+        _report(
+            configuration,
+            "siliconmind_v12_qwen3_4b_t_2507",
+            deterministic=10,
+            held_out=10,
+            peak=8500,
+            rate=90.0,
         ),
     ]
     selection = select_candidate_reports(configuration, "3" * 40, reports)
@@ -182,6 +207,14 @@ def test_exact_tie_fails_closed_without_promotion() -> None:
             peak=9000,
             rate=50.0,
         ),
+        _report(
+            configuration,
+            "siliconmind_v12_qwen3_4b_t_2507",
+            deterministic=11,
+            held_out=11,
+            peak=9000,
+            rate=50.0,
+        ),
     ]
     selection = select_candidate_reports(configuration, "3" * 40, reports)
     assert selection["status"] == "NO_PROMOTION_TIE"
@@ -202,6 +235,14 @@ def test_selection_rejects_infrastructure_failure_evidence() -> None:
         _report(
             configuration,
             "siliconmind_qwen3_4b_t_2507_76k",
+            deterministic=11,
+            held_out=11,
+            peak=9000,
+            rate=50.0,
+        ),
+        _report(
+            configuration,
+            "siliconmind_v12_qwen3_4b_t_2507",
             deterministic=11,
             held_out=11,
             peak=9000,

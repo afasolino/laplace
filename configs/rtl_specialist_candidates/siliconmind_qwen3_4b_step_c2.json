@@ -7,6 +7,14 @@
     "path": "configs/rtl_specialist_candidates/siliconmind_qwen3_4b_step_c1.json",
     "git_blob_sha": "f3441d3c9d7a31e35f9acfbfa3442f1e470571d5"
   },
+  "candidate_scope_extension": {
+    "discovery_date": "2026-09-01",
+    "reason": "official_upstream_v1_2_discovered_after_c1_freeze",
+    "source": "AS-SiliconMind official Hugging Face collection",
+    "candidate_ids": [
+      "siliconmind_v12_qwen3_4b_t_2507"
+    ]
+  },
   "benchmark_manifest": {
     "path": "codex_a6000/experiments/multilanguage_dual_model_ablation_v1/benchmark_manifest.yaml",
     "preserve_task_order": true,
@@ -59,6 +67,12 @@
       "repository": "AS-SiliconMind/SiliconMind-V1-Qwen3-4B-T-2507-76k",
       "profile_id": "P10_siliconmind_76k",
       "served_model_name": "laplace-rtl-siliconmind-76k"
+    },
+    {
+      "candidate_id": "siliconmind_v12_qwen3_4b_t_2507",
+      "repository": "AS-SiliconMind/SiliconMind-V1.2-Qwen3-4B-T-2507",
+      "profile_id": "P11_siliconmind_v12",
+      "served_model_name": "laplace-rtl-siliconmind-v12"
     }
   ],
   "qualification": {
