@@ -597,6 +597,7 @@ class AuditedModelCaller:
                 "experiment_arm": metadata.experiment_arm,
                 "created_at": created_at,
                 "routing": decision.to_json(),
+                "native_thinking_token_budget": decision.candidate.thinking_token_budget,
                 "prompt_sha256": hashlib.sha256(effective_prompt.encode("utf-8")).hexdigest(),
                 "prompt_characters": len(effective_prompt),
                 **budget,

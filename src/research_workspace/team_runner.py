@@ -1517,6 +1517,13 @@ end endmodule
         allow_worker_reasoning = (
             self.model_configuration.worker_reasoning_mode == "model_default"
         )
+        worker_thinking = (
+            True
+            if allow_worker_reasoning
+            and self.model_configuration.rtl_worker is not None
+            and self.model_configuration.rtl_worker.thinking_token_budget is not None
+            else None
+        )
         worker_failure_category: str | None = (
             "worker_contract_invalid" if contract_error is not None else None
         )
@@ -1550,7 +1557,7 @@ end endmodule
                         metadata=metadata,
                         retry_index=retry,
                         validator=validate_worker_response,
-                        enable_thinking=None if allow_worker_reasoning else False,
+                        enable_thinking=worker_thinking if allow_worker_reasoning else False,
                     )
                 except ModelRequired as exc:
                     failure_category = getattr(exc, "category", None)

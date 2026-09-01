@@ -1532,6 +1532,10 @@ def qualify_candidate(
         and residual is not None
         and not residual.compute_pids
     )
+    smoke_evidence_complete = (
+        metrics["worker_call_count"] > 0
+        and any(item.get("lane_status") == "COMPLETE" for item in tasks)
+    )
     success_status = "QUALIFICATION_COMPLETE" if is_full_qualification else "SMOKE_COMPLETE"
     status = (
         success_status
@@ -1539,6 +1543,7 @@ def qualify_candidate(
         and len(tasks) == len(selected_task_ids)
         and metrics["infrastructure_failure_count"] == 0
         and clean_release
+        and (is_full_qualification or smoke_evidence_complete)
         else "QUALIFICATION_INVALID_INFRASTRUCTURE"
     )
     report: JsonObject = {
