@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "status": "qualification_candidates_only",
+  "roadmap_step": "C1",
+  "base_commit": "54fa762ff9bf7273c320e04183fdd69db391688b",
+  "main_profile": {
+    "path": "configs/serving_profile_candidates/P8_qwen38_w4a16_mtp.json",
+    "git_blob_sha": "cffae38fab1196d339fe9a7dd23a04616219e6d2",
+    "served_model_name": "laplace-quality-qwen38-mtp8"
+  },
+  "candidate_policy": {
+    "engine": "vllm",
+    "initial_dtype": "bfloat16",
+    "worker_reasoning_mode": "model_default",
+    "reasoning_parser": null,
+    "max_model_len": 16384,
+    "temperature": 1.0,
+    "laplace_initial_max_output_tokens": 8192,
+    "upstream_reference_max_tokens": 16384,
+    "immutable_revision_required_before_download": true,
+    "no_main_fallback_during_qualification": true
+  },
+  "candidates": [
+    {
+      "candidate_id": "siliconmind_qwen3_4b_t_2507_36k",
+      "repository": "AS-SiliconMind/SiliconMind-V1-Qwen3-4B-T-2507",
+      "revision": null,
+      "published_benchmark_status": "available",
+      "promotion_status": "not_selected"
+    },
+    {
+      "candidate_id": "siliconmind_qwen3_4b_t_2507_76k",
+      "repository": "AS-SiliconMind/SiliconMind-V1-Qwen3-4B-T-2507-76k",
+      "revision": null,
+      "published_benchmark_status": "pending",
+      "promotion_status": "not_selected"
+    }
+  ],
+  "qualification_manifest": {
+    "source": "codex_a6000/experiments/multilanguage_dual_model_ablation_v1/benchmark_manifest.yaml",
+    "preserve_task_order": true,
+    "worker_task_ids": [
+      "v_event_counter",
+      "v_parameterized_fifo",
+      "v_ready_valid_buffer",
+      "v_round_robin_arbiter",
+      "v_register_file",
+      "v_saturating_datapath",
+      "sv_ready_valid_buffer",
+      "sv_elastic_buffer2",
+      "sv_w1c_event_bank",
+      "sv_parameterized_pipeline",
+      "sv_asserted_counter"
+    ],
+    "held_out_verification_required": true,
+    "deterministic_verification_required": true
+  },
+  "promotion_gate": {
+    "preselected_candidate": null,
+    "primary_metric": "deterministic_task_pass_count",
+    "secondary_metric": "held_out_task_pass_count",
+    "correctness_tie_breakers": [
+      "lower_peak_gpu_memory_mib",
+      "higher_output_tokens_per_second"
+    ],
+    "tie_after_all_metrics": "no_promotion",
+    "requires_p8_specialist_concurrent_a6000_certification": true,
+    "requires_clean_owned_server_release": true
+  },
+  "boundaries": {
+    "download_models_in_c1": false,
+    "run_live_models_in_c1": false,
+    "modify_historical_codev_artifacts": false,
+    "modify_historical_model_server_lifecycle": false,
+    "modify_p8_profile": false,
+    "three_model_lifecycle_is_step_e": true
+  },
+  "upstream_evidence": {
+    "inference_repository": "AS-SiliconMind/SiliconMind-V1",
+    "tested_vllm_version": "0.15.1",
+    "upstream_parser_accepts_answer_framing": true,
+    "upstream_parser_accepts_qwen_native_think_prefix": true,
+    "verification_date": "2026-08-31"
+  }
+}

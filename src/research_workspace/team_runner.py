@@ -39,6 +39,7 @@ from .model_routing import (
     RoutingTaskMetadata,
     STRUCTURED_SERIALIZATION_SAFETY_MARGIN_TOKENS,
     assess_rtl_worker_eligibility,
+    supports_qwen3_structured_serialization,
 )
 from .repair_protocol import (
     StructuredOutputError,
@@ -1438,7 +1439,7 @@ end endmodule
     ) -> RoutedCall:
         allowed = _allowed_paths(task)
         qwen_reasoning_repair = call_policy == "structured_replacement_serialization" and (
-            "qwen3.6" in self.model_configuration.main.model.lower()
+            supports_qwen3_structured_serialization(self.model_configuration.main)
         )
         source_records = current_sources.get("current_worktree_sources")
         estimated_serialization_tokens = (
@@ -1512,6 +1513,9 @@ end endmodule
             latest_defect,
         )
         worker_error = contract_error
+        allow_worker_reasoning = (
+            self.model_configuration.worker_reasoning_mode == "model_default"
+        )
         worker_failure_category: str | None = (
             "worker_contract_invalid" if contract_error is not None else None
         )
@@ -1539,12 +1543,13 @@ end endmodule
                             contract,
                             retry_index=retry,
                             prior_error=worker_error,
+                            allow_model_reasoning=allow_worker_reasoning,
                         ),
                         role=role,
                         metadata=metadata,
                         retry_index=retry,
                         validator=validate_worker_response,
-                        enable_thinking=False,
+                        enable_thinking=None if allow_worker_reasoning else False,
                     )
                 except ModelRequired as exc:
                     failure_category = getattr(exc, "category", None)

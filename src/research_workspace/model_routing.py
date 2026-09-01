@@ -35,6 +35,7 @@ ModelRole = Literal[
     "review",
 ]
 ModelCallPolicy = Literal["standard", "structured_replacement_serialization"]
+WorkerReasoningMode = Literal["disabled", "model_default"]
 STRUCTURED_SERIALIZATION_SAFETY_MARGIN_TOKENS = 8192
 TaskKind = Literal["implementation", "repair", "integration"]
 RtlScope = Literal[
@@ -146,12 +147,17 @@ class DualModelConfiguration:
     worker_contract_retries: int = 1
     worker_response_retries: int = 1
     fallback_to_main: bool = True
+    worker_reasoning_mode: WorkerReasoningMode = "disabled"
 
     def __post_init__(self) -> None:
         if self.worker_contract_retries < 0 or self.worker_contract_retries > 2:
             raise ValueError("worker_contract_retries must be between 0 and 2")
         if self.worker_response_retries < 0 or self.worker_response_retries > 2:
             raise ValueError("worker_response_retries must be between 0 and 2")
+        if self.worker_reasoning_mode not in {"disabled", "model_default"}:
+            raise ValueError(
+                "worker_reasoning_mode must be disabled or model_default"
+            )
         if self.rtl_worker is not None and self.rtl_worker.endpoint == self.main.endpoint:
             if self.rtl_worker.model != self.main.model:
                 raise ValueError("Different configured models cannot share one endpoint")
@@ -159,6 +165,12 @@ class DualModelConfiguration:
     @property
     def single_model(self) -> bool:
         return self.rtl_worker is None
+
+
+def supports_qwen3_structured_serialization(candidate: ServingCandidate) -> bool:
+    """Return whether a candidate can use Laplace's tested Qwen3/vLLM JSON path."""
+
+    return candidate.engine == "vllm" and "qwen3" in candidate.model.lower()
 
 
 @dataclass(frozen=True)
@@ -437,7 +449,7 @@ class AuditedModelCaller:
             or schema_name != "laplace_replacement_plan"
             or enable_thinking is not False
             or decision.selected != "main"
-            or "qwen3.6" not in decision.candidate.model.lower()
+            or not supports_qwen3_structured_serialization(decision.candidate)
         ):
             raise EngineeringError(
                 "Structured replacement serialization requires the routed Qwen3.6 main model, "
@@ -925,7 +937,7 @@ def load_dual_model_configuration(path: Path) -> DualModelConfiguration:
         raise ValueError(f"Cannot load dual-model configuration: {exc}") from exc
     if not isinstance(value, dict):
         raise ValueError("Dual-model configuration must be an object")
-    expected = {
+    expected_v1 = {
         "schema_version",
         "main",
         "rtl_worker",
@@ -933,7 +945,25 @@ def load_dual_model_configuration(path: Path) -> DualModelConfiguration:
         "worker_response_retries",
         "fallback_to_main",
     }
-    if set(value) != expected or value.get("schema_version") != 1:
+    expected_v2 = expected_v1 | {"worker_reasoning_mode"}
+    schema_version = value.get("schema_version")
+    if schema_version == 1:
+        if set(value) != expected_v1:
+            raise ValueError("Dual-model configuration keys or schema_version are invalid")
+        worker_reasoning_mode: WorkerReasoningMode = "disabled"
+    elif schema_version == 2:
+        if set(value) != expected_v2:
+            raise ValueError("Dual-model configuration keys or schema_version are invalid")
+        raw_reasoning_mode = value.get("worker_reasoning_mode")
+        if raw_reasoning_mode == "disabled":
+            worker_reasoning_mode = "disabled"
+        elif raw_reasoning_mode == "model_default":
+            worker_reasoning_mode = "model_default"
+        else:
+            raise ValueError(
+                "worker_reasoning_mode must be disabled or model_default"
+            )
+    else:
         raise ValueError("Dual-model configuration keys or schema_version are invalid")
     worker_raw = value.get("rtl_worker")
     worker = None if worker_raw is None else serving_candidate_from_json(worker_raw)
@@ -952,4 +982,5 @@ def load_dual_model_configuration(path: Path) -> DualModelConfiguration:
         worker_contract_retries=contract_retries,
         worker_response_retries=response_retries,
         fallback_to_main=fallback,
+        worker_reasoning_mode=worker_reasoning_mode,
     )

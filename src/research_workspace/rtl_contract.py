@@ -842,11 +842,27 @@ def rtl_worker_prompt(
     *,
     retry_index: int = 0,
     prior_error: str | None = None,
+    allow_model_reasoning: bool = False,
 ) -> str:
-    """Request one concise RTL source block without exposing a model reasoning channel."""
+    """Request one bounded RTL source answer while preserving legacy non-thinking behavior."""
     priority_guidance = _worker_priority_guidance(
         contract, retry_index=retry_index, prior_error=prior_error
     )
+    if allow_model_reasoning:
+        return (
+            "You are a bounded RTL implementation worker. Implement exactly the one module "
+            "specified by the contract. Model-native internal reasoning is permitted before "
+            "the final answer. After reasoning, return the implementation as exactly one "
+            f"fenced {contract.language} code block containing the complete replacement source "
+            f"for module {contract.module_name}, optionally enclosed by <answer> and </answer>. "
+            "Do not emit JSON, a diff, a path, shell commands, testbench code, or prose after "
+            "the reasoning channel or outside the final answer. Preserve the public module name, "
+            "parameters, ports, clock/reset behavior, and all contract constraints. Do not explore "
+            "a repository, execute tools, add modules, add files, or change architecture. The "
+            "orchestrator will validate and wrap the source deterministically.\n"
+            f"{priority_guidance}"
+            f"RTL contract: {json.dumps(contract.to_json(), sort_keys=True)}"
+        )
     return (
         "You are a bounded RTL implementation worker. Implement exactly the one module "
         "specified by the "
@@ -865,12 +881,17 @@ def rtl_worker_prompt(
 
 
 def parse_codev_rtl_answer(model_text: str, *, contract: RtlWorkerContract) -> str:
-    """Extract one complete RTL module from a bare or legacy tagged CodeV response."""
+    """Extract one complete RTL module from bare, tagged, or Qwen-native worker output."""
     if not isinstance(model_text, str) or not model_text.strip():
         raise StructuredOutputError("RTL worker response is empty")
     text = model_text.strip()
+    reasoning_match = re.match(
+        r"<think>.*?</think>\s*", text, flags=re.DOTALL | re.IGNORECASE
+    )
+    if reasoning_match:
+        text = text[reasoning_match.end() :].strip()
     answer_match = re.fullmatch(
-        r"(?:<think>.*?</think>\s*)?<answer>(?P<answer>.*?)</answer>",
+        r"<answer>(?P<answer>.*?)</answer>",
         text,
         flags=re.DOTALL | re.IGNORECASE,
     )
