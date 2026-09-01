@@ -164,9 +164,20 @@ def _number(value: object, *, label: str) -> float:
     return float(value)
 
 
-def _repository_path(root: Path, value: object, *, label: str) -> Path:
+def _repository_path(
+    root: Path,
+    value: object,
+    *,
+    label: str,
+    follow_symlinks: bool = True,
+) -> Path:
     raw = _non_empty_string(value, label=label)
-    path = (root / raw).resolve()
+    candidate = root / raw
+    path = (
+        candidate.resolve()
+        if follow_symlinks
+        else Path(os.path.abspath(candidate))
+    )
     try:
         path.relative_to(root.resolve())
     except ValueError as exc:
@@ -534,11 +545,22 @@ def load_step_c2_configuration(
 
     output_root = _repository_path(root, runtime.get("output_root"), label="runtime.output_root")
     vllm_executable = _repository_path(
-        root, runtime.get("vllm_executable"), label="runtime.vllm_executable"
+        root,
+        runtime.get("vllm_executable"),
+        label="runtime.vllm_executable",
+        follow_symlinks=False,
     )
-    vllm_python = _repository_path(root, runtime.get("vllm_python"), label="runtime.vllm_python")
+    vllm_python = _repository_path(
+        root,
+        runtime.get("vllm_python"),
+        label="runtime.vllm_python",
+        follow_symlinks=False,
+    )
     ffmpeg_library_path = _repository_path(
-        root, runtime.get("ffmpeg_library_path"), label="runtime.ffmpeg_library_path"
+        root,
+        runtime.get("ffmpeg_library_path"),
+        label="runtime.ffmpeg_library_path",
+        follow_symlinks=False,
     )
     held_env = _non_empty_string(
         runtime.get("held_out_environment_variable"), label="held_out_environment_variable"
