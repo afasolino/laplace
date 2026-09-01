@@ -328,7 +328,7 @@ class LocalTeamRunner:
         self._context_attempts[role] = attempt + 1
         skill_role = self._skill_role(role)
         skill_paths = [
-            self.repository_root / str(item["path"])
+            self.skill_registry.root / str(item["path"])
             for record in self.skill_registry.skills_for_role(skill_role)
             for item in record.files
         ]

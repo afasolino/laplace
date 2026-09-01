@@ -30,6 +30,17 @@ def test_skill_loading_and_lock_hash_are_deterministic(tmp_path: Path) -> None:
     assert registry.skills_for_role("review")[0].name == "reviewer-grounding"
 
 
+def test_frozen_skill_record_paths_are_relative_to_registry_root() -> None:
+    registry = FrozenSkillRegistry(REPOSITORY_ROOT / "codex_a6000" / "skills")
+
+    for record in registry.records():
+        for item in record.files:
+            relative = item["path"]
+            assert isinstance(relative, str)
+            assert not Path(relative).is_absolute()
+            assert (registry.root / relative).is_file()
+
+
 def test_context_is_deterministic_excludes_forbidden_and_tracks_source_change(
     tmp_path: Path,
 ) -> None:
