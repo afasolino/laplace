@@ -62,7 +62,8 @@ tests/test_qwen38_mtp_benchmark.py
 tests/test_release_certification_v7.py tests/test_release_v7.py tests/test_reliability_v7.py
 tests/test_repository_context_g4.py tests/test_repository_lifecycle_fix.py tests/test_reproducibility.py
 tests/test_research_plane.py tests/test_research_web_adapters.py tests/test_rtl_worker_correction_evidence.py
-tests/test_rtl_worker_non_thinking.py tests/test_rtl_worker_routing_patch.py tests/test_rules_g3.py
+tests/test_rtl_specialist_qualification.py tests/test_rtl_worker_non_thinking.py
+tests/test_rtl_worker_routing_patch.py tests/test_rules_g3.py
 tests/test_security_fuzz_v7.py tests/test_skills_g8.py tests/test_swe_aci_ab_v34.py
 tests/test_swe_aci_phase_b_v34.py tests/test_sync_v7.py tests/test_task_evidence.py tests/test_task_labels.py
 tests/test_team_runner_hardening.py tests/test_tiered_serving.py tests/test_trajectory_g5.py

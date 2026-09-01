@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "status": "live_qualification_prepared",
+  "roadmap_step": "C2",
+  "preparation_base_commit": "31d43c9961123690fb8f169188bdf9e79093897f",
+  "c1_manifest": {
+    "path": "configs/rtl_specialist_candidates/siliconmind_qwen3_4b_step_c1.json",
+    "git_blob_sha": "f3441d3c9d7a31e35f9acfbfa3442f1e470571d5"
+  },
+  "benchmark_manifest": {
+    "path": "codex_a6000/experiments/multilanguage_dual_model_ablation_v1/benchmark_manifest.yaml",
+    "preserve_task_order": true,
+    "worker_task_ids": [
+      "v_event_counter",
+      "v_parameterized_fifo",
+      "v_ready_valid_buffer",
+      "v_round_robin_arbiter",
+      "v_register_file",
+      "v_saturating_datapath",
+      "sv_ready_valid_buffer",
+      "sv_elastic_buffer2",
+      "sv_w1c_event_bank",
+      "sv_parameterized_pipeline",
+      "sv_asserted_counter"
+    ]
+  },
+  "runtime": {
+    "output_root": ".runtime/v3-a6000-completion/step-c2",
+    "vllm_executable": ".venv-vllm-cu129/bin/vllm",
+    "vllm_python": ".venv-vllm-cu129/bin/python",
+    "ffmpeg_library_path": ".runtime/ffmpeg7/lib",
+    "held_out_environment_variable": "LAPLACE_ABLATION_HELD_OUT_ROOT"
+  },
+  "specialist_serving": {
+    "port": 8211,
+    "max_model_len": 16384,
+    "max_num_seqs": 1,
+    "max_num_batched_tokens": 8192,
+    "kv_cache_memory_bytes": 1073741824,
+    "gpu_memory_utilization": 0.18,
+    "startup_timeout": 1200,
+    "request_timeout": 300,
+    "max_output_tokens": 8192,
+    "temperature": 1.0,
+    "dtype": "bfloat16",
+    "prefix_caching": true,
+    "chunked_prefill": true,
+    "reasoning_parser": null
+  },
+  "candidates": [
+    {
+      "candidate_id": "siliconmind_qwen3_4b_t_2507_36k",
+      "repository": "AS-SiliconMind/SiliconMind-V1-Qwen3-4B-T-2507",
+      "profile_id": "P9_siliconmind_36k",
+      "served_model_name": "laplace-rtl-siliconmind-36k"
+    },
+    {
+      "candidate_id": "siliconmind_qwen3_4b_t_2507_76k",
+      "repository": "AS-SiliconMind/SiliconMind-V1-Qwen3-4B-T-2507-76k",
+      "profile_id": "P10_siliconmind_76k",
+      "served_model_name": "laplace-rtl-siliconmind-76k"
+    }
+  ],
+  "qualification": {
+    "role_mode": "direct",
+    "retrieval_mode": "none",
+    "fallback_to_main": false,
+    "worker_reasoning_mode": "model_default",
+    "require_clean_gpu_before_start": true,
+    "require_held_out": true,
+    "require_deterministic_verification": true
+  },
+  "coexistence": {
+    "p8_profile": {
+      "path": "configs/serving_profile_candidates/P8_qwen38_w4a16_mtp.json",
+      "git_blob_sha": "cffae38fab1196d339fe9a7dd23a04616219e6d2"
+    },
+    "start_order": [
+      "p8",
+      "specialist"
+    ],
+    "integration_task_ids": [
+      "v_ready_valid_buffer",
+      "sv_ready_valid_buffer"
+    ],
+    "minimum_free_headroom_mib": 2048,
+    "require_main_and_worker_routes": true,
+    "require_held_out": true
+  },
+  "promotion_gate": {
+    "preselected_candidate": null,
+    "primary_metric": "deterministic_task_pass_count",
+    "secondary_metric": "held_out_task_pass_count",
+    "tie_breakers": [
+      "lower_peak_gpu_memory_mib",
+      "higher_output_tokens_per_second"
+    ],
+    "tie_after_all_metrics": "no_promotion",
+    "requires_coexistence_certification": true,
+    "requires_clean_owned_server_release": true
+  },
+  "boundaries": {
+    "modify_historical_codev_artifacts": false,
+    "preserve_historical_ablation_semantics": true,
+    "modify_p8_profile": false,
+    "auto_promote_without_live_evidence": false,
+    "three_model_lifecycle_is_step_e": true
+  }
+}
