@@ -77,8 +77,8 @@ def test_step_c2_configuration_preserves_c1_and_p8() -> None:
         "v_ready_valid_buffer",
         "sv_ready_valid_buffer",
     )
-    assert configuration.max_model_len == 12288
-    assert configuration.max_output_tokens == 8192
+    assert configuration.max_model_len == 16384
+    assert configuration.max_output_tokens == 16384
     assert configuration.gpu_memory_utilization == 0.18
     assert configuration.minimum_free_headroom_mib == 2048
     assert configuration.preselected_candidate == "siliconmind_qwen3_4b_t_2507_36k"
@@ -106,7 +106,7 @@ def test_specialist_profile_preserves_raw_siliconmind_output(tmp_path: Path) -> 
     candidate = build_specialist_candidate(configuration, spec, profile, "a" * 40)
     dual = build_direct_configuration(candidate)
     assert profile.kv_cache_dtype == "int8_per_token_head"
-    assert profile.kv_cache_memory_bytes == 1073741824
+    assert profile.kv_cache_memory_bytes == 1342177280
     assert profile.gpu_memory_utilization == 0.18
     assert profile.extra_args == (
         "--dtype=bfloat16",
@@ -114,8 +114,8 @@ def test_specialist_profile_preserves_raw_siliconmind_output(tmp_path: Path) -> 
     )
     assert configuration.reasoning_parser is None
     assert configuration.use_v2_model_runner is True
-    assert candidate.context_tokens == 12288
-    assert candidate.max_output_tokens == 8192
+    assert candidate.context_tokens == 16384
+    assert candidate.max_output_tokens == 16384
     assert candidate.temperature == 1.0
     assert candidate.thinking_token_budget is None
     assert dual.main == candidate

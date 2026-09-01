@@ -56,15 +56,15 @@ class ServingCandidate:
             raise ValueError("Serving model_path must be non-empty text or null")
         if self.context_tokens < 1024 or self.context_tokens > 262_144:
             raise ValueError("Serving context_tokens must be between 1024 and 262144")
-        if self.max_output_tokens < 1 or self.max_output_tokens > 8192:
-            raise ValueError("Serving max_output_tokens must be between 1 and 8192")
+        if self.max_output_tokens < 1 or self.max_output_tokens > 16384:
+            raise ValueError("Serving max_output_tokens must be between 1 and 16384")
         structured_cap = self.structured_serialization_max_output_tokens
         if structured_cap is None:
             structured_cap = self.max_output_tokens
             object.__setattr__(self, "structured_serialization_max_output_tokens", structured_cap)
-        if structured_cap < 1 or structured_cap > 8192:
+        if structured_cap < 1 or structured_cap > 16384:
             raise ValueError(
-                "Structured serialization max output must be between 1 and 8192"
+                "Structured serialization max output must be between 1 and 16384"
             )
         structured_temperature = self.structured_serialization_temperature
         if structured_temperature is None:

@@ -456,7 +456,7 @@ def load_step_c2_configuration(
     max_output_tokens = _integer(
         serving.get("max_output_tokens"), label="max_output_tokens"
     )
-    if max_output_tokens > 8192:
+    if max_output_tokens > 16384:
         raise SpecialistQualificationError("C2 may not widen Laplace max_output_tokens")
     raw_thinking_token_budget = serving.get("thinking_token_budget")
     thinking_token_budget = (
