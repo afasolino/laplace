@@ -10,6 +10,8 @@ from research_workspace.rtl_specialist_qualification import (
     ROOT,
     SpecialistQualificationError,
     StepC2Configuration,
+    _owned_snapshot_matches,
+    _snapshot_summary,
     build_direct_configuration,
     build_specialist_candidate,
     build_specialist_profile,
@@ -153,6 +155,23 @@ def test_candidate_model_path_is_repo_local_runtime_storage() -> None:
     )
     assert target.is_relative_to(configuration.output_root)
     assert ".runtime/v3-a6000-completion/step-c2/models" in target.as_posix()
+
+
+def test_snapshot_rebind_requires_matching_immutable_critical_files(tmp_path: Path) -> None:
+    configuration = load_step_c2_configuration(ROOT, DEFAULT_CONFIG)
+    candidate = configuration.candidates[0]
+    for name in ("config.json", "tokenizer_config.json", "model.safetensors.index.json"):
+        (tmp_path / name).write_text(name, encoding="utf-8")
+    marker = {
+        "candidate_id": candidate.candidate_id,
+        "repository": candidate.repository,
+        "revision": "a" * 40,
+        "snapshot": _snapshot_summary(tmp_path),
+    }
+
+    assert _owned_snapshot_matches(marker, tmp_path, candidate, "a" * 40)
+    (tmp_path / "config.json").write_text("changed", encoding="utf-8")
+    assert not _owned_snapshot_matches(marker, tmp_path, candidate, "a" * 40)
 
 
 def test_selection_uses_only_the_published_36k_checkpoint() -> None:

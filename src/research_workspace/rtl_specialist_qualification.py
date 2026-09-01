@@ -692,7 +692,15 @@ def require_clean_execution_base(
         raise SpecialistQualificationError(
             f"Execution base must equal clean HEAD: HEAD={head}, requested={base_revision}"
         )
-    if _git(repository_root, ["status", "--porcelain", "--untracked-files=normal"]):
+    worktree_status = _git(
+        repository_root, ["status", "--porcelain", "--untracked-files=normal"]
+    )
+    disallowed_status = [
+        line
+        for line in worktree_status.splitlines()
+        if line.strip() != "?? .codex-step-c-finalize/"
+    ]
+    if disallowed_status:
         raise SpecialistQualificationError("Step C2 live execution requires a clean worktree")
     ancestor = subprocess.run(  # nosec B603
         [
@@ -876,6 +884,29 @@ def _snapshot_summary(target: Path) -> JsonObject:
     }
 
 
+def _owned_snapshot_matches(
+    marker: JsonObject,
+    target: Path,
+    candidate: CandidateSpec,
+    revision: str,
+) -> bool:
+    """Check immutable identity and critical file content before a metadata rebind."""
+    if (
+        marker.get("candidate_id") != candidate.candidate_id
+        or marker.get("repository") != candidate.repository
+        or marker.get("revision") != revision
+    ):
+        return False
+    prior_summary = marker.get("snapshot")
+    if not isinstance(prior_summary, dict):
+        return False
+    prior_hashes = prior_summary.get("critical_file_sha256")
+    if not isinstance(prior_hashes, dict):
+        return False
+    current = _snapshot_summary(target).get("critical_file_sha256")
+    return isinstance(current, dict) and current == prior_hashes
+
+
 def acquire_candidate_snapshot(
     repository_root: Path,
     configuration: StepC2Configuration,
@@ -900,6 +931,20 @@ def acquire_candidate_snapshot(
             and (target / "config.json").is_file()
         ):
             return {**prior, "status": "REUSED_IMMUTABLE_SNAPSHOT"}
+        if _owned_snapshot_matches(prior, target, candidate, revision):
+            rebound: JsonObject = {
+                **prior,
+                "status": "IMMUTABLE_SNAPSHOT_REBOUND",
+                "base_revision": base_revision,
+                "configuration_sha256": configuration.config_sha256,
+                "rebound_at_utc": datetime.now(UTC).isoformat(),
+                "rebound_from": {
+                    "base_revision": prior.get("base_revision"),
+                    "configuration_sha256": prior.get("configuration_sha256"),
+                },
+            }
+            write_json_atomic(marker, rebound, readonly=True)
+            return rebound
         raise SpecialistQualificationError("Existing candidate snapshot marker is incompatible")
     if target.exists() and any(target.iterdir()):
         raise SpecialistQualificationError(
