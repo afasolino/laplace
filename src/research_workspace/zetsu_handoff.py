@@ -25,7 +25,12 @@ class ZetsuHandoffStore:
         self._checkpoints = checkpoints
 
     def exact_patch(self, worktree: Path, changed_paths: Sequence[str]) -> str:
-        tracked = run_git(worktree, ["diff", "--no-ext-diff", "--binary", "HEAD", "--"])
+        if not changed_paths:
+            return ""
+        tracked = run_git(
+            worktree,
+            ["diff", "--no-ext-diff", "--binary", "HEAD", "--", *changed_paths],
+        )
         if tracked.returncode != 0:
             raise ServiceTierError("zetsu_agent_handoff_patch_unavailable")
         patch = tracked.stdout

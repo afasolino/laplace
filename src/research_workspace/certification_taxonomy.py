@@ -74,6 +74,7 @@ tests/test_zetsu_client_api.py tests/test_zetsu_codex_v3.py tests/test_zetsu_con
 tests/test_zetsu_hotfix_lifecycle.py tests/test_zetsu_mcp.py tests/test_zetsu_production_token_supervisor.py
 tests/test_zetsu_runtime.py tests/test_zetsu_runtime_codex_compat_v31.py tests/test_zetsu_sdk_stdio_v3.py
 tests/test_zetsu_sdk_stdio_v32.py tests/test_zetsu_token_benchmark.py
+tests/test_zetsu_token_offload_repairs.py
 """.split()
 }
 

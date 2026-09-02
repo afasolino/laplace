@@ -78,6 +78,19 @@ class ZetsuBackend:
         self.token = token
         self.timeout = min(max(float(timeout), 1.0), 120.0)
 
+    def _tool_timeout(
+        self,
+        name: str,
+        arguments: Mapping[str, object],
+    ) -> float:
+        if name != "agent_task":
+            return self.timeout
+        raw_wait = arguments.get("wait_timeout_seconds", 1_800)
+        if isinstance(raw_wait, bool) or not isinstance(raw_wait, (int, float)):
+            return self.timeout
+        wait = min(max(float(raw_wait), 1.0), 3_600.0)
+        return min(max(self.timeout, wait + 30.0), 3_630.0)
+
     async def list_tools(self) -> list[JsonObject]:
         try:
             async with _sdk_client(self.endpoint, self.token, self.timeout) as client:
@@ -95,7 +108,8 @@ class ZetsuBackend:
 
     async def call_tool(self, name: str, arguments: Mapping[str, object]) -> JsonObject:
         try:
-            async with _sdk_client(self.endpoint, self.token, self.timeout) as client:
+            timeout = self._tool_timeout(name, arguments)
+            async with _sdk_client(self.endpoint, self.token, timeout) as client:
                 result = await client.call_tool(name, dict(arguments))
         except Exception as exc:
             raise ZetsuSdkBridgeError(

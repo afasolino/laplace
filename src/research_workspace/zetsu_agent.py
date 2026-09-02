@@ -64,6 +64,7 @@ _MAX_RECENT_OBSERVATIONS = 8
 _MAX_CHANGED_PATHS = 256
 _MAX_GIT_STATUS_BYTES = 4 * 1024 * 1024
 _MAX_VERIFY_CAPTURE_BYTES = 32 * 1024
+_CLEAN_STATUS_SHA256 = hashlib.sha256(b"").hexdigest()
 _CHECKPOINT_SCHEMA = 3
 _MAX_OUTPUT_CAP_CONTINUATIONS = 4
 _MAX_TOTAL_AGENT_STEPS = 128
@@ -392,6 +393,26 @@ class ZetsuAgentCoordinator:
     def _exact_patch(self, worktree: Path, changed_paths: Sequence[str]) -> str:
         return self.handoffs.exact_patch(worktree, changed_paths)
 
+    def _target_snapshot_sha256(
+        self,
+        worktree: Path,
+        changed_paths: Sequence[str],
+    ) -> str:
+        """Hash one exact canonical-target dirty state without exposing its patch."""
+
+        normalized = sorted(dict.fromkeys(changed_paths))
+        patch = self._exact_patch(worktree, normalized)
+        encoded = json.dumps(
+            {
+                "changed_paths": normalized,
+                "patch_sha256": hashlib.sha256(patch.encode("utf-8")).hexdigest(),
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
     def _handoff_patch(
         self,
         worktree: Path,
@@ -479,14 +500,32 @@ class ZetsuAgentCoordinator:
             raise ServiceTierError("zetsu_agent_apply_target_not_isolated")
         for relative in state.changed_paths:
             self._relative_target(target, relative)
+        candidate_paths = sorted(dict.fromkeys(state.changed_paths))
+        if candidate_paths != state.changed_paths:
+            raise ServiceTierError("zetsu_agent_apply_changed_paths_invalid")
+        candidate_set = set(candidate_paths)
+
         with self._target_lock(target):
             head, status_sha, changed = self._worktree_state(target)
+            snapshot_sha = self._target_snapshot_sha256(target, changed)
+
+            def scoped_patch_sha(paths: Sequence[str]) -> str:
+                return hashlib.sha256(
+                    self._exact_patch(target, paths).encode("utf-8")
+                ).hexdigest()
+
             if state.applied_patch_sha256:
+                applied_snapshot_matches = (
+                    not state.target_applied_snapshot_sha256
+                    or snapshot_sha == state.target_applied_snapshot_sha256
+                )
                 if (
                     state.applied_patch_sha256 == patch_sha
                     and head == state.target_initial_head
                     and status_sha == state.target_applied_status_sha256
-                    and changed == state.changed_paths
+                    and applied_snapshot_matches
+                    and candidate_set.issubset(set(changed))
+                    and scoped_patch_sha(candidate_paths) == patch_sha
                 ):
                     return finalize_promotion({
                         "requested": True,
@@ -495,13 +534,25 @@ class ZetsuAgentCoordinator:
                         "target_status_sha256": status_sha,
                     })
                 raise ServiceTierError("zetsu_agent_apply_target_drift")
-            if head == state.target_initial_head and changed:
-                target_patch_sha = hashlib.sha256(
-                    self._exact_patch(target, changed).encode("utf-8")
-                ).hexdigest()
-                if changed == state.changed_paths and target_patch_sha == patch_sha:
+
+            # Recover an apply that completed immediately before the checkpoint
+            # update. New checkpoints retain the exact pre-existing target
+            # snapshot, so unrelated dirty Codex work is preserved.
+            if (
+                state.target_initial_snapshot_sha256
+                and head == state.target_initial_head
+                and candidate_set.issubset(set(changed))
+                and scoped_patch_sha(candidate_paths) == patch_sha
+            ):
+                baseline_paths = sorted(set(changed) - candidate_set)
+                baseline_snapshot = self._target_snapshot_sha256(
+                    target,
+                    baseline_paths,
+                )
+                if baseline_snapshot == state.target_initial_snapshot_sha256:
                     state.applied_patch_sha256 = patch_sha
                     state.target_applied_status_sha256 = status_sha
+                    state.target_applied_snapshot_sha256 = snapshot_sha
                     return finalize_promotion({
                         "requested": True,
                         "applied": True,
@@ -509,20 +560,57 @@ class ZetsuAgentCoordinator:
                         "recovered_after_checkpoint_gap": True,
                         "target_status_sha256": status_sha,
                     })
-                raise ServiceTierError("zetsu_agent_apply_target_drift")
+
+            # Schema-3 checkpoints created before scoped dirty-target promotion
+            # could only start from a clean canonical target.
+            if (
+                not state.target_initial_snapshot_sha256
+                and state.target_initial_status_sha256 == _CLEAN_STATUS_SHA256
+                and head == state.target_initial_head
+                and changed == candidate_paths
+                and scoped_patch_sha(candidate_paths) == patch_sha
+            ):
+                state.applied_patch_sha256 = patch_sha
+                state.target_applied_status_sha256 = status_sha
+                state.target_applied_snapshot_sha256 = snapshot_sha
+                return finalize_promotion({
+                    "requested": True,
+                    "applied": True,
+                    "already_applied": True,
+                    "recovered_after_checkpoint_gap": True,
+                    "target_status_sha256": status_sha,
+                })
+
+            initial_snapshot_matches = (
+                not state.target_initial_snapshot_sha256
+                or snapshot_sha == state.target_initial_snapshot_sha256
+            )
             if (
                 head != state.target_initial_head
                 or status_sha != state.target_initial_status_sha256
-                or changed
+                or not initial_snapshot_matches
             ):
                 raise ServiceTierError("zetsu_agent_apply_target_drift")
+
+            baseline_changed = list(changed)
+            overlap = sorted(set(baseline_changed) & candidate_set)
+            if overlap:
+                raise ServiceTierError(
+                    "zetsu_agent_apply_target_overlap",
+                    {"paths": overlap},
+                )
+            baseline_patch_sha = (
+                scoped_patch_sha(baseline_changed) if baseline_changed else None
+            )
+
             checked = self._run_git(
                 target,
                 ["apply", "--check", "--whitespace=error-all", str(patch_path)],
             )
             if checked.returncode != 0:
                 raise ServiceTierError(
-                    "zetsu_agent_apply_check_failed", {"stderr": checked.stderr[-2_000:]}
+                    "zetsu_agent_apply_check_failed",
+                    {"stderr": checked.stderr[-2_000:]},
                 )
             applied = self._run_git(
                 target,
@@ -530,21 +618,39 @@ class ZetsuAgentCoordinator:
             )
             if applied.returncode != 0:
                 raise ServiceTierError(
-                    "zetsu_agent_apply_failed", {"stderr": applied.stderr[-2_000:]}
+                    "zetsu_agent_apply_failed",
+                    {"stderr": applied.stderr[-2_000:]},
                 )
+
             after_head, after_status, after_changed = self._worktree_state(target)
-            diff_check = self._run_git(target, ["diff", "--check"])
+            after_snapshot = self._target_snapshot_sha256(target, after_changed)
+            expected_changed = sorted(set(baseline_changed) | candidate_set)
+            delegated_patch_sha = scoped_patch_sha(candidate_paths)
+            baseline_after_sha = (
+                scoped_patch_sha(baseline_changed) if baseline_changed else None
+            )
+            diff_check = self._run_git(
+                target,
+                ["diff", "--check", "HEAD", "--", *candidate_paths],
+            )
             if (
                 after_head != state.target_initial_head
-                or after_changed != state.changed_paths
+                or after_changed != expected_changed
+                or delegated_patch_sha != patch_sha
+                or baseline_after_sha != baseline_patch_sha
                 or diff_check.returncode != 0
             ):
-                rolled_back = self._run_git(target, ["apply", "--reverse", str(patch_path)])
+                rolled_back = self._run_git(
+                    target,
+                    ["apply", "--reverse", str(patch_path)],
+                )
                 if rolled_back.returncode != 0:
                     raise ServiceTierError("zetsu_agent_apply_rollback_failed")
                 raise ServiceTierError("zetsu_agent_apply_postcondition_failed")
+
             state.applied_patch_sha256 = patch_sha
             state.target_applied_status_sha256 = after_status
+            state.target_applied_snapshot_sha256 = after_snapshot
             result = {
                 "requested": True,
                 "applied": True,
@@ -777,7 +883,9 @@ class ZetsuAgentCoordinator:
             consumed_wall_seconds=prior.consumed_wall_seconds,
             target_initial_head=prior.target_initial_head,
             target_initial_status_sha256=prior.target_initial_status_sha256,
+            target_initial_snapshot_sha256=prior.target_initial_snapshot_sha256,
             target_applied_status_sha256=prior.target_applied_status_sha256,
+            target_applied_snapshot_sha256=prior.target_applied_snapshot_sha256,
             applied_patch_sha256=prior.applied_patch_sha256,
             telemetry=prior.telemetry,
         )
@@ -1093,6 +1201,8 @@ class ZetsuAgentCoordinator:
             "context_limit": state.context_limit,
             "required_verification_argv": state.required_verification_argv,
             "target_initial_head": state.target_initial_head,
+            "target_initial_snapshot_sha256": state.target_initial_snapshot_sha256,
+            "target_applied_snapshot_sha256": state.target_applied_snapshot_sha256,
             "applied_patch_sha256": state.applied_patch_sha256,
             "validation_history": validation_summary,
             "unresolved_failures": state.unresolved_failures,
@@ -1254,7 +1364,9 @@ class ZetsuAgentCoordinator:
             "apply_to_repository": ctx.apply_to_repository,
             "target_initial_head": state.target_initial_head,
             "target_initial_status_sha256": state.target_initial_status_sha256,
+            "target_initial_snapshot_sha256": state.target_initial_snapshot_sha256,
             "target_applied_status_sha256": state.target_applied_status_sha256,
+            "target_applied_snapshot_sha256": state.target_applied_snapshot_sha256,
             "applied_patch_sha256": state.applied_patch_sha256,
             # step_limit is retained for schema-3 checkpoint compatibility.
             "step_limit": ctx.max_steps,
@@ -1467,11 +1579,19 @@ class ZetsuAgentCoordinator:
         consumed_wall_seconds = number("consumed_wall_seconds")
         target_initial_head = optional_string("target_initial_head", maximum=128)
         target_initial_status_sha256 = optional_string("target_initial_status_sha256", maximum=64)
+        target_initial_snapshot_sha256 = optional_string(
+            "target_initial_snapshot_sha256", maximum=64
+        )
         target_applied_status_sha256 = optional_string("target_applied_status_sha256", maximum=64)
+        target_applied_snapshot_sha256 = optional_string(
+            "target_applied_snapshot_sha256", maximum=64
+        )
         applied_patch_sha256 = optional_string("applied_patch_sha256", maximum=64)
         for digest in (
             target_initial_status_sha256,
+            target_initial_snapshot_sha256,
             target_applied_status_sha256,
+            target_applied_snapshot_sha256,
             applied_patch_sha256,
         ):
             if digest and (len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest)):
@@ -1481,13 +1601,17 @@ class ZetsuAgentCoordinator:
                 target_initial_head != ctx.binding.base_revision
                 or not target_initial_status_sha256
                 or bool(target_applied_status_sha256) is not bool(applied_patch_sha256)
+                or bool(target_applied_snapshot_sha256)
+                and not bool(applied_patch_sha256)
             ):
                 raise ServiceTierError("zetsu_agent_checkpoint_state_invalid")
         elif any(
             (
                 target_initial_head,
                 target_initial_status_sha256,
+                target_initial_snapshot_sha256,
                 target_applied_status_sha256,
+                target_applied_snapshot_sha256,
                 applied_patch_sha256,
             )
         ):
@@ -1530,7 +1654,9 @@ class ZetsuAgentCoordinator:
             consumed_wall_seconds=consumed_wall_seconds,
             target_initial_head=target_initial_head,
             target_initial_status_sha256=target_initial_status_sha256,
+            target_initial_snapshot_sha256=target_initial_snapshot_sha256,
             target_applied_status_sha256=target_applied_status_sha256,
+            target_applied_snapshot_sha256=target_applied_snapshot_sha256,
             applied_patch_sha256=applied_patch_sha256,
             telemetry=AgentTelemetry.from_mapping(raw.get("telemetry")),
         )
@@ -2233,10 +2359,14 @@ class ZetsuAgentCoordinator:
             if apply_to_repository:
                 target = Path(binding.canonical_repository_root).resolve(strict=True)
                 target_head, target_status, target_changed = self._worktree_state(target)
-                if target_head != binding.base_revision or target_changed:
+                if target_head != binding.base_revision:
                     raise ServiceTierError("zetsu_agent_apply_target_not_clean")
                 state.target_initial_head = target_head
                 state.target_initial_status_sha256 = target_status
+                state.target_initial_snapshot_sha256 = self._target_snapshot_sha256(
+                    target,
+                    target_changed,
+                )
         resume_verified_finish = (
             not creating and state.next_state == "finished" and self._finish_allowed(state)
         )

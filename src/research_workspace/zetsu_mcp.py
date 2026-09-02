@@ -37,13 +37,15 @@ from .zetsu_context import (
 JsonObject: TypeAlias = dict[str, object]
 
 ZETSU_SCHEMA_VERSION = "1.5"
-ZETSU_SKILL_VERSION = "1.5.0"
+ZETSU_SKILL_VERSION = "1.5.1"
 MCP_LATEST_PROTOCOL_VERSION = "2026-07-28"
 MCP_LEGACY_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
 MCP_SUPPORTED_PROTOCOL_VERSIONS = (MCP_LATEST_PROTOCOL_VERSION, *MCP_LEGACY_PROTOCOL_VERSIONS)
 ZETSU_INSTRUCTIONS = (
-    "Local work stays in Codex. Zetsu supplies compact evidence, verified Qwen repository "
-    "tasks, and policy-bounded CodeV RTL; expand exact evidence only when needed."
+    "Local work stays in Codex. For a normal repository delegation, use the exposed agent_task "
+    "schema directly and trust a successful compact verified promotion receipt. Inspect Zetsu "
+    "implementation, audit logs, checkpoints, patches, or result artifacts only on anomaly. "
+    "Expand exact evidence only when needed."
 )
 
 

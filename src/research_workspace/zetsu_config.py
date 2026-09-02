@@ -83,7 +83,7 @@ def _managed_block(endpoint: str, token_env_var: str) -> str:
             f"enabled_tools = [{tools}]",
             'default_tools_approval_mode = "writes"',
             "startup_timeout_sec = 15",
-            "tool_timeout_sec = 1900",
+            "tool_timeout_sec = 3700",
             _END,
         )
     )
@@ -103,12 +103,19 @@ Use `search`, `project_context` or `experiment_context` for indexed, historical,
 project knowledge, then expand only needed IDs with `get_evidence`. Use `delegate` for bounded reasoning.
 Use `agent_task` for a coherent self-contained repository task when local Qwen can inspect/edit/verify it
 more cheaply than repeated Codex orchestration. Batch related reads/edits and avoid polling or narration.
+The exposed MCP schema is authoritative. On the normal path, do not grep Zetsu source/configuration,
+runtime audit logs, checkpoints, or result artifacts before calling `agent_task`; those are anomaly-only
+evidence surfaces and broad inspection defeats delegation token savings.
 For a mutating `agent_task`, Codex must choose `verification_argv` before delegation and use a direct
 `pytest`, `ruff`, or `mypy` executable accepted by the Zetsu verifier policy; never wrap it with
-`python -m`. Keep that verifier bound on resume and set `apply_to_repository=true` for authorized edits.
+`python -m`. If one pytest invocation must include unrelated test files with repeated basenames such as
+`test_public.py`, add pytest's official `--import-mode=importlib` to prevent import-name collisions.
+Keep that verifier bound on resume and set `apply_to_repository=true` for authorized edits.
 When a returned promotion is applied, its bound verifier passed after the latest mutation, and there are
-no unresolved failures, treat the compact handoff as authoritative: do not reread the edits or rerun the
-same verifier absent an anomaly. Exact patches/checkpoints remain persistent and `verify` can expand them.
+no unresolved failures, treat the compact handoff as authoritative: do not reread the edits, inspect
+result artifacts, or rerun the same verifier absent an anomaly. Stop the delegated path immediately on
+that successful receipt. Exact patches/checkpoints remain persistent and `verify` can expand them only
+when anomaly evidence requires it.
 Use `rtl_task` only for policy-eligible bounded RTL work handled by CodeV. Never request whole repositories,
 papers or logs when compact evidence suffices.
 """

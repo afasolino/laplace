@@ -157,7 +157,9 @@ class AgentExecutionState:
     consumed_wall_seconds: float = 0.0
     target_initial_head: str = ""
     target_initial_status_sha256: str = ""
+    target_initial_snapshot_sha256: str = ""
     target_applied_status_sha256: str = ""
+    target_applied_snapshot_sha256: str = ""
     applied_patch_sha256: str = ""
     output_cap_continuations: int = 0
     continuation_count: int = 0
