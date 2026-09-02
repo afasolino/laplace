@@ -8,6 +8,7 @@ from typing import Mapping
 
 from .agent_sandbox import AgentSessionBinding
 from .service_tiers import ModelLane, ServiceTierError
+from .verification_policy import VerificationPlan
 
 JsonObject = dict[str, object]
 
@@ -143,6 +144,7 @@ class AgentExecutionState:
     model_id: str = ""
     context_limit: int = 0
     required_verification_argv: list[str] | None = None
+    required_verification_plan: list[JsonObject] | None = None
     validation_history: list[JsonObject] = field(default_factory=list)
     unresolved_failures: list[str] = field(default_factory=list)
     evidence_refs: list[str] = field(default_factory=list)
@@ -187,6 +189,7 @@ class AgentRunContext:
     required_verification_argv: tuple[str, ...] | None
     run_started: float
     remaining_wall_seconds: float
+    required_verification_plan: VerificationPlan | None = None
     task_label: str = "Repository Task"
     apply_to_repository: bool = False
     allow_mutation: bool = True

@@ -36,8 +36,8 @@ from .zetsu_context import (
 
 JsonObject: TypeAlias = dict[str, object]
 
-ZETSU_SCHEMA_VERSION = "1.5"
-ZETSU_SKILL_VERSION = "1.5.1"
+ZETSU_SCHEMA_VERSION = "1.6"
+ZETSU_SKILL_VERSION = "1.6.0"
 MCP_LATEST_PROTOCOL_VERSION = "2026-07-28"
 MCP_LEGACY_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
 MCP_SUPPORTED_PROTOCOL_VERSIONS = (MCP_LATEST_PROTOCOL_VERSION, *MCP_LEGACY_PROTOCOL_VERSIONS)
@@ -97,6 +97,34 @@ def _verification_argv(value: object) -> list[str] | None:
     ):
         raise ZetsuError("invalid_verification_argv")
     return list(value)
+
+
+def _verification_plan(value: object) -> list[JsonObject] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not 1 <= len(value) <= 16:
+        raise ZetsuError("invalid_verification_plan")
+    plan: list[JsonObject] = []
+    for step in value:
+        if (
+            not isinstance(step, dict)
+            or set(step) - {"cwd", "argv"}
+            or "argv" not in step
+        ):
+            raise ZetsuError("invalid_verification_plan")
+        cwd = step.get("cwd", ".")
+        if (
+            not isinstance(cwd, str)
+            or not cwd
+            or len(cwd) > 500
+            or "\x00" in cwd
+        ):
+            raise ZetsuError("invalid_verification_plan")
+        argv = _verification_argv(step.get("argv"))
+        if argv is None:
+            raise ZetsuError("invalid_verification_plan")
+        plan.append({"cwd": cwd, "argv": argv})
+    return plan
 
 
 def _rough_tokens(value: object) -> int:
@@ -232,6 +260,29 @@ def tool_definitions() -> tuple[JsonObject, ...]:
                         "minItems": 1,
                         "maxItems": 64,
                         "items": {"type": "string", "minLength": 1, "maxLength": 1_000},
+                    },
+                    "verification_plan": {
+                        "type": ["array", "null"],
+                        "minItems": 1,
+                        "maxItems": 16,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "cwd": {"type": "string", "minLength": 1, "maxLength": 500},
+                                "argv": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "maxItems": 64,
+                                    "items": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 1_000,
+                                    },
+                                },
+                            },
+                            "required": ["argv"],
+                            "additionalProperties": False,
+                        },
                     },
                     "apply_to_repository": {"type": "boolean"},
                     "allow_mutation": {"type": "boolean"},
@@ -399,6 +450,7 @@ _TOOL_ARGUMENTS: Mapping[str, frozenset[str]] = {
             "max_steps",
             "max_chars",
             "verification_argv",
+            "verification_plan",
             "apply_to_repository",
             "allow_mutation",
             "wait_timeout_seconds",
@@ -428,7 +480,7 @@ _TOOL_ARGUMENTS: Mapping[str, frozenset[str]] = {
 def _compact_verification(value: object) -> JsonObject | None:
     if not isinstance(value, Mapping):
         return None
-    return {
+    compact: JsonObject = {
         key: value.get(key)
         for key in (
             "argv",
@@ -441,6 +493,10 @@ def _compact_verification(value: object) -> JsonObject | None:
             "worktree_mutated",
         )
     }
+    for key in ("plan_digest", "step_count"):
+        if key in value:
+            compact[key] = value.get(key)
+    return compact
 
 
 def _compact_agent_result(result: Mapping[str, object]) -> JsonObject:
@@ -731,6 +787,9 @@ class ZetsuService:
             if lane_value not in {"quality", "standard"}:
                 raise ZetsuError("invalid_agent_lane")
             verification_argv = _verification_argv(args.get("verification_argv"))
+            verification_plan = _verification_plan(args.get("verification_plan"))
+            if verification_argv is not None and verification_plan is not None:
+                raise ZetsuError("verification_contract_conflict")
             apply_to_repository = _boolean(args, "apply_to_repository")
             allow_mutation = _boolean(
                 args,
@@ -753,6 +812,7 @@ class ZetsuService:
                     maximum=24_000,
                 ),
                 verification_argv=verification_argv,
+                verification_plan=verification_plan,
                 apply_to_repository=apply_to_repository,
                 allow_mutation=allow_mutation,
                 wait_timeout_seconds=_integer(

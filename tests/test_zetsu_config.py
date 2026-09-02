@@ -45,9 +45,10 @@ def test_configure_is_idempotent_and_preserves_other_codex_config(
     assert first.configured
     assert first.skill_installed
     installed_skill = (repo / ".agents/skills/zetsu/SKILL.md").read_text(encoding="utf-8")
-    assert "must choose `verification_argv` before delegation" in installed_skill
-    assert "direct\n`pytest`, `ruff`, or `mypy` executable" in installed_skill
-    assert "never wrap it with\n`python -m`" in installed_skill
+    assert "must choose the verification contract before delegation" in installed_skill
+    assert "`verification_plan` for multiple\nindependent checks" in installed_skill
+    assert "uses a direct `pytest`, `ruff`, or `mypy` argv" in installed_skill
+    assert "never shell, `python -m`, or environment injection" in installed_skill
 
 
 def test_status_reads_values_only_from_managed_section(

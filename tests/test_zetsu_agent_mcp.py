@@ -67,6 +67,11 @@ def test_agent_task_schema_is_bounded_and_closed() -> None:
     verifier = schema["properties"]["verification_argv"]
     assert verifier["maxItems"] == 64
     assert verifier["items"]["maxLength"] == 1_000
+    plan = schema["properties"]["verification_plan"]
+    assert plan["maxItems"] == 16
+    assert plan["items"]["additionalProperties"] is False
+    assert plan["items"]["properties"]["cwd"]["maxLength"] == 500
+    assert plan["items"]["properties"]["argv"]["maxItems"] == 64
     assert schema["properties"]["apply_to_repository"] == {"type": "boolean"}
     verify = next(item for item in tool_definitions() if item["name"] == "verify")
     assert verify["inputSchema"]["properties"]["include_patch"] == {"type": "boolean"}
@@ -228,6 +233,34 @@ def test_agent_task_validates_verification_argv_before_execution() -> None:
     )
     assert result["status"] == "SUCCESS"
     assert agent.calls[-1]["verification_argv"] == ["pytest", "tests/test_x.py", "-q"]
+
+    plan = [
+        {"cwd": "fixture-a", "argv": ["pytest", "test_public.py", "-q"]},
+        {"cwd": "fixture-b", "argv": ["pytest", "test_public.py", "-q"]},
+    ]
+    result = service.call(
+        "user-a",
+        "agent_task",
+        {
+            "repo_id": "repo",
+            "instruction": "x",
+            "verification_plan": plan,
+        },
+    )
+    assert result["status"] == "SUCCESS"
+    assert agent.calls[-1]["verification_plan"] == plan
+
+    with pytest.raises(ZetsuError, match="verification_contract_conflict"):
+        service.call(
+            "user-a",
+            "agent_task",
+            {
+                "repo_id": "repo",
+                "instruction": "x",
+                "verification_argv": ["pytest", "tests/test_x.py", "-q"],
+                "verification_plan": plan,
+            },
+        )
 
 
 def test_agent_task_returns_compact_authoritative_handoff() -> None:

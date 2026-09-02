@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Protocol, TypeAlias
 
 from .service_tiers import ModelLane
@@ -24,6 +24,7 @@ class RepositoryAgentService(Protocol):
         max_steps: int,
         max_chars: int,
         verification_argv: Sequence[str] | None,
+        verification_plan: Sequence[Mapping[str, object]] | None = None,
         apply_to_repository: bool,
         wait_timeout_seconds: float,
         task_label: str | None = None,
@@ -77,6 +78,7 @@ class RepositoryAgentConversationService(RepositoryAgentService, Protocol):
         max_steps: int,
         max_chars: int,
         verification_argv: Sequence[str] | None,
+        verification_plan: Sequence[Mapping[str, object]] | None = None,
         wait_timeout_seconds: float,
         task_label: str | None = None,
         allow_mutation: bool = False,

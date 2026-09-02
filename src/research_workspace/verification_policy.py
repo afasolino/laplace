@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import hashlib
+import json
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import TypeAlias
 
 from .repository_authorization import RepositoryAuthorizationError, validate_workspace_path
 from .service_tiers import ServiceTierError
 
 _ALLOWED_VERIFY_EXECUTABLES = frozenset({"pytest", "ruff", "mypy"})
+_MAX_VERIFICATION_STEPS = 16
+
+VerificationStep: TypeAlias = tuple[str, tuple[str, ...]]
+VerificationPlan: TypeAlias = tuple[VerificationStep, ...]
 
 
 def _relative_target(worktree: Path, value: str) -> None:
@@ -19,6 +26,26 @@ def _relative_target(worktree: Path, value: str) -> None:
         validate_workspace_path(worktree, normalized)
     except RepositoryAuthorizationError as exc:
         raise ServiceTierError(f"zetsu_agent_{exc.category}", exc.evidence) from exc
+
+
+def _verification_cwd(worktree: Path, value: object) -> tuple[str, Path]:
+    if not isinstance(value, str) or not value or len(value) > 500 or "\x00" in value:
+        raise ServiceTierError("zetsu_agent_verify_cwd_invalid")
+    normalized = value.replace("\\", "/")
+    path = Path(normalized)
+    if path.is_absolute() or ".." in path.parts:
+        raise ServiceTierError("zetsu_agent_verify_cwd_forbidden")
+    if normalized == ".":
+        return ".", worktree.resolve(strict=True)
+    if normalized == ".git" or normalized.startswith(".git/"):
+        raise ServiceTierError("zetsu_agent_verify_cwd_forbidden")
+    try:
+        target = validate_workspace_path(worktree, normalized)
+    except RepositoryAuthorizationError as exc:
+        raise ServiceTierError(f"zetsu_agent_{exc.category}", exc.evidence) from exc
+    if not target.is_dir():
+        raise ServiceTierError("zetsu_agent_verify_cwd_invalid")
+    return target.relative_to(worktree.resolve(strict=True)).as_posix(), target
 
 
 def validate_verification_argv(worktree: Path, value: object) -> list[str]:
@@ -132,3 +159,58 @@ def verification_qualifies_for_promotion(argv: Sequence[str]) -> bool:
     if executable == "mypy":
         return "--install-types" not in lowered and any(not item.startswith("-") for item in argv[1:])
     return False
+
+
+def normalize_verification_plan(
+    worktree: Path,
+    *,
+    verification_argv: object = None,
+    verification_plan: object = None,
+) -> VerificationPlan | None:
+    """Normalize one caller-owned, shell-free verification contract."""
+
+    if verification_argv is not None and verification_plan is not None:
+        raise ServiceTierError("zetsu_agent_verification_contract_conflict")
+    if verification_argv is not None:
+        return ((".", tuple(validate_verification_argv(worktree, verification_argv))),)
+    if verification_plan is None:
+        return None
+    if (
+        not isinstance(verification_plan, Sequence)
+        or isinstance(verification_plan, (str, bytes))
+        or not 1 <= len(verification_plan) <= _MAX_VERIFICATION_STEPS
+    ):
+        raise ServiceTierError("zetsu_agent_verify_plan_invalid")
+
+    normalized: list[VerificationStep] = []
+    for raw_step in verification_plan:
+        if not isinstance(raw_step, Mapping):
+            raise ServiceTierError("zetsu_agent_verify_plan_invalid")
+        if set(raw_step) - {"cwd", "argv"} or "argv" not in raw_step:
+            raise ServiceTierError("zetsu_agent_verify_plan_invalid")
+        cwd, cwd_path = _verification_cwd(worktree, raw_step.get("cwd", "."))
+        argv = tuple(validate_verification_argv(cwd_path, raw_step.get("argv")))
+        normalized.append((cwd, argv))
+    return tuple(normalized)
+
+
+def verification_plan_to_json(plan: VerificationPlan | None) -> list[dict[str, object]] | None:
+    if plan is None:
+        return None
+    return [{"cwd": cwd, "argv": list(argv)} for cwd, argv in plan]
+
+
+def verification_plan_digest(plan: VerificationPlan) -> str:
+    encoded = json.dumps(
+        verification_plan_to_json(plan),
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def verification_plan_qualifies_for_promotion(plan: VerificationPlan) -> bool:
+    return bool(plan) and all(
+        verification_qualifies_for_promotion(argv) for _, argv in plan
+    )

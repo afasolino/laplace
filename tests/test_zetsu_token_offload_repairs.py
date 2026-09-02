@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import time
 from collections.abc import AsyncIterator
@@ -12,8 +13,16 @@ import pytest
 from mcp import types
 
 import research_workspace.zetsu_sdk_stdio as sdk
-from research_workspace.agent_sandbox import AgentSessionBinding, AgentToolPolicy
+from research_workspace.agent_sandbox import (
+    AgentSandboxManager,
+    AgentSessionBinding,
+    AgentToolPolicy,
+)
 from research_workspace.service_tiers import ModelLane, ServiceTierError
+from research_workspace.verification_policy import (
+    normalize_verification_plan,
+    verification_plan_digest,
+)
 from research_workspace.zetsu_agent import ZetsuAgentCoordinator
 from research_workspace.zetsu_checkpoint import AgentCheckpointStore
 from research_workspace.zetsu_state import AgentExecutionState, AgentRunContext
@@ -309,3 +318,161 @@ def test_bridge_non_agent_tool_keeps_short_timeout(monkeypatch) -> None:
     asyncio.run(backend.call_tool("search", {"query": "x"}))
 
     assert observed == [30.0]
+def test_verification_plan_binds_cwd_and_rejects_escape(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "fixture").mkdir()
+
+    plan = normalize_verification_plan(
+        repo,
+        verification_plan=[
+            {"cwd": "fixture", "argv": ["pytest", "test_public.py", "-q"]},
+        ],
+    )
+    assert plan == (("fixture", ("pytest", "test_public.py", "-q")),)
+    assert verification_plan_digest(plan) != verification_plan_digest(
+        ((".", ("pytest", "test_public.py", "-q")),)
+    )
+
+    with pytest.raises(
+        ServiceTierError, match="zetsu_agent_verify_cwd_forbidden"
+    ):
+        normalize_verification_plan(
+            repo,
+            verification_plan=[
+                {
+                    "cwd": "../outside",
+                    "argv": ["pytest", "test_public.py", "-q"],
+                },
+            ],
+        )
+
+
+def test_bound_plan_runs_same_named_pytest_modules_in_own_cwds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical = tmp_path / "canonical"
+    head = _repo(canonical)
+    (canonical / ".gitignore").write_text(
+        "__pycache__/\n.pytest_cache/\n",
+        encoding="utf-8",
+    )
+    _git(canonical, "add", ".gitignore")
+    _git(canonical, "commit", "-qm", "ignore verifier caches")
+    head = _git(canonical, "rev-parse", "HEAD")
+    internal = tmp_path / "internal"
+    _git(canonical, "worktree", "add", "-q", "--detach", str(internal), head)
+
+    for directory, module_name, value in (
+        ("async_fixture", "job_runner", 11),
+        ("sqlite_fixture", "store", 22),
+    ):
+        root = internal / directory
+        root.mkdir()
+        (root / f"{module_name}.py").write_text(
+            f"VALUE = {value}\n",
+            encoding="utf-8",
+        )
+        (root / "test_public.py").write_text(
+            f"from {module_name} import VALUE\n\n"
+            f"def test_value():\n    assert VALUE == {value}\n",
+            encoding="utf-8",
+        )
+
+    coordinator = ZetsuAgentCoordinator(
+        _Tiered(tmp_path / "sandbox"),
+        checkpoint_store=AgentCheckpointStore(tmp_path / "checkpoints"),
+    )
+    binding = AgentSessionBinding(
+        session_id="plan-session",
+        user_id="user-a",
+        repo_id="repo",
+        canonical_repository_root=str(canonical),
+        worktree_root=str(internal),
+        base_revision=head,
+        grant_revision=1,
+        tool_policy=AgentToolPolicy(
+            policy_id="test",
+            allowed_tools=("run_tests",),
+            max_commands=8,
+            max_wall_seconds=60,
+        ),
+        environment={},
+        created_at_utc="2026-09-02T00:00:00+00:00",
+    )
+    plan = normalize_verification_plan(
+        internal,
+        verification_plan=[
+            {
+                "cwd": "async_fixture",
+                "argv": ["pytest", "test_public.py", "-q"],
+            },
+            {
+                "cwd": "sqlite_fixture",
+                "argv": ["pytest", "test_public.py", "-q"],
+            },
+        ],
+    )
+    assert plan is not None
+
+    ctx = AgentRunContext(
+        user_id="user-a",
+        session_id="plan-session",
+        repo_id="repo",
+        lane=ModelLane.QUALITY,
+        binding=binding,
+        worktree=internal,
+        max_steps=12,
+        max_chars=8_000,
+        compaction_ratio=0.80,
+        model_id="test-model",
+        context_limit=131_072,
+        required_verification_argv=None,
+        run_started=time.monotonic(),
+        remaining_wall_seconds=60,
+        required_verification_plan=plan,
+    )
+    state = AgentExecutionState(
+        objective="verify fixtures",
+        mutation_epoch=1,
+        last_verified_epoch=0,
+        unresolved_failures=["latest_mutation_unverified:epoch=1"],
+    )
+
+    monkeypatch.setattr(
+        AgentSandboxManager,
+        "fixed_environment",
+        staticmethod(lambda _binding: dict(os.environ)),
+    )
+    monkeypatch.setattr(coordinator, "_ensure_active", lambda *_args: None)
+    monkeypatch.setattr(
+        coordinator, "_progress", lambda *_args, **_kwargs: None
+    )
+
+    record = coordinator._verify(
+        ctx,
+        state,
+        {
+            "action": "verify",
+            "argv": ["pytest", "does-not-exist.py", "-q"],
+        },
+    )
+
+    assert record["passed"] is True
+    assert record["argv"] is None
+    assert record["step_count"] == 2
+    assert record["plan"] == [
+        {
+            "cwd": "async_fixture",
+            "argv": ["pytest", "test_public.py", "-q"],
+        },
+        {
+            "cwd": "sqlite_fixture",
+            "argv": ["pytest", "test_public.py", "-q"],
+        },
+    ]
+    assert len(record["steps"]) == 2
+    assert all(step["passed"] is True for step in record["steps"])
+    assert state.last_verified_epoch == 1
+    assert state.unresolved_failures == []

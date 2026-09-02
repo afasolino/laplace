@@ -308,6 +308,7 @@ class LaplaceCore:
         verification_argv: Sequence[str] | None,
         apply_to_repository: bool,
         wait_timeout_seconds: int,
+        verification_plan: Sequence[Mapping[str, object]] | None = None,
         task_complexity: TaskComplexity | None = None,
         task_label: str | None = None,
         allow_mutation: bool = True,
@@ -321,20 +322,45 @@ class LaplaceCore:
             task_complexity=task_complexity,
             task_label=task_label,
         )
-        result = worker.run(
-            user_id=user_id,
-            repo_id=repo_id,
-            instruction=admission.instruction_for_worker(instruction),
-            lane=lane,
-            session_id=session_id,
-            max_steps=max_steps,
-            max_chars=max_chars,
-            verification_argv=list(verification_argv) if verification_argv is not None else None,
-            apply_to_repository=apply_to_repository,
-            wait_timeout_seconds=wait_timeout_seconds,
-            task_label=task_label,
-            allow_mutation=allow_mutation,
-        )
+        if verification_plan is None:
+            result = worker.run(
+                user_id=user_id,
+                repo_id=repo_id,
+                instruction=admission.instruction_for_worker(instruction),
+                lane=lane,
+                session_id=session_id,
+                max_steps=max_steps,
+                max_chars=max_chars,
+                verification_argv=(
+                    list(verification_argv)
+                    if verification_argv is not None
+                    else None
+                ),
+                apply_to_repository=apply_to_repository,
+                wait_timeout_seconds=wait_timeout_seconds,
+                task_label=task_label,
+                allow_mutation=allow_mutation,
+            )
+        else:
+            result = worker.run(
+                user_id=user_id,
+                repo_id=repo_id,
+                instruction=admission.instruction_for_worker(instruction),
+                lane=lane,
+                session_id=session_id,
+                max_steps=max_steps,
+                max_chars=max_chars,
+                verification_argv=(
+                    list(verification_argv)
+                    if verification_argv is not None
+                    else None
+                ),
+                verification_plan=[dict(step) for step in verification_plan],
+                apply_to_repository=apply_to_repository,
+                wait_timeout_seconds=wait_timeout_seconds,
+                task_label=task_label,
+                allow_mutation=allow_mutation,
+            )
         return admission.annotate(result)
 
     def repository_agent_turn(
@@ -349,6 +375,7 @@ class LaplaceCore:
         max_chars: int,
         verification_argv: Sequence[str] | None,
         wait_timeout_seconds: float,
+        verification_plan: Sequence[Mapping[str, object]] | None = None,
         task_label: str | None = None,
         allow_mutation: bool = False,
         task_complexity: TaskComplexity | None = None,
@@ -365,19 +392,35 @@ class LaplaceCore:
             task_complexity=task_complexity,
             task_label=task_label,
         )
-        result = conversation.run_turn(
-            user_id=user_id,
-            repo_id=repo_id,
-            instruction=admission.instruction_for_worker(instruction),
-            lane=lane,
-            session_id=session_id,
-            max_steps=max_steps,
-            max_chars=max_chars,
-            verification_argv=verification_argv,
-            wait_timeout_seconds=wait_timeout_seconds,
-            task_label=task_label,
-            allow_mutation=allow_mutation,
-        )
+        if verification_plan is None:
+            result = conversation.run_turn(
+                user_id=user_id,
+                repo_id=repo_id,
+                instruction=admission.instruction_for_worker(instruction),
+                lane=lane,
+                session_id=session_id,
+                max_steps=max_steps,
+                max_chars=max_chars,
+                verification_argv=verification_argv,
+                wait_timeout_seconds=wait_timeout_seconds,
+                task_label=task_label,
+                allow_mutation=allow_mutation,
+            )
+        else:
+            result = conversation.run_turn(
+                user_id=user_id,
+                repo_id=repo_id,
+                instruction=admission.instruction_for_worker(instruction),
+                lane=lane,
+                session_id=session_id,
+                max_steps=max_steps,
+                max_chars=max_chars,
+                verification_argv=verification_argv,
+                verification_plan=[dict(step) for step in verification_plan],
+                wait_timeout_seconds=wait_timeout_seconds,
+                task_label=task_label,
+                allow_mutation=allow_mutation,
+            )
         return admission.annotate(result)
 
     def repository_result_page(
