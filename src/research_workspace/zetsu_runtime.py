@@ -259,7 +259,7 @@ def _spawn(spec: ServiceSpec) -> subprocess.Popen[bytes]:
     spec.log_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor = os.open(
         spec.log_path,
-        os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
         0o600,
     )
     os.chmod(spec.log_path, 0o600)

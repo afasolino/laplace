@@ -49,6 +49,7 @@ def test_restart_resets_semantic_state_but_preserves_execution_safety() -> None:
         model_id="new-model",
         context_limit=64000,
         required_verification_argv=("pytest", "tests/test_old.py"),
+        required_verification_plan=None,
     )
     assert state.objective == "What is 2 + 2?"
     assert state.summary == ""
@@ -79,6 +80,7 @@ def test_restart_carries_only_unverified_mutation_failure_when_needed() -> None:
         model_id="new-model",
         context_limit=64000,
         required_verification_argv=("pytest", "tests/test_old.py"),
+        required_verification_plan=None,
     )
     assert state.unresolved_failures == ["latest_mutation_unverified:epoch=2"]
     assert "old_reasoning_failure" not in state.unresolved_failures

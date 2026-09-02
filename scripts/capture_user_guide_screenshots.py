@@ -80,9 +80,9 @@ class _Models:
             },
             "servers": [
                 {
-                    "profile": "P1_fp8_kv",
-                    "port": 8102,
-                    "expected_model_id": "Qwen main · quality/standard",
+                    "profile": "P8_qwen38_w4a16_mtp",
+                    "port": 8207,
+                    "expected_model_id": "Qwen3.8 27B MTP8 · quality/standard",
                     "endpoint_observation": {"status": "HEALTHY_EXACT_MODEL"},
                 },
                 {
@@ -93,7 +93,7 @@ class _Models:
                 },
             ],
             "laplace_owned_processes": [
-                {"pid": 41001, "profile": "P1_fp8_kv"},
+                {"pid": 41001, "profile": "P8_qwen38_w4a16_mtp"},
                 {"pid": 41002, "profile": "CodeV"},
             ],
         }
@@ -107,7 +107,7 @@ class _Models:
 
 class _Profiles:
     def status(self) -> dict[str, object]:
-        return {"status": "RUNNING", "profile_id": "P1_fp8_kv"}
+        return {"status": "RUNNING", "profile_id": "P8_qwen38_w4a16_mtp"}
 
 
 class _Chat:

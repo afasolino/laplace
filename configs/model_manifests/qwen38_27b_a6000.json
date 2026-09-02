@@ -2,7 +2,7 @@
   "schema_version": 3,
   "requested_base_model": "Qwen/Qwen3.8-27B",
   "base_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
-  "artifact_path": "/home/giando/work/laplace-v3-refactor/.models/Qwen3.8-27B-AWQ-4bit-e6b4b8b025f8",
+  "artifact_path": ".models/Qwen3.8-27B-AWQ-4bit-e6b4b8b025f8",
   "artifact_revision": "hf:barrydeen/Qwen3.8-27B-AWQ-4bit@e6b4b8b025f85b3e18f13281db576e0b7d5fe314",
   "artifact_sha256": "4d72d8123b8b292edd5de9c1a3cbb7cd351eca7eb14fdf0aa996d9fcab340bb2",
   "artifact_size_bytes": 27764623261,
@@ -113,49 +113,6 @@
     "status": "NOT_RUN_PREQUANTIZED_ARTIFACT",
     "scope": "Previous dummy/local-artifact probes are not certification for this checkpoint."
   },
-  "serving_candidates": {
-    "P6_qwen38_w4a16": {
-      "profile_sha256": "715aa4f9ebd4b2988ad5e90c732179824e805c9f620a069e9ad3f37102a4fa11",
-      "max_model_len": 131072,
-      "gpu_memory_utilization": 0.755,
-      "reasoning_parser": "qwen3",
-      "tool_call_parser": "qwen3_xml",
-      "live_status": "PASSED",
-      "evidence": {
-        "profile_certification": {
-          "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p6-util0755/certification.json",
-          "sha256": "28a529019db24314732a0c6e0944161bbf3b8f505da57abe5febcab85e68e819"
-        },
-        "production_gate": {
-          "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p6-production-final-v2/production_gate.json",
-          "sha256": "65ce2e25dc8d3fd602cd5731a3136e1b06e76da23fdba5a2dc0a7fafb251c6b3"
-        }
-      }
-    },
-    "P7_qwen38_w4a16_mtp": {
-      "profile_sha256": "c96c0471359700da8630426e5b36d9a51feac3d618198791438d38f3a1e65a7c",
-      "max_model_len": 131072,
-      "gpu_memory_utilization": 0.77,
-      "requested_speculative_tokens": 3,
-      "live_status": "PASSED",
-      "evidence": {
-        "profile_certification": {
-          "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p7-k3-util077-cert-v1/certification.json",
-          "sha256": "1be434bee5bd3317c423e8b101b10dc84cb725f7dd82e018d3372892d2795f2e"
-        },
-        "production_gate": {
-          "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p7-k3-codev0134-prod-v1/production_gate.json",
-          "sha256": "e25ca5243325671e1834d88c239cb2f437da8f5525b3d68d4583a5c7e88e0d81"
-        }
-      }
-    }
-  },
-  "mtp": {
-    "requested_speculative_tokens": 3,
-    "asset_status": "PRESENT_CERTIFIED",
-    "runtime_status": "PASSED",
-    "status": "PASSED"
-  },
   "certification_status": "PASSED",
   "promotion_allowed": true,
   "artifact_policy": {
@@ -167,27 +124,11 @@
     "prepared_at_utc": "2026-08-24T06:57:22.826064+00:00"
   },
   "certified_at_utc": "2026-08-24T11:25:28.079046+00:00",
-  "certified_repository_revision": "833a308e218eeb05b24a7c7d70d9fd7c1b9bceff",
-  "certification_evidence": {
-    "P6": {
-      "profile_certification": {
-        "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p6-util0755/certification.json",
-        "sha256": "28a529019db24314732a0c6e0944161bbf3b8f505da57abe5febcab85e68e819"
-      },
-      "production_gate": {
-        "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p6-production-final-v2/production_gate.json",
-        "sha256": "65ce2e25dc8d3fd602cd5731a3136e1b06e76da23fdba5a2dc0a7fafb251c6b3"
-      }
-    },
-    "P7": {
-      "profile_certification": {
-        "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p7-k3-util077-cert-v1/certification.json",
-        "sha256": "1be434bee5bd3317c423e8b101b10dc84cb725f7dd82e018d3372892d2795f2e"
-      },
-      "production_gate": {
-        "path": "/home/giando/work/laplace/outputs/qwen38_certification/20260824-primary-e6b4/p7-k3-codev0134-prod-v1/production_gate.json",
-        "sha256": "e25ca5243325671e1834d88c239cb2f437da8f5525b3d68d4583a5c7e88e0d81"
-      }
-    }
+  "production_profile": {
+    "profile_id": "P8_qwen38_w4a16_mtp",
+    "served_model_name": "laplace-quality-qwen38-mtp8",
+    "profile_source_commit": "54fa762ff9bf7273c320e04183fdd69db391688b",
+    "requested_speculative_tokens": 8,
+    "status": "FROZEN_OPTIMIZED_STEP_B"
   }
 }

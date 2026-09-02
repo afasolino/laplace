@@ -21,7 +21,7 @@ def _script() -> ModuleType:
 
 def _base_profile(script: ModuleType):
     return script._profile(
-        ROOT / "configs/serving_profile_candidates/P7_qwen38_w4a16_mtp.json"
+        ROOT / "configs/serving_profiles/P8_qwen38_w4a16_mtp.json"
     )
 
 
@@ -44,7 +44,7 @@ def test_step_b_overrides_preserve_mtp_and_expose_cache_controls() -> None:
     assert "--mamba-cache-dtype=bfloat16" in profile.extra_args
     assert "--mamba-ssm-cache-dtype=float32" in profile.extra_args
     assert any(
-        arg.startswith("--speculative-config=") and '"num_speculative_tokens":3' in arg
+        arg.startswith("--speculative-config=") and '"num_speculative_tokens":8' in arg
         for arg in profile.extra_args
     )
 

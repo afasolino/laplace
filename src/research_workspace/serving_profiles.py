@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Literal, Mapping, Sequence, TypeAlias
 from urllib.parse import urlsplit
 
@@ -87,11 +87,13 @@ class ServingProfile:
     def __post_init__(self) -> None:
         if not re.fullmatch(r"P[0-9]+(?:_[a-z0-9_]+)?", self.profile_id):
             raise ValueError("invalid profile_id")
-        if not (
-            Path(self.model_path).is_absolute()
-            or PurePosixPath(self.model_path).is_absolute()
+        model_path = Path(self.model_path)
+        if not self.model_path or "\x00" in self.model_path:
+            raise ValueError("model_path must be a non-empty path")
+        if not model_path.is_absolute() and (
+            model_path == Path(".") or ".." in model_path.parts
         ):
-            raise ValueError("model_path must be absolute")
+            raise ValueError("relative model_path must remain inside the repository")
         if not self.served_model_name or any(char.isspace() for char in self.served_model_name):
             raise ValueError("served_model_name must be a non-empty token")
         if not 1 <= self.port <= 65_535:
@@ -242,6 +244,7 @@ def resolve_profile(
     *,
     executable: Path,
     require_model: bool = True,
+    repository_root: Path | None = None,
 ) -> ResolvedServingProfile:
     """Validate a profile against the installed build and emit one exact argv."""
 
@@ -255,18 +258,35 @@ def resolve_profile(
                 "missing_flags": missing,
             },
         )
-    model_path = Path(profile.model_path)
+    configured_model_path = Path(profile.model_path).expanduser()
+    if configured_model_path.is_absolute():
+        model_path = configured_model_path.resolve()
+    else:
+        if repository_root is None:
+            raise ServingProfileError(
+                "relative_model_path_requires_repository_root",
+                {"profile_id": profile.profile_id, "model_path": profile.model_path},
+            )
+        repo = repository_root.resolve()
+        model_path = (repo / configured_model_path).resolve()
+        try:
+            model_path.relative_to(repo)
+        except ValueError as exc:
+            raise ServingProfileError(
+                "relative_model_path_escape",
+                {"profile_id": profile.profile_id, "model_path": profile.model_path},
+            ) from exc
     if require_model and not model_path.is_dir():
         raise ServingProfileError(
             "missing_model",
-            {"profile_id": profile.profile_id, "model_path": profile.model_path},
+            {"profile_id": profile.profile_id, "model_path": str(model_path)},
         )
     if not executable.is_absolute():
         raise ServingProfileError("invalid_executable", {"path": str(executable)})
     command = [
         str(executable),
         "serve",
-        profile.model_path,
+        str(model_path),
         "--served-model-name",
         profile.served_model_name,
         "--host",
@@ -347,6 +367,7 @@ def resolve_all(
     *,
     executable: Path,
     require_model: bool = True,
+    repository_root: Path | None = None,
 ) -> tuple[ResolvedServingProfile, ...]:
     return tuple(
         resolve_profile(
@@ -354,6 +375,7 @@ def resolve_all(
             capabilities,
             executable=executable,
             require_model=require_model,
+            repository_root=repository_root,
         )
         for profile in profiles
     )

@@ -721,6 +721,7 @@ def test_profiles_resolve_deterministically_and_fail_closed(tmp_path: Path) -> N
             "--max-num-seqs",
             "--max-num-batched-tokens",
             "--kv-cache-dtype",
+            "--kv-cache-memory-bytes",
             "--gpu-memory-utilization",
             "--scheduling-policy",
             "--generation-config",
@@ -738,27 +739,57 @@ def test_profiles_resolve_deterministically_and_fail_closed(tmp_path: Path) -> N
             "--kv-offloading-size",
             "--kv-offloading-backend",
             "--language-model-only",
+            "--reasoning-parser",
+            "--enable-auto-tool-choice",
+            "--tool-call-parser",
+            "--mamba-ssm-cache-dtype",
+            "--speculative-config",
         }
     )
-    capabilities = InstalledServingCapabilities.from_help(version="0.25.0", help_text=help_text)
+    capabilities = InstalledServingCapabilities.from_help(
+        version="0.25.0",
+        help_text=help_text,
+    )
     profiles = load_profiles(ROOT / "configs/serving_profiles")
+    assert [profile.profile_id for profile in profiles] == [
+        "P8_qwen38_w4a16_mtp"
+    ]
+
     fixture_executable = Path.cwd().resolve() / "fixture-vllm/bin/vllm"
+
     first = resolve_all(
         profiles,
         capabilities,
         executable=fixture_executable,
         require_model=False,
+        repository_root=ROOT,
     )
     second = resolve_all(
         profiles,
         capabilities,
         executable=fixture_executable,
         require_model=False,
+        repository_root=ROOT,
     )
-    assert [item.resolution_sha256 for item in first] == [item.resolution_sha256 for item in second]
-    p2 = next(item for item in first if item.profile.profile_id.startswith("P2_"))
-    assert "--cpu-offload-params" in p2.command
-    assert "experts" in p2.command
+
+    assert [item.resolution_sha256 for item in first] == [
+        item.resolution_sha256 for item in second
+    ]
+
+    assert len(first) == 1
+    p8 = first[0]
+
+    assert p8.profile.profile_id == "P8_qwen38_w4a16_mtp"
+    assert p8.command[2] == str(
+        (
+            ROOT
+            / ".models/Qwen3.8-27B-AWQ-4bit-e6b4b8b025f8"
+        ).resolve()
+    )
+    assert "--kv-cache-memory-bytes" in p8.command
+    assert "--speculative-config={\"method\":\"mtp\",\"num_speculative_tokens\":8}" in p8.command
+    assert "--reasoning-parser=qwen3" in p8.command
+    assert "--tool-call-parser=qwen3_xml" in p8.command
 
     unsupported = InstalledServingCapabilities.from_help(
         version="fixture",
@@ -770,6 +801,7 @@ def test_profiles_resolve_deterministically_and_fail_closed(tmp_path: Path) -> N
             unsupported,
             executable=fixture_executable,
             require_model=False,
+            repository_root=ROOT,
         )
 
 

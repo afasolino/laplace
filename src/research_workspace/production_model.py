@@ -1,4 +1,4 @@
-"""Fail-closed production model profile selection and Qwen3.6 rollback."""
+"""Fail-closed Qwen3.8 P8 production selection and artifact verification."""
 
 from __future__ import annotations
 
@@ -7,6 +7,84 @@ import json
 import os
 import tempfile
 from pathlib import Path
+
+PRODUCTION_PROFILE_ID = "P8_qwen38_w4a16_mtp"
+PRODUCTION_MODEL_ID = "laplace-quality-qwen38-mtp8"
+PRODUCTION_PROFILE_SOURCE_COMMIT = "54fa762ff9bf7273c320e04183fdd69db391688b"
+PRODUCTION_MODEL_RELATIVE = ".models/Qwen3.8-27B-AWQ-4bit-e6b4b8b025f8"
+PRODUCTION_SELECTION_EVIDENCE = (
+    f"git:{PRODUCTION_PROFILE_SOURCE_COMMIT}#{PRODUCTION_PROFILE_ID}"
+)
+PRODUCTION_MTP_TOKENS = 8
+
+_EXPECTED_PROFILE: dict[str, object] = {
+    "profile_id": PRODUCTION_PROFILE_ID,
+    "model_route": "quality",
+    "model_path": PRODUCTION_MODEL_RELATIVE,
+    "served_model_name": PRODUCTION_MODEL_ID,
+    "port": 8207,
+    "max_model_len": 131072,
+    "max_num_seqs": 2,
+    "max_num_batched_tokens": 8192,
+    "kv_cache_dtype": "fp8",
+    "kv_cache_memory_bytes": 5905580032,
+    "enable_prefix_caching": True,
+    "prefix_hash_algorithm": "sha256",
+    "enable_chunked_prefill": True,
+    "scheduling_policy": "fcfs",
+    "cpu_offload_gb": 0.0,
+    "cpu_offload_params": [],
+    "offload_backend": "auto",
+    "offload_group_size": 0,
+    "offload_num_in_group": 1,
+    "offload_prefetch_step": 1,
+    "kv_offloading_size": None,
+    "kv_offloading_backend": "native",
+    "gpu_memory_utilization": 0.755,
+    "startup_timeout": 1200,
+    "request_timeout": 300,
+    "extra_args": [
+        "--language-model-only",
+        "--reasoning-parser=qwen3",
+        "--enable-auto-tool-choice",
+        "--tool-call-parser=qwen3_xml",
+        "--mamba-ssm-cache-dtype=bfloat16",
+        '--speculative-config={"method":"mtp","num_speculative_tokens":8}',
+    ],
+}
+
+_EXPECTED_SELECTOR: dict[str, object] = {
+    "schema_version": 1,
+    "selection_evidence": PRODUCTION_SELECTION_EVIDENCE,
+    "default_profile_id": PRODUCTION_PROFILE_ID,
+    "high_context_profile_id": PRODUCTION_PROFILE_ID,
+    "quality_reserved_slots": 1,
+    "standard_capacity": 2,
+    "economy_capacity": 4,
+    "routes": {
+        "quality": {
+            "model_id": PRODUCTION_MODEL_ID,
+            "endpoint": "http://127.0.0.1:8207",
+            "priority": 0,
+            "context_limit": 131072,
+            "output_limit": 4096,
+        },
+        "standard": {
+            "model_id": PRODUCTION_MODEL_ID,
+            "endpoint": "http://127.0.0.1:8207",
+            "priority": 10,
+            "context_limit": 131072,
+            "output_limit": 2048,
+        },
+        "economy": {
+            "model_id": "laplace-codev-r1-rl-qwen-7b-w4a16",
+            "endpoint": "http://127.0.0.1:8103",
+            "priority": 20,
+            "context_limit": 8192,
+            "output_limit": 2048,
+        },
+    },
+}
 
 
 def _load(path: Path) -> dict[str, object]:
@@ -32,41 +110,55 @@ def _path_is_within(path: Path, root: Path) -> bool:
     return True
 
 
-def _approved_model_roots(repository_root: Path) -> tuple[Path, ...]:
-    """Return canonical operator-approved roots for immutable model artifacts."""
-
-    roots: list[Path] = [repository_root.resolve()]
+def _approved_external_model_roots() -> tuple[Path, ...]:
+    roots: list[Path] = []
     raw = os.environ.get("LAPLACE_APPROVED_MODEL_ROOTS", "")
     for value in raw.split(os.pathsep):
         value = value.strip()
         if not value:
             continue
-
         configured = Path(value).expanduser()
         if not configured.is_absolute():
             raise RuntimeError("qwen38_approved_artifact_root_not_absolute")
         if configured.is_symlink():
             raise RuntimeError("qwen38_approved_artifact_root_symlink")
-
         try:
             resolved = configured.resolve(strict=True)
         except OSError as exc:
             raise RuntimeError("qwen38_approved_artifact_root_unavailable") from exc
-
         if not resolved.is_dir():
             raise RuntimeError("qwen38_approved_artifact_root_not_directory")
         if resolved != configured.absolute():
             raise RuntimeError("qwen38_approved_artifact_root_symlink_parent")
-
         if resolved not in roots:
             roots.append(resolved)
-
     return tuple(roots)
 
 
-def verify_qwen38_artifact(repository_root: Path) -> dict[str, object]:
-    """Verify every packed artifact byte against the immutable local manifest."""
+def _artifact_root(repository_root: Path, configured_value: str) -> Path:
+    configured = Path(configured_value).expanduser()
+    if configured.is_absolute():
+        if configured.is_symlink():
+            raise RuntimeError("qwen38_artifact_root_symlink")
+        resolved = configured.resolve()
+        approved = _approved_external_model_roots()
+        if not approved or not any(_path_is_within(resolved, root) for root in approved):
+            raise RuntimeError("qwen38_artifact_path_outside_repository")
+        return resolved
+    if not configured.parts or configured == Path(".") or ".." in configured.parts:
+        raise RuntimeError("qwen38_artifact_relative_path_invalid")
+    candidate = repository_root / configured
+    if candidate.is_symlink():
+        raise RuntimeError("qwen38_artifact_root_symlink")
+    resolved = candidate.resolve()
+    if not _path_is_within(resolved, repository_root):
+        raise RuntimeError("qwen38_artifact_path_outside_repository")
+    if resolved != candidate.absolute():
+        raise RuntimeError("qwen38_artifact_root_symlink_parent")
+    return resolved
 
+
+def verify_qwen38_artifact(repository_root: Path) -> dict[str, object]:
     root = repository_root.resolve()
     manifest_path = root / "configs/model_manifests/qwen38_27b_a6000.json"
     raw: object = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -76,19 +168,11 @@ def verify_qwen38_artifact(repository_root: Path) -> dict[str, object]:
     artifact_manifest_value = raw.get("artifact_manifest")
     if not isinstance(artifact_path_value, str) or not isinstance(artifact_manifest_value, str):
         raise RuntimeError("qwen38_artifact_provenance_missing")
-    configured_artifact_root = Path(artifact_path_value)
-    if configured_artifact_root.is_symlink():
-        raise RuntimeError("qwen38_artifact_root_symlink")
-    artifact_root = configured_artifact_root.resolve()
-
-    approved_roots = _approved_model_roots(root)
-    if not any(_path_is_within(artifact_root, approved) for approved in approved_roots):
-        raise RuntimeError("qwen38_artifact_path_outside_repository")
+    artifact_root = _artifact_root(root, artifact_path_value)
 
     artifact_manifest_relative = Path(artifact_manifest_value)
     if artifact_manifest_relative.is_absolute() or ".." in artifact_manifest_relative.parts:
         raise RuntimeError("qwen38_artifact_manifest_path_mismatch")
-
     artifact_manifest_path = (root / artifact_manifest_relative).resolve()
     if artifact_manifest_path.parent != artifact_root:
         if (
@@ -96,17 +180,16 @@ def verify_qwen38_artifact(repository_root: Path) -> dict[str, object]:
             or artifact_manifest_relative.parent.name != artifact_root.name
         ):
             raise RuntimeError("qwen38_artifact_manifest_path_mismatch")
-
         candidate = artifact_root / artifact_manifest_relative.name
         if candidate.is_symlink():
             raise RuntimeError("qwen38_artifact_manifest_path_mismatch")
-
         artifact_manifest_path = candidate.resolve()
         if (
             artifact_manifest_path.parent != artifact_root
             or artifact_manifest_path != candidate.absolute()
         ):
             raise RuntimeError("qwen38_artifact_manifest_path_mismatch")
+
     artifact_raw: object = json.loads(artifact_manifest_path.read_text(encoding="utf-8"))
     if not isinstance(artifact_raw, dict) or artifact_raw.get("schema_version") != 1:
         raise RuntimeError("qwen38_artifact_manifest_invalid")
@@ -186,27 +269,76 @@ def verify_qwen38_artifact(repository_root: Path) -> dict[str, object]:
     return raw
 
 
-def qwen38_manifest(repository_root: Path) -> dict[str, object]:
-    """Reject a Qwen3.8 start unless immutable provenance and certification pass."""
+def _validate_production_configuration(root: Path, manifest: dict[str, object]) -> None:
+    expected_production = {
+        "profile_id": PRODUCTION_PROFILE_ID,
+        "served_model_name": PRODUCTION_MODEL_ID,
+        "profile_source_commit": PRODUCTION_PROFILE_SOURCE_COMMIT,
+        "requested_speculative_tokens": PRODUCTION_MTP_TOKENS,
+        "status": "FROZEN_OPTIMIZED_STEP_B",
+    }
+    if manifest.get("production_profile") != expected_production:
+        raise RuntimeError("qwen38_p8_production_manifest_invalid")
 
+    profile_root = root / "configs/serving_profiles"
+    active_files = sorted(path.name for path in profile_root.glob("*.json"))
+    if active_files != [f"{PRODUCTION_PROFILE_ID}.json"]:
+        raise RuntimeError("qwen38_active_profile_set_invalid")
+    active: object = json.loads(
+        (profile_root / f"{PRODUCTION_PROFILE_ID}.json").read_text(encoding="utf-8")
+    )
+    if active != _EXPECTED_PROFILE:
+        raise RuntimeError("qwen38_p8_profile_drift")
+
+    selector_files = sorted(
+        path.name for path in (root / "configs").glob("selected_serving_profiles*.json")
+    )
+    if selector_files != ["selected_serving_profiles.json"]:
+        raise RuntimeError("qwen38_legacy_selector_present")
+    selected = _load(root / "configs/selected_serving_profiles.json")
+    expected_routes = _EXPECTED_SELECTOR["routes"]
+    selected_routes = selected.get("routes")
+    if not isinstance(expected_routes, dict) or not isinstance(selected_routes, dict):
+        raise RuntimeError("qwen38_p8_selector_drift")
+
+    for key in (
+        "schema_version",
+        "selection_evidence",
+        "default_profile_id",
+        "high_context_profile_id",
+        "quality_reserved_slots",
+        "standard_capacity",
+        "economy_capacity",
+    ):
+        if selected.get(key) != _EXPECTED_SELECTOR.get(key):
+            raise RuntimeError("qwen38_p8_selector_drift")
+
+    for lane in ("quality", "standard"):
+        if selected_routes.get(lane) != expected_routes.get(lane):
+            raise RuntimeError("qwen38_p8_selector_drift")
+
+    candidate_files = sorted(
+        path.name for path in (root / "configs/serving_profile_candidates").glob("*.json")
+    )
+    if candidate_files != [f"{PRODUCTION_PROFILE_ID}.json"]:
+        raise RuntimeError("qwen38_legacy_candidate_present")
+
+
+def qwen38_manifest(repository_root: Path) -> dict[str, object]:
     root = repository_root.resolve()
-    manifest_path = root / "configs/model_manifests/qwen38_27b_a6000.json"
-    manifest: object = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = verify_qwen38_artifact(root)
+    quantization = manifest.get("quantization")
     if (
-        not isinstance(manifest, dict)
-        or manifest.get("schema_version") != 3
-        or manifest.get("promotion_allowed") is not True
-        or manifest.get("certification_status") != "PASSED"
-        or not manifest.get("artifact_sha256")
+        not manifest.get("artifact_sha256")
         or not manifest.get("base_revision")
         or not manifest.get("artifact_revision")
         or not manifest.get("tokenizer_revision")
-        or not isinstance(manifest.get("certification_evidence"), dict)
-        or not isinstance(manifest.get("quantization"), dict)
-        or manifest["quantization"].get("status") != "ARTIFACT_VERIFIED"
+        or not isinstance(quantization, dict)
+        or quantization.get("status") != "ARTIFACT_VERIFIED"
     ):
         raise RuntimeError("qwen38_promotion_not_certified")
-    return verify_qwen38_artifact(root)
+    _validate_production_configuration(root, manifest)
+    return manifest
 
 
 def assert_qwen38_promotable(repository_root: Path) -> None:
@@ -220,30 +352,18 @@ def select(
     *,
     selection_evidence: str | None = None,
 ) -> Path:
-    """Atomically select certified Qwen3.8 or the retained Qwen3.6 rollback."""
-
     root = repository_root.resolve()
-    target = (
-        output.resolve() if output is not None else root / "configs/selected_serving_profiles.json"
-    )
-    if profile == "qwen38":
-        manifest = qwen38_manifest(root)
-        mtp = manifest.get("mtp")
-        mtp_passed = isinstance(mtp, dict) and mtp.get("status") == "PASSED"
-        source = root / (
-            "configs/selected_serving_profiles.qwen38-mtp.json"
-            if mtp_passed
-            else "configs/selected_serving_profiles.qwen38.json"
-        )
-    elif profile == "qwen36":
-        source = root / "configs/selected_serving_profiles.qwen36.rollback.json"
-    else:
+    if profile != "qwen38":
         raise RuntimeError(f"unknown_profile:{profile}")
+    qwen38_manifest(root)
+    source = root / "configs/selected_serving_profiles.json"
     selected = _load(source)
-    if selection_evidence is not None:
-        if profile != "qwen38" or not selection_evidence.strip():
-            raise RuntimeError("invalid_selection_evidence")
-        selected["selection_evidence"] = selection_evidence
+    if selection_evidence is not None and selection_evidence != PRODUCTION_SELECTION_EVIDENCE:
+        raise RuntimeError("invalid_selection_evidence")
+    if output is None:
+        return source
+
+    target = output.resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{target.name}.", suffix=".tmp", dir=target.parent

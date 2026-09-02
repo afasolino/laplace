@@ -38,7 +38,7 @@ from research_workspace.serving_profiles import (
 ROOT = Path(__file__).resolve().parents[1]
 VLLM = ROOT / ".venv-vllm-cu129/bin/vllm"
 FFMPEG = ROOT / ".runtime/ffmpeg7/lib"
-BASE_PROFILE = ROOT / "configs/serving_profile_candidates/P7_qwen38_w4a16_mtp.json"
+BASE_PROFILE = ROOT / "configs/serving_profiles/P8_qwen38_w4a16_mtp.json"
 DEFAULT_KS = tuple(range(3, 11))
 KV_CACHE_DTYPES = ("auto", "fp8", "fp8_per_token_head")
 MAMBA_CACHE_DTYPES = ("auto", "bfloat16", "float16", "float32")
@@ -364,13 +364,17 @@ def _workpoint(
     )
     profile = replace(
         base,
-        profile_id=("P6_qwen38_w4a16_sweep" if k == 0 else f"P7_qwen38_w4a16_mtp_k{k}"),
-        served_model_name=(
-            "laplace-quality-qwen38-sweep" if k == 0 else f"laplace-quality-qwen38-mtp-k{k}"
-        ),
+        profile_id=f"P8_qwen38_w4a16_mtp_sweep_k{k}",
+        served_model_name=f"laplace-quality-qwen38-mtp8-sweep-k{k}",
         extra_args=extra,
     )
-    resolved = resolve_profile(profile, capabilities, executable=vllm, require_model=True)
+    resolved = resolve_profile(
+        profile,
+        capabilities,
+        executable=vllm,
+        require_model=True,
+        repository_root=ROOT,
+    )
     output.mkdir(parents=True, exist_ok=False)
     _write_json(output / "resolved_profile.json", resolved.to_json())
     runtime = ServingProfileRuntime(output / "runtime", ffmpeg_library_path=ffmpeg)

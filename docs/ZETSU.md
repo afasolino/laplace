@@ -188,9 +188,11 @@ approximate Zetsu evidence/context estimates are reported separately and never a
 to Codex-credit consumption. This is a three-pair engineering sanity check, not a
 statistical benchmark.
 
-The optimized production measurement is frozen separately in
-`configs/benchmarks/zetsu_production_token_tasks_v4.json`; older benchmark roots
-remain diagnostic evidence and are never overwritten or reinterpreted.
+The maintained token-efficiency sanity check uses
+`configs/benchmarks/zetsu_token_tasks.json` with
+`scripts/benchmark_zetsu_token_efficiency.py`. Older benchmark outputs remain
+historical diagnostic evidence; deleted legacy task specifications are not runtime
+inputs and are never reconstructed or reinterpreted as current configuration.
 
 ## Laplace Client boundary
 
@@ -223,7 +225,7 @@ in the protected Operator token file and client process environment.
 - `per_user_worktree_quota`: inspect `laplace zetsu sessions --json`; clean stale
   sessions are reclaimed, while dirty sessions remain protected.
 - model readiness false: inspect `/api/v1/readiness`; MCP reachability does not
-  certify Qwen or CodeV.
+  certify Qwen or an independently configured RTL worker.
 
 For the local development deployment, `laplace zetsu start --nocodev` starts the
 selected Qwen profile and Operator and waits for both to become ready. Thereafter,
@@ -231,11 +233,12 @@ bare `laplace zetsu` from any project performs configure-if-needed, status, and
 the authenticated retrieval test. The matching `laplace zetsu stop` command stops
 only supervisors recorded with matching owned process identities.
 
-The full CodeV topology is reserved for an explicit RTL experiment or operator
-action. If it is used, stop it and return to `laplace zetsu start --nocodev` when
-the experiment ends. C8 currently records the SiliconMind comparison as BLOCKED
-because its candidate artifact and certified full-topology vLLM executable are
-absent; no model route was promoted.
+The RTL-worker topology, including the Step-C SiliconMind qualification line,
+is independently qualified and lifecycle-managed.
+`laplace zetsu start --nocodev` intentionally starts the certified P8 Qwen path
+without activating the RTL worker; an explicit RTL experiment or later lifecycle
+orchestration may activate that independent route without changing P8 identity.
 
-See [QWEN38_PRODUCTION_MIGRATION.md](QWEN38_PRODUCTION_MIGRATION.md) for Qwen3.8
-preparation, certification, promotion, MTP, and rollback.
+See [QWEN38_PRODUCTION_P8.md](QWEN38_PRODUCTION_P8.md) for the current Qwen3.8
+production invariant, artifact provenance, portability rules, and fail-closed
+recovery policy.

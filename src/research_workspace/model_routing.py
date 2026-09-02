@@ -831,6 +831,7 @@ def serving_candidate_from_json(value: object) -> ServingCandidate:
         "structured_serialization_top_p",
         "structured_serialization_top_k",
         "structured_serialization_presence_penalty",
+        "thinking_token_budget",
     }
     unexpected = sorted(set(value) - allowed)
     if unexpected:
@@ -875,6 +876,7 @@ def serving_candidate_from_json(value: object) -> ServingCandidate:
         "structured_serialization_presence_penalty", 0.0
     )
     seed = value.get("seed", 0)
+    thinking_token_budget = value.get("thinking_token_budget")
     model_path = value.get("model_path")
     if not isinstance(temperature, (int, float)) or isinstance(temperature, bool):
         raise ValueError("Serving profile temperature must be numeric")
@@ -900,6 +902,13 @@ def serving_candidate_from_json(value: object) -> ServingCandidate:
         )
     if seed is not None and (not isinstance(seed, int) or isinstance(seed, bool)):
         raise ValueError("Serving profile seed must be an integer or null")
+    if thinking_token_budget is not None and (
+        not isinstance(thinking_token_budget, int)
+        or isinstance(thinking_token_budget, bool)
+    ):
+        raise ValueError(
+            "Serving profile thinking_token_budget must be an integer or null"
+        )
     if model_path is not None and (not isinstance(model_path, str) or not model_path.strip()):
         raise ValueError("Serving profile model_path must be non-empty text or null")
     return ServingCandidate(
@@ -928,6 +937,7 @@ def serving_candidate_from_json(value: object) -> ServingCandidate:
         structured_serialization_top_p=float(structured_top_p),
         structured_serialization_top_k=structured_top_k,
         structured_serialization_presence_penalty=float(structured_presence_penalty),
+        thinking_token_budget=thinking_token_budget,
     )
 
 

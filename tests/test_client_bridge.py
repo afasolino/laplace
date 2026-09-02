@@ -104,7 +104,16 @@ def test_command_sandbox_mounts_only_system_runtime_and_granted_root(
     assert command[-2:] == ["/usr/bin/python3", "-V"]
     assert str(root) in command
     assert "/etc" not in command
-    assert "/home" not in command
+
+    mounts = [
+        (command[index], command[index + 1], command[index + 2])
+        for index, item in enumerate(command[:-2])
+        if item in {"--ro-bind", "--bind"}
+    ]
+    assert all(
+        source != "/home" and target != "/home"
+        for _, source, target in mounts
+    )
     capabilities = detected_capabilities(registry)
     assert capabilities["command_sandbox"] == {
         "available": True,

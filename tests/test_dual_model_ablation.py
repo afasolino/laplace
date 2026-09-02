@@ -138,6 +138,7 @@ def test_serving_profiles_are_loopback_only_and_decoding_is_configurable() -> No
     configured_profile["structured_serialization_top_p"] = 0.8
     configured_profile["structured_serialization_top_k"] = 20
     configured_profile["structured_serialization_presence_penalty"] = 1.5
+    configured_profile["thinking_token_budget"] = 128
     configured_candidate = serving_candidate_from_json(configured_profile)
     assert configured_candidate.max_output_tokens == 512
     assert configured_candidate.structured_serialization_max_output_tokens == 8192
@@ -145,8 +146,9 @@ def test_serving_profiles_are_loopback_only_and_decoding_is_configurable() -> No
     assert configured_candidate.structured_serialization_top_p == 0.8
     assert configured_candidate.structured_serialization_top_k == 20
     assert configured_candidate.structured_serialization_presence_penalty == 1.5
-    configured_profile["structured_serialization_max_output_tokens"] = 8193
-    with pytest.raises(ValueError, match="between 1 and 8192"):
+    assert configured_candidate.thinking_token_budget == 128
+    configured_profile["structured_serialization_max_output_tokens"] = 16385
+    with pytest.raises(ValueError, match="between 1 and 16384"):
         serving_candidate_from_json(configured_profile)
     with pytest.raises(ValueError, match="loopback"):
         ServingCandidate(

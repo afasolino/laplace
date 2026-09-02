@@ -179,7 +179,7 @@ rewrite the v2 branch.
 - [Architecture](docs/ARCHITECTURE.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Worktree lifecycle](docs/AGENT_WORKTREES.md)
-- [Qwen3.8 migration and rollback](docs/QWEN38_PRODUCTION_MIGRATION.md)
+- [Qwen3.8 P8 production configuration](docs/QWEN38_PRODUCTION_P8.md)
 - [Release policy](docs/RELEASE_POLICY.md)
 - [Corrective roadmap certifications](docs/v2-corrective-roadmap/certifications)
 

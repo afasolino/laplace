@@ -174,13 +174,14 @@ record `YIELDED_TO_SPECDEC`.
 
 ## Qwen3.8 and Zetsu administration
 
-Qwen3.8 promotion is evidence-gated. Resolve and record an immutable revision of
-the preferred published pre-quantized checkpoint, run the P6 131,072-token live
-profile and co-resident production gates, then promote only through the existing
-finalizer. P7 native MTP with the measured three-token workpoint is optional. A failed P7
-leaves MTP disabled without invalidating a successful P6. Preserve Qwen3.6 as the
-configuration rollback and the CodeV Economy route as the bounded RTL specialist.
-See [QWEN38_PRODUCTION_MIGRATION.md](QWEN38_PRODUCTION_MIGRATION.md).
+Qwen3.8 production is fail-closed on the single certified P8 configuration:
+`P8_qwen38_w4a16_mtp`, served as `laplace-quality-qwen38-mtp8`, with an
+eight-token MTP workpoint and 131,072-token production context. The packed model
+artifact and its provenance are verified against
+`configs/model_manifests/qwen38_27b_a6000.json`; no P6/P7 selection path,
+Qwen3.6 rollback, floating pre-quantized candidate, or local quantization fallback
+is active. The independent RTL/economy worker lifecycle is outside P8 identity.
+See [QWEN38_PRODUCTION_P8.md](QWEN38_PRODUCTION_P8.md).
 
 Zetsu configuration intentionally combines a managed user-level Codex MCP block
 with a project-local Skill. Preserve unrelated Codex settings. The bearer token is

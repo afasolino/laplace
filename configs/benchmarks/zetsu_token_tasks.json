@@ -6,7 +6,7 @@
     {
       "id": "routing",
       "kind": "read_only",
-      "prompt": "Inspect the frozen repository and return exactly these four repository facts as four `key=path` lines, with no prose: routing, rollback, qwen38_manifest, promotion.",
+      "prompt": "Inspect the frozen repository and return exactly these four repository facts as four `key=path` lines, with no prose: routing, production_model, qwen38_manifest, production_profile.",
       "correctness": {
         "type": "answer_contains_paths",
         "artifact": "final_answer.txt",
@@ -14,9 +14,9 @@
           "src/research_workspace/model_routing.py",
           "src/research_workspace/production_model.py",
           "configs/model_manifests/qwen38_27b_a6000.json",
-          "scripts/finalize_qwen38_certification.py"
+          "configs/serving_profiles/P8_qwen38_w4a16_mtp.json"
         ],
-        "answer_exact": "routing=src/research_workspace/model_routing.py\nrollback=src/research_workspace/production_model.py\nqwen38_manifest=configs/model_manifests/qwen38_27b_a6000.json\npromotion=scripts/finalize_qwen38_certification.py\n"
+        "answer_exact": "routing=src/research_workspace/model_routing.py\nproduction_model=src/research_workspace/production_model.py\nqwen38_manifest=configs/model_manifests/qwen38_27b_a6000.json\nproduction_profile=configs/serving_profiles/P8_qwen38_w4a16_mtp.json\n"
       }
     },
     {

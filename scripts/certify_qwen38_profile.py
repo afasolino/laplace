@@ -54,11 +54,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "profile_id",
-        choices=(
-            "P6_qwen38_w4a16",
-            "P7_qwen38_w4a16_mtp",
-            "P8_qwen38_w4a16_mtp",
-        ),
+        choices=("P8_qwen38_w4a16_mtp",),
     )
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--repository-root", type=Path, default=ROOT)
@@ -670,13 +666,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     root = arguments.repository_root.resolve()
     output = arguments.output_root.resolve()
     output.mkdir(parents=True, exist_ok=False)
-    profile_path = root / "configs/serving_profile_candidates" / f"{arguments.profile_id}.json"
+    profile_path = root / "configs/serving_profiles" / f"{arguments.profile_id}.json"
     profile = _profile(profile_path)
     artifact = verify_qwen38_artifact(root)
-    if Path(profile.model_path).resolve() != Path(str(artifact["artifact_path"])).resolve():
+    profile_model_path = Path(profile.model_path)
+    profile_model_path = (
+        profile_model_path.resolve()
+        if profile_model_path.is_absolute()
+        else (root / profile_model_path).resolve()
+    )
+    artifact_model_path = Path(str(artifact["artifact_path"]))
+    artifact_model_path = (
+        artifact_model_path.resolve()
+        if artifact_model_path.is_absolute()
+        else (root / artifact_model_path).resolve()
+    )
+    if profile_model_path != artifact_model_path:
         raise RuntimeError("candidate_profile_artifact_mismatch")
     capabilities = _capabilities(arguments.vllm.resolve(), arguments.ffmpeg_lib.resolve())
-    resolved = resolve_profile(profile, capabilities, executable=arguments.vllm.resolve())
+    resolved = resolve_profile(
+        profile,
+        capabilities,
+        executable=arguments.vllm.resolve(),
+        repository_root=root,
+    )
     _write_json(output / "resolved_profile.json", resolved.to_json())
     runtime = ServingProfileRuntime(
         output / "runtime", ffmpeg_library_path=arguments.ffmpeg_lib.resolve()
@@ -745,9 +758,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             _run_gate(
                 gates,
                 "quantized_kernel",
-                lambda: _quantized_kernel(Path(profile.model_path), Path(owned.log_path)),
+                lambda: _quantized_kernel(profile_model_path, Path(owned.log_path)),
             )
-            if arguments.profile_id in {"P7_qwen38_w4a16_mtp", "P8_qwen38_w4a16_mtp"}:
+            if arguments.profile_id == "P8_qwen38_w4a16_mtp":
                 expected_mtp_tokens = _mtp_tokens(profile)
                 _run_gate(
                     gates,
@@ -786,7 +799,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "sampling_interval_seconds": 0.25,
     }
     required = [*MANDATORY_GATES]
-    if arguments.profile_id in {"P7_qwen38_w4a16_mtp", "P8_qwen38_w4a16_mtp"}:
+    if arguments.profile_id == "P8_qwen38_w4a16_mtp":
         required.append("mtp")
     endpoint_released = _endpoint_down(endpoint_for(profile))
     try:

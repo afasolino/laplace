@@ -57,7 +57,7 @@ def test_service_specs_use_certified_order_and_cu129(tmp_path: Path) -> None:
     assert str(vllm) in specs[1].argv
     assert specs[2].argv[-1] == str(bearer_token_file(tmp_path))
     assert specs[0].expected_model == "laplace-codev-r1-rl-qwen-7b-w4a16"
-    assert specs[1].expected_model == "laplace-quality-qwen38-mtp"
+    assert specs[1].expected_model == "laplace-quality-qwen38-mtp8"
 
 
 def test_local_plus_token_requires_private_file(tmp_path: Path) -> None:

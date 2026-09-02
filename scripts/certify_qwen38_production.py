@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parents[1]
 VLLM = ROOT / ".venv-vllm-cu129/bin/vllm"
 FFMPEG = ROOT / ".runtime/ffmpeg7/lib"
 OPERATOR_PYTHON = ROOT / ".venv/bin/python"
-PROFILE_IDS = ("P6_qwen38_w4a16", "P7_qwen38_w4a16_mtp")
+PROFILE_IDS = ("P8_qwen38_w4a16_mtp",)
 MANDATORY_PROFILE_GATES = (
     "model_identity",
     "normal_inference",
@@ -132,7 +132,7 @@ def validate_profile_certification(
 
     certification = _load_object(certification_path, "profile_certification_malformed")
     required = [*MANDATORY_PROFILE_GATES]
-    if profile_id == "P7_qwen38_w4a16_mtp":
+    if profile_id == "P8_qwen38_w4a16_mtp":
         required.append("mtp")
     gates = certification.get("gates")
     valid_gates = isinstance(gates, dict) and all(
@@ -158,12 +158,9 @@ def validate_profile_certification(
 
 
 def _selection_path(root: Path, profile_id: str) -> Path:
-    name = (
-        "selected_serving_profiles.qwen38-mtp.json"
-        if profile_id == "P7_qwen38_w4a16_mtp"
-        else "selected_serving_profiles.qwen38.json"
-    )
-    return root / "configs" / name
+    if profile_id != "P8_qwen38_w4a16_mtp":
+        raise RuntimeError("unsupported_production_profile")
+    return root / "configs/selected_serving_profiles.json"
 
 
 def _validate_staged_routes(
@@ -190,10 +187,8 @@ def _validate_staged_routes(
         or standard.get("model_id") != profile.served_model_name
         or quality.get("endpoint") != endpoint
         or standard.get("endpoint") != endpoint
-        or economy.get("model_id") != "laplace-codev-r1-rl-qwen-7b-w4a16"
-        or economy.get("endpoint") != "http://127.0.0.1:8103"
     ):
-        raise RuntimeError("staged_routes_not_qwen38_qwen38_codev")
+        raise RuntimeError("staged_routes_not_qwen38_quality")
     return {"quality": quality, "standard": standard, "economy": economy}
 
 
@@ -290,9 +285,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     output.mkdir(parents=True, exist_ok=False)
     repository_revision = _git_revision(root)
     artifact = verify_qwen38_artifact(root)
-    profile_path = root / "configs/serving_profile_candidates" / f"{arguments.profile_id}.json"
+    profile_path = root / "configs/serving_profiles" / f"{arguments.profile_id}.json"
     profile = _profile(profile_path)
-    if Path(profile.model_path).resolve() != Path(str(artifact["artifact_path"])).resolve():
+    profile_model_path = Path(profile.model_path)
+    profile_model_path = (
+        profile_model_path.resolve()
+        if profile_model_path.is_absolute()
+        else (root / profile_model_path).resolve()
+    )
+    artifact_model_path = Path(str(artifact["artifact_path"]))
+    artifact_model_path = (
+        artifact_model_path.resolve()
+        if artifact_model_path.is_absolute()
+        else (root / artifact_model_path).resolve()
+    )
+    if profile_model_path != artifact_model_path:
         raise RuntimeError("candidate_profile_artifact_mismatch")
     profile_certification_path = arguments.profile_certification.resolve(strict=True)
     validate_profile_certification(
@@ -317,7 +324,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     capabilities = _capabilities(arguments.vllm.resolve(), arguments.ffmpeg_lib.resolve())
     resolved = resolve_profile(
-        profile, capabilities, executable=arguments.vllm.resolve(), require_model=True
+        profile,
+        capabilities,
+        executable=arguments.vllm.resolve(),
+        require_model=True,
+        repository_root=root,
     )
     _write_json(output / "resolved_profile.json", resolved.to_json())
     runtime = ServingProfileRuntime(

@@ -1,14 +1,14 @@
 {
-  "profile_id": "P7_qwen38_w4a16_mtp",
+  "profile_id": "P8_qwen38_w4a16_mtp",
   "model_route": "quality",
-  "model_path": "/home/giando/work/laplace/.models/Qwen3.8-27B-AWQ-4bit-e6b4b8b025f8",
-  "served_model_name": "laplace-quality-qwen38-mtp",
+  "model_path": ".models/Qwen3.8-27B-AWQ-4bit-e6b4b8b025f8",
+  "served_model_name": "laplace-quality-qwen38-mtp8",
   "port": 8207,
   "max_model_len": 131072,
   "max_num_seqs": 2,
   "max_num_batched_tokens": 8192,
-  "kv_cache_dtype": "auto",
-  "kv_cache_memory_bytes": null,
+  "kv_cache_dtype": "fp8",
+  "kv_cache_memory_bytes": 5905580032,
   "enable_prefix_caching": true,
   "prefix_hash_algorithm": "sha256",
   "enable_chunked_prefill": true,
@@ -21,7 +21,7 @@
   "offload_prefetch_step": 1,
   "kv_offloading_size": null,
   "kv_offloading_backend": "native",
-  "gpu_memory_utilization": 0.77,
+  "gpu_memory_utilization": 0.755,
   "startup_timeout": 1200,
   "request_timeout": 300,
   "extra_args": [
@@ -29,6 +29,7 @@
     "--reasoning-parser=qwen3",
     "--enable-auto-tool-choice",
     "--tool-call-parser=qwen3_xml",
-    "--speculative-config={\"method\":\"mtp\",\"num_speculative_tokens\":3}"
+    "--mamba-ssm-cache-dtype=bfloat16",
+    "--speculative-config={\"method\":\"mtp\",\"num_speculative_tokens\":8}"
   ]
 }

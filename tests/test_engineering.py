@@ -18,6 +18,7 @@ from research_workspace.engineering import (
     SchemaValidationError,
     collect_cuda_evidence,
     normalize_task_spec,
+    verilator_simulation_available,
     retrieve_engineering_evidence,
     validate_task_spec,
 )
@@ -387,9 +388,15 @@ def test_mcp_research_uses_configured_shared_reference_root(
 
 
 def test_eda_flow_runs_lint_self_checking_simulation_and_synthesis(tmp_path: Path) -> None:
-    required = ("verilator", "iverilog", "vvp", "yosys")
-    if any(shutil.which(tool) is None for tool in required):
-        pytest.skip("local EDA integration requires verilator, iverilog, vvp, and yosys")
+    required = ("iverilog", "vvp", "yosys")
+    if (
+        any(shutil.which(tool) is None for tool in required)
+        or not verilator_simulation_available()
+    ):
+        pytest.skip(
+            "local EDA integration requires iverilog, vvp, yosys, "
+            "and a Verilator build capable of the required simulation gate"
+        )
     result = LocalToolRunner(REPOSITORY_ROOT, log_root=tmp_path / "tool_logs").run_eda_flow(
         ["benchmarks/a6000_agent_team/rtl/rv_skid_buffer.sv"],
         top_module="rv_skid_buffer",
@@ -569,7 +576,10 @@ def test_local_team_records_gpu_block_without_cpu_substitution(
     )
     monkeypatch.setattr(
         "research_workspace.team_runner.collect_cuda_evidence",
-        lambda runner: {"status": "BLOCKED_GPU", "reason": "unit-test fixture"},
+        lambda _runner, **_kwargs: {
+            "status": "BLOCKED_GPU",
+            "reason": "unit-test fixture",
+        },
     )
     result = LocalTeamRunner(REPOSITORY_ROOT, tmp_path, candidate).run(
         task.task_id, query="typed explicit operation"
