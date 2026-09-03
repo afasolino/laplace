@@ -3069,13 +3069,14 @@ def create_operator_app(
             base_revision=body.base_revision,
         )
         if registered_auth is not None:
-            user = registered_auth.registry.require_user(body.user_id)
-            repositories = tuple(sorted(set(user.authorized_repo_ids) | {body.repo_id}))
-            registered_auth.registry.update_user(
-                body.user_id,
-                authorized_repo_ids=repositories,
-            )
-            registered_auth.sessions.revoke_user(body.user_id)
+            user = registered_auth.registry.by_user_id(body.user_id)
+            if user is not None:
+                repositories = tuple(sorted(set(user.authorized_repo_ids) | {body.repo_id}))
+                registered_auth.registry.update_user(
+                    body.user_id,
+                    authorized_repo_ids=repositories,
+                )
+                registered_auth.sessions.revoke_user(body.user_id)
         operator.record_action(
             actor_role=authenticated.role,
             action="REPOSITORY_GRANTED",
@@ -3103,14 +3104,15 @@ def create_operator_app(
             raise HTTPException(status_code=403, detail="admin_role_required")
         grant = require_tiered().sandboxes.authorizations.revoke(body.user_id, body.repo_id)
         if registered_auth is not None:
-            user = registered_auth.registry.require_user(body.user_id)
-            registered_auth.registry.update_user(
-                body.user_id,
-                authorized_repo_ids=tuple(
-                    item for item in user.authorized_repo_ids if item != body.repo_id
-                ),
-            )
-            registered_auth.sessions.revoke_user(body.user_id)
+            user = registered_auth.registry.by_user_id(body.user_id)
+            if user is not None:
+                registered_auth.registry.update_user(
+                    body.user_id,
+                    authorized_repo_ids=tuple(
+                        item for item in user.authorized_repo_ids if item != body.repo_id
+                    ),
+                )
+                registered_auth.sessions.revoke_user(body.user_id)
         operator.record_action(
             actor_role=authenticated.role,
             action="REPOSITORY_REVOKED",

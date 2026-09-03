@@ -27,7 +27,10 @@ from research_workspace.auth_sessions import (
 from research_workspace.conversations import ConversationError, ConversationStore
 from research_workspace.operator_api import OperatorApiSettings, OperatorAuth, create_operator_app
 from research_workspace.operator_service import OperatorService
-from research_workspace.repository_authorization import RepositoryAuthorizationStore
+from research_workspace.repository_authorization import (
+    RepositoryAuthorizationError,
+    RepositoryAuthorizationStore,
+)
 from research_workspace.service_tiers import (
     LanePolicy,
     ModelLane,
@@ -231,6 +234,53 @@ async def test_activation_login_cookie_csrf_and_generic_failure(tmp_path: Path) 
         signed_out = await client.get("/api/v1/auth/session")
         assert signed_out.status_code == 200
         assert signed_out.json()["status"] == "SIGNED_OUT"
+
+
+@pytest.mark.anyio
+async def test_repository_grant_revoke_accepts_service_principal_not_in_browser_registry(
+    tmp_path: Path,
+) -> None:
+    admin = _user(
+        "operator-admin@example.test",
+        "operator-admin",
+        CapabilityTier.OPERATOR,
+        role="admin",
+    )
+    registered_auth = _registered_auth(tmp_path, [admin])
+    tiered = _tiered(tmp_path, [admin])
+    tiered.sandboxes.authorizations.register("campaign", ROOT)
+    tiered.sandboxes.authorizations.grant("plus-local", "campaign")
+    app = create_operator_app(
+        OperatorService(ROOT, tmp_path / "operator"),
+        OperatorAuth({"admin-token-000000000000000000000": "admin"}),
+        settings=OperatorApiSettings(fixture_mode=True, bearer_api_enabled=True),
+        tiered=tiered,
+        registered_auth=registered_auth,
+        conversation_store=ConversationStore(tmp_path / "conversations.sqlite3"),
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://127.0.0.1:8765",
+    ) as client:
+        headers = {"Authorization": "Bearer admin-token-000000000000000000000"}
+        session = await client.post("/api/v1/session", headers=headers)
+        assert session.status_code == 200
+        revoked = await client.post(
+            "/api/v1/admin/repository-grants/revoke",
+            headers={**headers, "X-CSRF-Token": session.json()["csrf_token"]},
+            json={"user_id": "plus-local", "repo_id": "campaign"},
+        )
+
+    assert revoked.status_code == 200
+    assert revoked.json() == {
+        "status": "REVOKED",
+        "user_id": "plus-local",
+        "repo_id": "campaign",
+        "revision": 2,
+    }
+    assert registered_auth.registry.by_user_id("plus-local") is None
+    with pytest.raises(RepositoryAuthorizationError):
+        tiered.sandboxes.authorizations.require_grant("plus-local", "campaign")
 
 
 @pytest.mark.anyio
