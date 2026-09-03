@@ -45,7 +45,7 @@ DOCUMENT_EXTENSIONS = frozenset(
     {".pdf", ".docx", ".md", ".markdown", ".txt", ".json", ".jsonl", ".log"}
 )
 ENGINEERING_EXTENSIONS = frozenset(
-    {".py", ".pyi", ".v", ".vh", ".sv", ".svh"}
+    {".py", ".pyi", ".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx", ".ipp", ".v", ".vh", ".sv", ".svh"}
 )
 EXTENSIONLESS_BASENAMES = frozenset({"Makefile", "Dockerfile", "CMakeLists.txt"})
 IGNORED_COMPONENTS = frozenset(
@@ -69,6 +69,12 @@ _TEXT_MIME = frozenset(
         "text/plain",
         "text/markdown",
         "text/x-python",
+        "text/x-c",
+        "text/x-csrc",
+        "text/x-chdr",
+        "text/x-c++",
+        "text/x-c++src",
+        "text/x-c++hdr",
         "text/x-verilog",
         "text/x-systemverilog",
         "application/json",
@@ -139,6 +145,15 @@ class PersonalCorpusPolicy:
         value["source_support"] = {
             ".py": "Python Agent and retrieval",
             ".pyi": "Python reference and retrieval",
+            ".c": "C reference and retrieval",
+            ".h": "C/C++ reference and retrieval",
+            ".cc": "C++ reference and retrieval",
+            ".cpp": "C++ reference and retrieval",
+            ".cxx": "C++ reference and retrieval",
+            ".hh": "C++ reference and retrieval",
+            ".hpp": "C++ reference and retrieval",
+            ".hxx": "C++ reference and retrieval",
+            ".ipp": "C++ reference and retrieval",
             ".v": "Verilog/SystemVerilog Agent and retrieval",
             ".vh": "Verilog/SystemVerilog reference and retrieval",
             ".sv": "SystemVerilog Agent and retrieval",
@@ -216,6 +231,10 @@ def _support_label(path: str) -> str:
     suffix = PurePosixPath(path).suffix.lower()
     if suffix in {".py", ".pyi"}:
         return "python_reference"
+    if suffix == ".c":
+        return "c_reference"
+    if suffix in {".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx", ".ipp"}:
+        return "cpp_reference"
     if suffix in {".v", ".vh", ".sv", ".svh"}:
         return "systemverilog_reference"
     return "retrieval_only"

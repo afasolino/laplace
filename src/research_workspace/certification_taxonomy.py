@@ -44,7 +44,9 @@ tests/test_client_bridge.py tests/test_client_service.py tests/test_context_plan
 tests/test_corrective_c1_results.py tests/test_corrective_c2_scheduler.py tests/test_corrective_c3_aci.py
 tests/test_corrective_c5_parser_contract.py tests/test_corrective_c6_hooks.py tests/test_corrective_c7_adapter.py
 tests/test_corrective_c9_release_surface.py tests/test_dual_model_ablation.py tests/test_engineering.py
-tests/test_evaluation_v7.py tests/test_execution_records.py tests/test_governance_v7.py
+tests/test_evaluation_v7.py tests/test_execution_records.py
+tests/test_final_evaluation_corpus_languages.py tests/test_final_evaluation_path_discovery.py
+tests/test_governance_v7.py
 tests/test_gpu_coordination_v8.py tests/test_hermes_externalization_v35.py tests/test_hooks_g9.py
 tests/test_idle_consolidation_g10.py tests/test_laplace.py tests/test_laplace_chat_entrypoint.py
 tests/test_laplace_core_g1.py tests/test_laplace_web_v3.py tests/test_live_gpu_preflight_v8.py

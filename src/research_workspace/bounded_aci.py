@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import fnmatch
 import hashlib
 import json
 import os
@@ -31,6 +32,7 @@ from .agent_infrastructure.process import stop_process_tree
 JsonObject: TypeAlias = dict[str, object]
 ACIPathOperation = Literal[
     "repo_map",
+    "find_paths",
     "find_symbol",
     "find_references",
     "search_text",
@@ -53,6 +55,8 @@ _MAX_FILE_BYTES = 2_000_000
 _MAX_READ_LINES = 400
 _MAX_READ_CHARS = 32_000
 _MAX_SEARCH_MATCHES = 80
+_MAX_PATH_MATCHES = 256
+_MAX_GIT_PATH_BYTES = 4 * 1024 * 1024
 _MAX_SEARCH_FILE_BYTES = 1_000_000
 _MAX_DIFF_BYTES = 64_000
 _MAX_RESULT_CHARS = 64_000
@@ -213,6 +217,73 @@ class BoundedRepositoryACI:
                 raise
             raise BoundedACIError("aci_repo_map_failed") from exc
         return self._envelope(value.to_json())
+
+    def find_paths(
+        self,
+        *,
+        query: str = "",
+        glob: str = "*",
+        limit: int = 80,
+    ) -> JsonObject:
+        """Discover tracked repository paths, including docs, configs and dotfiles."""
+
+        needle = _text(
+            query,
+            label="path_query",
+            maximum=512,
+            allow_empty=True,
+        ).casefold()
+        pattern = _text(glob, label="path_glob", maximum=200)
+        if ".." in Path(pattern).parts:
+            raise BoundedACIError("aci_path_glob_invalid")
+        bounded_limit = _integer(
+            limit,
+            label="path_limit",
+            minimum=1,
+            maximum=_MAX_PATH_MATCHES,
+        )
+
+        returncode, raw, total = self._run_git_capture(
+            ("ls-files", "-z"),
+            max_bytes=_MAX_GIT_PATH_BYTES,
+        )
+        if returncode != 0:
+            raise BoundedACIError("aci_tracked_paths_unavailable")
+        if total > _MAX_GIT_PATH_BYTES:
+            raise BoundedACIError(
+                "aci_tracked_paths_too_large",
+                {"max_bytes": _MAX_GIT_PATH_BYTES},
+            )
+        try:
+            decoded = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise BoundedACIError("aci_tracked_paths_invalid_utf8") from exc
+
+        values: list[str] = []
+        for item in decoded.split("\x00"):
+            if not item:
+                continue
+            normalized = item.replace("\\", "/")
+            if normalized == ".git" or normalized.startswith(".git/"):
+                continue
+            if not fnmatch.fnmatchcase(normalized, pattern):
+                continue
+            if needle and needle not in normalized.casefold():
+                continue
+            values.append(normalized)
+
+        values = sorted(dict.fromkeys(values))
+        truncated = len(values) > bounded_limit
+        return self._envelope(
+            {
+                "query": query,
+                "glob": pattern,
+                "paths": values[:bounded_limit],
+                "tracked_only": True,
+                "truncated": truncated,
+                "total_matches": len(values),
+            }
+        )
 
     def find_symbol(self, name: str) -> JsonObject:
         query = _text(name, label="symbol_query", maximum=256)

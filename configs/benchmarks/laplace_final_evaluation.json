@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "laplace-final-evaluation-v1",
+  "codex_model": "gpt-5.6-luna",
+  "codex_reasoning": "high",
+  "arms": [
+    "luna_only",
+    "luna_plus_laplace_no_corpus",
+    "luna_plus_laplace_qualified_corpus"
+  ],
+  "rules": {
+    "same_prompt_per_arm": true,
+    "fresh_session_per_run": true,
+    "fresh_worktree_per_run": true,
+    "hidden_acceptance_tests": true,
+    "benchmark_solution_leakage_forbidden": true,
+    "corpus_snapshot_frozen_before_runs": true,
+    "external_benchmark_answer_material_forbidden_in_corpus": true,
+    "pass_rate_is_primary": true,
+    "token_saving_only_counted_for_passing_pairs": true
+  },
+  "internal_matrix": [
+    {"domain": "python", "target_tasks": 5, "difficulty": ["M2", "M3"]},
+    {"domain": "c_cpp", "target_tasks": 5, "difficulty": ["M2", "M3"]},
+    {"domain": "systemverilog", "target_tasks": 5, "difficulty": ["M2", "M3"]},
+    {"domain": "testbench", "target_tasks": 4, "difficulty": ["M2", "M3"]},
+    {"domain": "mixed_rtl_software", "target_tasks": 3, "difficulty": ["M3"]},
+    {"domain": "repository_research", "target_tasks": 3, "difficulty": ["M2", "M3"]},
+    {"domain": "corpus_retrieval", "target_tasks": 5, "difficulty": ["M2", "M3"]},
+    {"domain": "long_horizon", "target_tasks": 2, "difficulty": ["M4"]}
+  ],
+  "capstones": [
+    {"id": "pacman", "difficulty": "M4", "hidden_verification_required": true},
+    {"id": "rtl_subsystem", "difficulty": "M4", "hidden_verification_required": true}
+  ],
+  "external_suites": [
+    "SWE-bench Verified",
+    "SWE-bench Multilingual",
+    "Multi-SWE-bench",
+    "SWE-bench Pro",
+    "Terminal-Bench",
+    "TuRTLe",
+    "RTLLM"
+  ]
+}

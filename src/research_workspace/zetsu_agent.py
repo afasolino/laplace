@@ -83,6 +83,7 @@ _DEFAULT_STANDALONE_MAX_COMMANDS = 100
 _EXPLORATION_ACTIONS = frozenset(
     {
         "repo_map",
+        "find_paths",
         "find_symbol",
         "find_references",
         "search_text",
@@ -199,6 +200,7 @@ class ZetsuAgentCoordinator:
             "You are the bounded local Qwen repository agent subordinate to Codex. Return exactly "
             "one JSON object selecting one action. Allowed actions: "
             '{"action":"repo_map","query":"literal","token_budget":1000}; '
+            '{"action":"find_paths","query":"literal","glob":"*","limit":80}; '
             '{"action":"find_symbol","name":"Symbol"}; '
             '{"action":"find_references","name":"Symbol"}; '
             '{"action":"search_text","query":"literal","glob":"*.py"}; '
@@ -219,6 +221,9 @@ class ZetsuAgentCoordinator:
             'verification contract is bound; '
             '{"action":"finish","result":"concise verified result"}. '
             "Batch related reads and known edits. Inspect only enough to edit once. When a caller "
+            "asks for repository files, docs, configs, skills, tests, build files, or dotfiles, "
+            "prefer find_paths before repeating extension-specific searches. RepoMap is structural "
+            "and intentionally not a complete inventory of non-code assets. When a caller "
             "verification plan is present in exact_state, request verify without reconstructing "
             "its commands; the coordinator executes that exact bound plan. Stop immediately when "
             "it passes with no unresolved failure. "
@@ -2712,7 +2717,7 @@ class ZetsuAgentCoordinator:
 
                 self._consume_tool_budget(ctx, state)
                 progress_details = self._action_progress_details(action)
-                if action_name in {"repo_map", "find_symbol", "find_references", "read_region", "read", "inspect_diff", "git_state"}:
+                if action_name in {"repo_map", "find_paths", "find_symbol", "find_references", "read_region", "read", "inspect_diff", "git_state"}:
                     self._progress(ctx, "REPOSITORY_READ_STARTED", progress_details)
                 elif action_name in {"search_text", "search"}:
                     self._progress(ctx, "REPOSITORY_SEARCH_STARTED", progress_details)
@@ -2722,6 +2727,7 @@ class ZetsuAgentCoordinator:
                     self._progress(ctx, "TOOL_STARTED", progress_details)
                 if action_name in {
                     "repo_map",
+                    "find_paths",
                     "find_symbol",
                     "find_references",
                     "search_text",
@@ -2741,6 +2747,12 @@ class ZetsuAgentCoordinator:
                                 query=cast(str, action.get("query", "")),
                                 focus_paths=tuple(cast(str, item) for item in focus),
                                 token_budget=cast(int, action.get("token_budget", 1_000)),
+                            )
+                        elif action_name == "find_paths":
+                            result = aci.find_paths(
+                                query=cast(str, action.get("query", "")),
+                                glob=cast(str, action.get("glob", "*")),
+                                limit=cast(int, action.get("limit", 80)),
                             )
                         elif action_name == "find_symbol":
                             result = aci.find_symbol(cast(str, action.get("name")))
