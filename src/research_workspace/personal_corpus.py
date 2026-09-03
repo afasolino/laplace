@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import io
 import json
+import math
 import mimetypes
 import multiprocessing
 import os
@@ -408,6 +409,19 @@ def _extract_worker(
 ) -> None:
     try:
         if resource is not None:
+            # The worker imports this module before the target function starts. A
+            # fixed address-space ceiling can therefore be below the interpreter's
+            # already-mapped virtual memory on otherwise small, valid text files.
+            # Preserve a bounded allowance while accounting for that process-local
+            # baseline (not physical model/GPU memory).
+            baseline = 0
+            try:
+                page_size = os.sysconf("SC_PAGE_SIZE")
+                resident_pages = int(Path("/proc/self/statm").read_text().split()[0])
+                baseline = resident_pages * page_size
+            except (FileNotFoundError, OSError, ValueError, IndexError):
+                pass
+            memory_limit_bytes = baseline + max(memory_limit_bytes, 512 * 1024 * 1024)
             resource.setrlimit(
                 resource.RLIMIT_AS,
                 (memory_limit_bytes, memory_limit_bytes),
@@ -1276,6 +1290,27 @@ class PersonalCorpusStore:
                 staging = self._staging_directory(
                     owner_user_id, corpus_id, upload_id, existing=True
                 ) / str(row["staging_name"])
+                if not staging.exists():
+                    # A crash can occur after promotion and source insertion but
+                    # before the upload session is marked INDEXED. In that case
+                    # the quarantine file has intentionally moved to sources/;
+                    # recognize the durable content hash and resume idempotently.
+                    with self._connect() as connection:
+                        already_promoted = connection.execute(
+                            """
+                            SELECT source_id FROM sources
+                            WHERE owner_user_id=? AND corpus_id=?
+                              AND content_sha256=? AND state != 'DELETED'
+                            """,
+                            (owner_user_id, corpus_id, str(row["content_sha256"])),
+                        ).fetchone()
+                    if already_promoted is not None:
+                        deduplicated += 1
+                        continue
+                    raise CorpusError(
+                        "staged_source_missing",
+                        {"logical_path": str(row["logical_path"])},
+                    )
                 content = staging.read_bytes()
                 extracted = _extract_bounded(
                     str(row["logical_path"]), content, self.policy
@@ -1697,10 +1732,18 @@ class PersonalCorpusStore:
         )
         with self._connect() as connection:
             rows = connection.execute(sql, parameters).fetchall()
-        scored: list[tuple[int, sqlite3.Row]] = []
+        document_frequency = {
+            term: sum(term in str(row["text"]).lower() for row in rows)
+            for term in terms
+        }
+        scored: list[tuple[float, sqlite3.Row]] = []
         for row in rows:
             lowered = str(row["text"]).lower()
-            score = sum(lowered.count(term) for term in terms)
+            score = sum(
+                lowered.count(term)
+                * (math.log((len(rows) + 1) / (document_frequency[term] + 1)) + 1.0)
+                for term in terms
+            )
             if score:
                 scored.append((score, row))
         scored.sort(

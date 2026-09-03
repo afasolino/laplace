@@ -66,6 +66,7 @@ def main() -> int:
         rows.append(
             {
                 "id": case_id,
+                "query": query,
                 "expected_sources": sorted(expected_set),
                 "found_sources": found,
                 "recall_at_k": recall,
