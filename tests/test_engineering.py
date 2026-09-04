@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -635,4 +637,178 @@ def test_cuda_probe_uses_explicit_runtime_python(
     assert command[0] == str(probe_python)
     assert evidence["status"] == "CUDA_A6000_VERIFIED"
     assert evidence["probe_python"] == str(probe_python)
+
+def test_local_tool_runner_adds_configured_eda_runtime_libraries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eda_root = tmp_path / "eda"
+    (eda_root / "lib").mkdir(parents=True)
+    target_lib = eda_root / "x86_64-conda-linux-gnu" / "lib"
+    target_lib.mkdir(parents=True)
+
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    probe = repository / "probe.py"
+    probe.write_text(
+        "import os\n"
+        "print(os.environ.get('LD_LIBRARY_PATH', ''))\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("LAPLACE_EDA_TOOL_ROOT", str(eda_root))
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+
+    runner = LocalToolRunner(
+        repository,
+        log_root=tmp_path / "logs",
+    )
+    result = runner.run(
+        "verilator",
+        [sys.executable, str(probe)],
+    )
+
+    assert result.status == "PASS"
+
+    values = result.stdout.strip().split(os.pathsep)
+    assert values == [
+        str(eda_root / "lib"),
+        str(target_lib),
+    ]
+
+def test_verilator_simulation_availability_rejects_stale_build_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eda_root = tmp_path / "eda"
+    bin_root = eda_root / "bin"
+    include_root = eda_root / "share" / "verilator" / "include"
+    bin_root.mkdir(parents=True)
+    include_root.mkdir(parents=True)
+
+    verilator = bin_root / "verilator"
+    verilator.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    verilator.chmod(0o755)
+
+    stale = tmp_path / "missing" / "tool"
+    (include_root / "verilated.mk").write_text(
+        f"AR = {stale}-ar\n"
+        f"CXX = {stale}-c++\n"
+        f"LINK = {stale}-c++\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("LAPLACE_EDA_TOOL_ROOT", str(eda_root))
+    monkeypatch.setattr(
+        "research_workspace.engineering.subprocess.run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="Verilator 5.032 2025-01-01\n",
+            stderr="",
+        ),
+    )
+
+    assert verilator_simulation_available() is False
+
+
+def test_verilator_simulation_availability_accepts_valid_build_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eda_root = tmp_path / "eda"
+    bin_root = eda_root / "bin"
+    include_root = eda_root / "share" / "verilator" / "include"
+    bin_root.mkdir(parents=True)
+    include_root.mkdir(parents=True)
+
+    verilator = bin_root / "verilator"
+    verilator.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    verilator.chmod(0o755)
+
+    ar = bin_root / "ar"
+    cxx = bin_root / "c++"
+    for executable in (ar, cxx):
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+
+    (include_root / "verilated.mk").write_text(
+        f"AR = {ar}\n"
+        f"CXX = {cxx}\n"
+        f"LINK = {cxx}\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("LAPLACE_EDA_TOOL_ROOT", str(eda_root))
+    monkeypatch.setattr(
+        "research_workspace.engineering.subprocess.run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="Verilator 5.032 2025-01-01\n",
+            stderr="",
+        ),
+    )
+
+    assert verilator_simulation_available() is True
+
+def test_verilator_simulation_availability_checks_automatic_tool_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repo"
+    fake_venv = repository / ".venv"
+    eda_root = repository / ".tools" / "multilanguage"
+    bin_root = eda_root / "bin"
+    include_root = eda_root / "share" / "verilator" / "include"
+
+    fake_venv.mkdir(parents=True)
+    bin_root.mkdir(parents=True)
+    include_root.mkdir(parents=True)
+
+    verilator = bin_root / "verilator"
+    verilator.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    verilator.chmod(0o755)
+
+    stale = tmp_path / "missing" / "compiler"
+    makefile = include_root / "verilated.mk"
+    makefile.write_text(
+        f"AR = {stale}-ar\n"
+        f"CXX = {stale}-c++\n"
+        f"LINK = {stale}-c++\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("LAPLACE_EDA_TOOL_ROOT", raising=False)
+    monkeypatch.setattr(
+        "research_workspace.engineering.sys.prefix",
+        str(fake_venv),
+    )
+    monkeypatch.setattr(
+        "research_workspace.engineering.subprocess.run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="Verilator 5.032 2025-01-01\n",
+            stderr="",
+        ),
+    )
+
+    assert verilator_simulation_available() is False
+
+    ar = bin_root / "x86_64-conda-linux-gnu-ar"
+    cxx = bin_root / "x86_64-conda-linux-gnu-c++"
+    for executable in (ar, cxx):
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+
+    makefile.write_text(
+        f"AR = {ar}\n"
+        f"CXX = {cxx}\n"
+        f"LINK = {cxx}\n",
+        encoding="utf-8",
+    )
+
+    assert verilator_simulation_available() is True
 

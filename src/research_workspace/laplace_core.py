@@ -312,6 +312,7 @@ class LaplaceCore:
         task_complexity: TaskComplexity | None = None,
         task_label: str | None = None,
         allow_mutation: bool = True,
+        agent_backend: str | None = None,
     ) -> JsonObject:
         """Run the bounded repository agent, optionally through one manager plan."""
 
@@ -340,6 +341,7 @@ class LaplaceCore:
                 wait_timeout_seconds=wait_timeout_seconds,
                 task_label=task_label,
                 allow_mutation=allow_mutation,
+                agent_backend=agent_backend,
             )
         else:
             result = worker.run(
@@ -360,6 +362,7 @@ class LaplaceCore:
                 wait_timeout_seconds=wait_timeout_seconds,
                 task_label=task_label,
                 allow_mutation=allow_mutation,
+                agent_backend=agent_backend,
             )
         return admission.annotate(result)
 

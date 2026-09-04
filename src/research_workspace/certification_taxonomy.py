@@ -77,10 +77,18 @@ tests/test_zetsu_hotfix_lifecycle.py tests/test_zetsu_mcp.py tests/test_zetsu_pr
 tests/test_zetsu_runtime.py tests/test_zetsu_runtime_codex_compat_v31.py tests/test_zetsu_sdk_stdio_v3.py
 tests/test_zetsu_sdk_stdio_v32.py tests/test_zetsu_token_benchmark.py
 tests/test_zetsu_token_offload_repairs.py
+tests/test_prime_agent_gate.py tests/test_prime_agent_public_contract.py
+tests/test_prime_agent_zetsu_backend.py
 """.split()
 }
 
+MODULE_CATEGORIES = {
+    **MODULE_CATEGORIES,
+    "tests/test_prime_agent_harness.py": LINUX_POSIX_REQUIRED,
+}
+
 NODEID_CATEGORIES: Mapping[str, str] = {
+    "tests/test_prime_agent_gate.py::test_advisory_gate_rejects_symlink_escape": WINDOWS_PRIVILEGE_REQUIRED,
     "tests/test_ast_context_v3.py::test_ast_context_refuses_escape_and_symlink": WINDOWS_PRIVILEGE_REQUIRED,
     "tests/test_ast_context_v3.py::test_real_grep_ast_provider_renders_python_scope": WINDOWS_PRIVILEGE_REQUIRED,
     "tests/test_ast_context_v32.py::test_real_grep_ast_go_and_no_match": WINDOWS_PRIVILEGE_REQUIRED,

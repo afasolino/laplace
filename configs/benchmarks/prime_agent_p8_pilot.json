@@ -1,0 +1,58 @@
+{
+  "schema_version": 2,
+  "benchmark_id": "prime-agent-p8-integration-v2",
+  "purpose": "Qualify Prime Agent v0.9.1 as an optional Zetsu agent_task execution harness over Laplace's selected local Qwen3.8-27B P8 service while retaining Laplace repository authorization, candidate assurance, authoritative verification, evidence, and promotion.",
+  "laplace_base_revision": "b026fed7ca4e4385b4db701680a6fc3e55e1e260",
+  "prime_agent": {
+    "release": "v0.9.1",
+    "release_commit": "81ae3cb34d27d38ee37f9e205a1e73694993b344",
+    "required_version": "0.9.1",
+    "mode": "json",
+    "global_config_mutation_allowed": false,
+    "rlm_max_depth": 1,
+    "auto_refine_enabled": false,
+    "telemetry_enabled": false
+  },
+  "local_model": {
+    "profile_source": "configs/selected_serving_profiles.json#routes.quality",
+    "required_profile_id": "P8_qwen38_w4a16_mtp",
+    "required_model_id": "laplace-quality-qwen38-mtp8",
+    "required_loopback_endpoint": true,
+    "provider_api": "openai-completions",
+    "thinking_format": "qwen-chat-template"
+  },
+  "production_boundary": {
+    "prime_role": "execution harness inside an already-authorized Laplace worktree",
+    "laplace_remains_authoritative_for": [
+      "repository grants",
+      "worktree creation",
+      "candidate observation",
+      "verification binding",
+      "result persistence",
+      "promotion"
+    ],
+    "native_fallback_on_prime_failure": false,
+    "inner_prime_zetsu_agent_task_enabled": false,
+    "bubblewrap_required": true,
+    "network_namespace": "shared host network for loopback P8; not a network sandbox"
+  },
+  "gates": [
+    {
+      "id": "local_p8_repository_repair",
+      "requirement": "Prime uses the local P8 model to inspect, edit, and pass pytest in a disposable repository fixture."
+    },
+    {
+      "id": "local_p8_recursive_subagent",
+      "requirement": "The local P8 parent executes one RLM child, durable child usage is observed, and the repository repair passes independent pytest."
+    },
+    {
+      "id": "prime_to_zetsu_mcp",
+      "requirement": "Prime's persistent Python kernel discovers Zetsu over MCP and successfully calls an enabled read-only/context tool."
+    },
+    {
+      "id": "zetsu_agent_task_prime_backend",
+      "requirement": "The public Zetsu agent_task contract selects agent_backend=prime, runs Prime/P8 inside the authorized worktree, passes Laplace authoritative verification, promotes the patch to a disposable canonical repository, and passes independent pytest."
+    }
+  ],
+  "promotion_rule": "Do not make Prime the default backend until all four live gates, focused tests, Ruff, mypy, and the full hardware-independent pytest suite pass. Native remains the default and A/B control."
+}

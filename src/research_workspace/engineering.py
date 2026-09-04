@@ -1154,7 +1154,75 @@ def verilator_simulation_available() -> bool:
     except (OSError, subprocess.TimeoutExpired):
         return False
     match = re.search(r"\bVerilator\s+(\d+)(?:\.|\b)", completed.stdout)
-    return completed.returncode == 0 and match is not None and int(match.group(1)) >= 5
+    if (
+        completed.returncode != 0
+        or match is None
+        or int(match.group(1)) < 5
+    ):
+        return False
+
+    configured_root = os.getenv("LAPLACE_EDA_TOOL_ROOT")
+    selected_root: Path | None = None
+
+    if configured_root:
+        root = Path(configured_root).expanduser()
+        if not root.is_absolute():
+            return False
+        selected_root = root
+    else:
+        automatic_root = (
+            Path(sys.prefix).resolve().parent
+            / ".tools"
+            / "multilanguage"
+        )
+        automatic_verilator = automatic_root / "bin" / "verilator"
+        if (
+            automatic_verilator.is_file()
+            and os.access(automatic_verilator, os.X_OK)
+        ):
+            try:
+                if (
+                    Path(executable).resolve()
+                    == automatic_verilator.resolve()
+                ):
+                    selected_root = automatic_root
+            except OSError:
+                return False
+
+    if selected_root is None:
+        return True
+
+    makefile = (
+        selected_root
+        / "share"
+        / "verilator"
+        / "include"
+        / "verilated.mk"
+    )
+    if not makefile.is_file():
+        return False
+
+    try:
+        contents = makefile.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+    for variable in ("AR", "CXX", "LINK"):
+        match = re.search(
+            rf"^{variable}\s*=\s*(\S+)\s*$",
+            contents,
+            flags=re.MULTILINE,
+        )
+        if match is None:
+            return False
+        executable_path = Path(match.group(1)).expanduser()
+        if executable_path.is_absolute() and (
+            not executable_path.is_file()
+            or not os.access(executable_path, os.X_OK)
+        ):
+            return False
+
+    return True
 
 
 class LocalToolRunner:
@@ -1206,6 +1274,42 @@ class LocalToolRunner:
             raise ToolExecutionError("Tool timeout must be between 1 and 1800 seconds")
         started = time.monotonic()
         environment = os.environ.copy()
+
+        if tool in {
+            "verilator",
+            "verilator_simulation",
+            "iverilog",
+            "vvp",
+            "yosys",
+        }:
+            configured_root = os.getenv("LAPLACE_EDA_TOOL_ROOT")
+            if configured_root:
+                eda_root = Path(configured_root).expanduser()
+                if not eda_root.is_absolute():
+                    raise ToolExecutionError(
+                        "LAPLACE_EDA_TOOL_ROOT must be absolute"
+                    )
+
+                runtime_paths = [
+                    candidate
+                    for candidate in (
+                        eda_root / "lib",
+                        eda_root / "x86_64-conda-linux-gnu" / "lib",
+                    )
+                    if candidate.is_dir()
+                ]
+
+                if runtime_paths:
+                    existing = environment.get("LD_LIBRARY_PATH")
+                    rendered = os.pathsep.join(
+                        str(candidate) for candidate in runtime_paths
+                    )
+                    environment["LD_LIBRARY_PATH"] = (
+                        f"{rendered}{os.pathsep}{existing}"
+                        if existing
+                        else rendered
+                    )
+
         for key in tuple(environment):
             if (
                 key.startswith("LAPLACE_ABLATION_")

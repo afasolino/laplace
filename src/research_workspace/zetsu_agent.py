@@ -32,6 +32,14 @@ from .bounded_aci import BoundedACIError, BoundedRepositoryACI
 from .candidate_assurance import VerificationBinding
 from .context_planner import DEFAULT_COMPACTION_RATIO, ContextPlanner, ContextPlannerError
 from .personal_corpus import CorpusError, PersonalCorpusStore
+from .prime_agent_harness import (
+    PrimeAgentHarnessError,
+    profile_from_route,
+    repository_agent_backend,
+    resolve_prime_agent_executable,
+    resolve_prime_kernel_python,
+    run_prime_agent,
+)
 from .repository_authorization import RepositoryAuthorizationError, validate_workspace_path
 from .service_tiers import ModelLane, ServiceTierError, TieredServingService
 from .task_labels import derive_task_label
@@ -2167,6 +2175,7 @@ class ZetsuAgentCoordinator:
         restart_objective: bool = False,
         task_label: str | None = None,
         allow_mutation: bool = True,
+        agent_backend: str | None = None,
     ) -> JsonObject:
         self._validate_run_request(
             instruction=instruction,
@@ -2222,6 +2231,7 @@ class ZetsuAgentCoordinator:
                 restart_objective=restart_objective,
                 task_label=task_label,
                 allow_mutation=allow_mutation,
+                agent_backend=agent_backend,
             )
             if admission is not None and self.scheduler is not None:
                 terminal = "SUCCEEDED" if result.get("status") == "SUCCESS" else "FAILED"
@@ -2314,6 +2324,7 @@ class ZetsuAgentCoordinator:
             restart_objective=True,
             task_label=task_label,
             allow_mutation=allow_mutation,
+            agent_backend="native",
         )
 
     def result_page(
@@ -2401,6 +2412,152 @@ class ZetsuAgentCoordinator:
         except AgentSchedulerError as exc:
             raise ServiceTierError(exc.category, exc.evidence) from exc
 
+    def _run_prime_harness(
+        self,
+        ctx: AgentRunContext,
+        state: AgentExecutionState,
+        *,
+        instruction: str,
+        max_steps: int,
+    ) -> tuple[str, JsonObject]:
+        """Run Prime in the existing authorized worktree, then verify in Laplace."""
+
+        route = self.tiered.lane_policy.routes[ctx.lane]
+        prime_state = (
+            self.tiered.sandboxes.sandbox_root / "prime_agent" / ctx.session_id
+        ).resolve()
+        fixed_environment = AgentSandboxManager.fixed_environment(ctx.binding)
+        canonical_runtime = (
+            Path(ctx.binding.canonical_repository_root).resolve() / ".runtime"
+        )
+        hidden_state = self.tiered.sandboxes.sandbox_root.parent.resolve()
+        mutation_guidance = (
+            "Implement the requested repository changes. Do not commit and do not modify .git."
+            if ctx.allow_mutation
+            else "This is read-only work. Do not modify any repository file."
+        )
+        prompt = (
+            "You are the local implementation worker subordinate to the caller. "
+            "Work only in the mounted repository workspace. Use Prime's persistent IPython "
+            "environment for repository inspection, edits, and tests; do not use external "
+            "network resources. You may use at most one RLM child when it materially helps. "
+            f"{mutation_guidance}\n\nTASK:\n{instruction}"
+        )
+        try:
+            result = run_prime_agent(
+                executable=resolve_prime_agent_executable(),
+                kernel_python=resolve_prime_kernel_python(),
+                profile=profile_from_route(route),
+                state_root=prime_state,
+                workspace=ctx.worktree,
+                prompt=prompt,
+                timeout_seconds=min(1_800.0, self._remaining_wall(ctx, state)),
+                verification_plan=ctx.required_verification_plan,
+                verification_environment=fixed_environment,
+                environment=fixed_environment,
+                autonomous_max_turns=max_steps,
+                require_bwrap=True,
+                hide_paths=(canonical_runtime, hidden_state),
+                poll_guard=lambda: self._ensure_active(ctx, state),
+            )
+        except PrimeAgentHarnessError as exc:
+            raw_category = str(exc)
+            category = (
+                raw_category
+                if raw_category.startswith("prime_agent_")
+                and len(raw_category) <= 128
+                and raw_category.replace("_", "").isalnum()
+                else "prime_agent_backend_failed"
+            )
+            raise ServiceTierError(category) from exc
+
+        if result.returncode != 0:
+            raise ServiceTierError(
+                "prime_agent_backend_nonzero",
+                {"returncode": result.returncode, "stderr_tail": result.stderr[-2_000:]},
+            )
+        if not result.final_text.strip():
+            raise ServiceTierError("prime_agent_backend_missing_final")
+        unexpected_tools = sorted(
+            {item.tool_name for item in result.tool_executions if item.tool_name != "ipython"}
+        )
+        if unexpected_tools:
+            raise ServiceTierError(
+                "prime_agent_backend_unexpected_tool",
+                {"tools": unexpected_tools},
+            )
+        if not result.successful_ipython_cells:
+            raise ServiceTierError("prime_agent_backend_no_successful_ipython")
+        if state.command_count + result.ipython_call_count > ctx.binding.tool_policy.max_commands:
+            raise ServiceTierError("zetsu_agent_command_budget_exhausted")
+
+        state.command_count += result.ipython_call_count
+        state.telemetry.tool_calls += result.ipython_call_count
+        assistant_calls = result.assistant_message_count
+        state.telemetry.qwen_calls += assistant_calls
+        state.telemetry.qwen_usage_reported_calls += result.usage_call_count
+        state.telemetry.agent_steps += assistant_calls
+        usage = result.usage
+        input_tokens = usage.get("input")
+        output_tokens = usage.get("output")
+        cached_tokens = usage.get("cacheRead")
+        if isinstance(input_tokens, int) and not isinstance(input_tokens, bool):
+            state.telemetry.qwen_input_tokens += input_tokens
+        if isinstance(output_tokens, int) and not isinstance(output_tokens, bool):
+            state.telemetry.qwen_output_tokens += output_tokens
+        if isinstance(cached_tokens, int) and not isinstance(cached_tokens, bool):
+            state.telemetry.qwen_cached_tokens += cached_tokens
+        state.step = min(
+            _MAX_TOTAL_AGENT_STEPS,
+            max(state.step, max(1, result.turn_count)),
+        )
+
+        head, status_sha256, changed = self._worktree_state(ctx.worktree)
+        state.worktree_head = head
+        state.worktree_status_sha256 = status_sha256
+        state.changed_paths = changed
+        self._sync_authoritative_assurance(ctx, state)
+        if changed and not ctx.allow_mutation:
+            raise ServiceTierError(
+                "prime_agent_backend_read_only_mutation",
+                {"changed_paths": changed},
+            )
+        if changed:
+            if ctx.required_verification_plan is None:
+                raise ServiceTierError("prime_agent_backend_mutation_requires_verifier")
+            self._consume_tool_budget(ctx, state)
+            verification = self._verify(ctx, state, {"action": "verify"})
+            if verification.get("passed") is not True or not self._finish_allowed(state):
+                raise ServiceTierError("prime_agent_authoritative_verification_failed")
+        elif ctx.apply_to_repository:
+            raise ServiceTierError("prime_agent_backend_apply_without_mutation")
+
+        evidence = result.evidence()
+        evidence["authoritative_verification"] = (
+            state.validation_history[-1] if state.validation_history else None
+        )
+        self.results.stage_stream(
+            ctx.session_id,
+            "prime-agent.events.jsonl",
+            io.BytesIO(result.stdout.encode("utf-8")),
+        )
+        self.results.stage_stream(
+            ctx.session_id,
+            "prime-agent.stderr.log",
+            io.BytesIO(result.stderr.encode("utf-8")),
+        )
+        state.recent_observations.append(
+            "PRIME_AGENT_EVIDENCE:"
+            + json.dumps(evidence, sort_keys=True, ensure_ascii=False)[-8_000:]
+        )
+        state.recent_observations = state.recent_observations[-_MAX_RECENT_OBSERVATIONS:]
+        try:
+            shutil.rmtree(prime_state)
+            evidence["runtime_state_cleanup"] = "REMOVED"
+        except OSError:
+            evidence["runtime_state_cleanup"] = "PRESERVED"
+        return result.final_text.strip(), evidence
+
     def _run_unlocked(
         self,
         *,
@@ -2420,6 +2577,7 @@ class ZetsuAgentCoordinator:
         restart_objective: bool = False,
         task_label: str | None = None,
         allow_mutation: bool = True,
+        agent_backend: str | None = None,
     ) -> JsonObject:
         self._validate_run_request(
             instruction=instruction,
@@ -2439,6 +2597,12 @@ class ZetsuAgentCoordinator:
 
         effective_session = session_id or f"zetsu-{uuid.uuid4().hex}"
         creating = session_id is None if creating is None else creating
+        try:
+            backend = repository_agent_backend(agent_backend)
+        except PrimeAgentHarnessError as exc:
+            raise ServiceTierError("prime_agent_backend_invalid") from exc
+        if backend == "prime" and (not creating or persistent_session or restart_objective):
+            raise ServiceTierError("prime_agent_backend_one_shot_only")
         effective_task_label = derive_task_label(task_label or instruction)
         digest = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
         if creating:
@@ -2606,12 +2770,27 @@ class ZetsuAgentCoordinator:
             else ""
         )
         failure_category: str | None = None
+        prime_agent_evidence: JsonObject | None = None
         try:
-            pending_steps = (
-                ()
-                if resume_verified_finish
-                else range(state.step + 1, _MAX_TOTAL_AGENT_STEPS + 1)
-            )
+            pending_steps: Sequence[int]
+            if backend == "prime" and not resume_verified_finish:
+                final_result, prime_agent_evidence = self._run_prime_harness(
+                    ctx,
+                    state,
+                    instruction=instruction,
+                    max_steps=max_steps,
+                )
+                status = "SUCCESS"
+                state.summary = final_result
+                state.next_state = "finished"
+                self._checkpoint(ctx, state)
+                pending_steps = ()
+            else:
+                pending_steps = (
+                    ()
+                    if resume_verified_finish
+                    else range(state.step + 1, _MAX_TOTAL_AGENT_STEPS + 1)
+                )
             for step in pending_steps:
                 if state.step > 0 and state.step % max_steps == 0:
                     self._ensure_active(ctx, state)
@@ -2984,6 +3163,8 @@ class ZetsuAgentCoordinator:
             "model_id": route.model_id,
             "effective_lane": lane.value,
             "task_label": ctx.task_label,
+            "repository_agent_backend": backend,
+            "prime_agent": prime_agent_evidence,
             "content": authoritative_content,
             "changed_paths": changed,
             "verification": state.validation_history[-1] if state.validation_history else None,

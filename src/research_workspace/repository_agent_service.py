@@ -29,6 +29,7 @@ class RepositoryAgentService(Protocol):
         wait_timeout_seconds: float,
         task_label: str | None = None,
         allow_mutation: bool = True,
+        agent_backend: str | None = None,
     ) -> JsonObject:
         """Run one bounded repository task through the selected adapter."""
         ...

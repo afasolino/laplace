@@ -1630,6 +1630,9 @@ def test_serving_preflight_validates_phase2_vllm_override(
             stderr="",
         ),
     )
+    # This test validates only the explicit vLLM executable override. Do not
+    # inherit an unrelated FFmpeg override from the invoking shell.
+    monkeypatch.delenv("LAPLACE_FFMPEG_LIBRARY_PATH", raising=False)
     monkeypatch.setenv("LAPLACE_VLLM_EXECUTABLE", str(executable))
     result = validate_serving_environments(CONFIG_PATH.parent, {"phase2_main"}, probe_cli=False)
     record = result["environments"][0]

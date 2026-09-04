@@ -76,11 +76,20 @@ def _integer(value: object, *, label: str, minimum: int, maximum: int) -> int:
 
 
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_REPOSITORY_ID_RE = _SESSION_ID_RE
 
 
 def _session_id(value: object) -> str:
     if not isinstance(value, str) or _SESSION_ID_RE.fullmatch(value) is None:
         raise ZetsuError("invalid_session_id")
+    return value
+
+
+def _repository_id(value: object) -> str:
+    """Accept only the logical server-registered repository identifier, never a path."""
+
+    if not isinstance(value, str) or _REPOSITORY_ID_RE.fullmatch(value) is None:
+        raise ZetsuError("invalid_repo_id")
     return value
 
 
@@ -244,7 +253,12 @@ def tool_definitions() -> tuple[JsonObject, ...]:
             "description": "Run an isolated verified Qwen repository task with optional promotion.",
             "inputSchema": _schema(
                 {
-                    "repo_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "repo_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+                    },
                     "session_id": {
                         "type": ["string", "null"],
                         "minLength": 1,
@@ -253,6 +267,7 @@ def tool_definitions() -> tuple[JsonObject, ...]:
                     },
                     "instruction": {"type": "string", "minLength": 1, "maxLength": 40_000},
                     "lane": {"type": "string", "enum": ["quality", "standard"]},
+                    "agent_backend": {"type": "string", "enum": ["native", "prime"]},
                     "max_steps": {"type": "integer", "minimum": 1, "maximum": 32},
                     "max_chars": budget,
                     "verification_argv": {
@@ -447,6 +462,7 @@ _TOOL_ARGUMENTS: Mapping[str, frozenset[str]] = {
             "session_id",
             "instruction",
             "lane",
+            "agent_backend",
             "max_steps",
             "max_chars",
             "verification_argv",
@@ -514,6 +530,8 @@ def _compact_agent_result(result: Mapping[str, object]) -> JsonObject:
         "repo_id": result.get("repo_id"),
         "model_id": result.get("model_id"),
         "effective_lane": result.get("effective_lane"),
+        "repository_agent_backend": result.get("repository_agent_backend"),
+        "prime_agent": result.get("prime_agent"),
         "result": short_result,
         "changed_paths": result.get("changed_paths"),
         "verification": _compact_verification(result.get("verification")),
@@ -605,10 +623,16 @@ class ZetsuService:
 
     def available_tools(self, user_id: str) -> tuple[JsonObject, ...]:
         capabilities = self.tiered.effective_capabilities(user_id)
+        lane_policy = getattr(self.tiered, "lane_policy", None)
+        codev_enabled = bool(getattr(lane_policy, "codev_enabled", True))
         return tuple(
             definition
             for definition in tool_definitions()
             if _TOOL_CAPABILITIES[str(definition["name"])] in capabilities
+            and (
+                str(definition["name"]) != "rtl_task"
+                or codev_enabled
+            )
         )
 
     def status(self, user_id: str) -> JsonObject:
@@ -778,8 +802,12 @@ class ZetsuService:
         if name == "agent_task":
             # Validate all non-effectful arguments before an agent can mutate its worktree.
             telemetry_requested = _telemetry_requested(args)
-            repo_id = _text(args.get("repo_id"), label="repo_id", maximum=128)
+            repo_id = _repository_id(args.get("repo_id"))
             instruction = _text(args.get("instruction"), label="instruction", maximum=40_000)
+            backend_value = args.get("agent_backend")
+            if backend_value is not None and backend_value not in {"native", "prime"}:
+                raise ZetsuError("invalid_agent_backend")
+            agent_backend = str(backend_value) if backend_value is not None else None
             session_value = args.get("session_id")
             if session_value is not None:
                 session_value = _session_id(session_value)
@@ -815,6 +843,7 @@ class ZetsuService:
                 verification_plan=verification_plan,
                 apply_to_repository=apply_to_repository,
                 allow_mutation=allow_mutation,
+                agent_backend=agent_backend,
                 wait_timeout_seconds=_integer(
                     args.get("wait_timeout_seconds", 1_800),
                     label="wait_timeout_seconds",
